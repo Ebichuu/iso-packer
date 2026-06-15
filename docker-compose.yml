@@ -24,14 +24,14 @@ services:
 
       # 【必改】监控目录 - CD2 挂载的 115 网盘下载目录
       # 格式：宿主机路径:容器内路径
-      - /mnt/cd2/115/PT下载:/watch
+      - /CloudNAS/username/PT下载:/watch
 
       # 【必改】临时输出目录 - ISO 封装临时存放
       - /tmp/iso-output:/output
 
       # 【必改】CD2 挂载根目录 - 用于转移文件
       # 重要：必须使用 :rslave 参数支持挂载传播
-      - /mnt/cd2:/cd2:rslave
+      - /CloudNAS:/cd2:rslave
 
     # 特权模式（可选，某些 CD2 挂载需要）
     # privileged: false

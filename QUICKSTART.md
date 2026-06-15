@@ -31,9 +31,9 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - ./data:/app
-      - /mnt/cd2/115/PT下载:/watch            # 修改为实际路径
-      - /tmp/iso-output:/output               # 修改为实际路径
-      - /mnt/cd2:/cd2:rslave                  # 修改为实际路径
+      - /CloudNAS/username/PT下载:/watch            # 修改为实际路径
+      - /tmp/iso-output:/output                     # 修改为实际路径
+      - /CloudNAS:/cd2:rslave                       # 修改为实际路径
 ```
 
 ### 步骤 3: 启动服务
@@ -87,9 +87,9 @@ docker run -d \
   --restart unless-stopped \
   -p 15865:15865 \
   -v $(pwd)/data:/app \
-  -v /mnt/cd2/115/PT下载:/watch \
+  -v /CloudNAS/username/PT下载:/watch \
   -v /tmp/iso-output:/output \
-  -v /mnt/cd2:/cd2:rslave \
+  -v /CloudNAS:/cd2:rslave \
   -e TZ=Asia/Shanghai \
   ebichuu/iso-packer:latest
 ```
@@ -113,7 +113,7 @@ docker run -d \
    ☑ 启用 CD2 转移
    
    CD2 挂载根目录: /cd2
-   CD2 目标目录: /cd2/115/ISO备份
+   CD2 目标目录: /cd2/username/ISO备份
    ```
 
 3. 点击 **保存设置**
@@ -181,7 +181,7 @@ docker exec -it iso-packer ls -la /cd2
 
 ```bash
 # 修改目录权限
-sudo chmod -R 755 /mnt/cd2
+sudo chmod -R 755 /CloudNAS
 sudo chown -R 1000:1000 ./data
 ```
 
@@ -193,8 +193,8 @@ sudo chown -R 1000:1000 ./data
 
 ```bash
 # CD2 挂载点
-/mnt/cd2/
-├── 115/
+/CloudNAS/
+├── username/
 │   ├── PT下载/              ← 监控目录 (只读)
 │   └── VPS_Transfer/
 │       └── ISO备份/         ← CD2 目标目录 (只写)
@@ -207,9 +207,9 @@ sudo chown -R 1000:1000 ./data
 
 ```yaml
 volumes:
-  - /mnt/cd2/115/PT下载:/watch
+  - /CloudNAS/username/PT下载:/watch
   - /tmp/iso-output:/output
-  - /mnt/cd2:/cd2:rslave
+  - /CloudNAS:/cd2:rslave
 ```
 
 ### Web 界面配置：
@@ -218,7 +218,7 @@ volumes:
 监控目录: /watch
 输出目录: /output
 CD2 挂载根目录: /cd2
-CD2 目标目录: /cd2/115/VPS_Transfer/ISO备份
+CD2 目标目录: /cd2/username/VPS_Transfer/ISO备份
 ```
 
 ---

@@ -58,9 +58,9 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - ./data:/app
-      - /mnt/cd2/115/PT下载:/watch           # 修改为实际路径
-      - /tmp/iso-output:/output              # 修改为实际路径
-      - /mnt/cd2:/cd2:rslave                 # 修改为实际路径
+      - /CloudNAS/username/PT下载:/watch           # 修改为实际路径
+      - /tmp/iso-output:/output                    # 修改为实际路径
+      - /CloudNAS:/cd2:rslave                      # 修改为实际路径
 ```
 
 2. **启动服务**
@@ -102,9 +102,9 @@ docker run -d \
   --restart unless-stopped \
   -p 15865:15865 \
   -v ./data:/app \
-  -v /mnt/cd2/115/PT下载:/watch \
+  -v /CloudNAS/username/PT下载:/watch \
   -v /tmp/iso-output:/output \
-  -v /mnt/cd2:/cd2:rslave \
+  -v /CloudNAS:/cd2:rslave \
   -e TZ=Asia/Shanghai \
   ebichuu/iso-packer:latest
 ```
@@ -132,7 +132,7 @@ python3 app.py
 
 | 配置项 | 说明 | 示例 |
 |--------|------|------|
-| 监控目录 | CD2 挂载的源目录 | `/watch` 或 `/mnt/cd2/115/PT下载` |
+| 监控目录 | CD2 挂载的源目录 | `/watch` 或 `/CloudNAS/username/PT下载` |
 | 输出目录 | ISO 临时存放目录 | `/output` 或 `/tmp/iso-output` |
 | 扫描间隔 | 扫描频率（秒） | `60`（建议 30-120） |
 | 稳定时间 | 文件稳定后才封装（秒） | `300`（建议 180-600） |
@@ -143,8 +143,8 @@ python3 app.py
 | 配置项 | 说明 | 示例 |
 |--------|------|------|
 | 启用 CD2 转移 | 封装后自动转移到 CD2 | ✅ 勾选 |
-| CD2 挂载根目录 | CloudDrive2 FUSE 挂载点 | `/cd2` 或 `/mnt/cd2` |
-| CD2 目标目录 | 最终存储路径 | `/cd2/115/ISO备份` |
+| CD2 挂载根目录 | CloudDrive2 FUSE 挂载点 | `/cd2` 或 `/CloudNAS` |
+| CD2 目标目录 | 最终存储路径 | `/cd2/username/ISO备份` |
 
 ### 高级配置
 
@@ -223,7 +223,7 @@ DVD电影/
 
 ```yaml
 volumes:
-  - /mnt/cd2:/cd2:rslave  # 必须添加 :rslave 参数
+  - /CloudNAS:/cd2:rslave  # 必须添加 :rslave 参数
 ```
 
 ### Q2: 封装后网盘没有文件？

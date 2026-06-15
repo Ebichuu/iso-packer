@@ -56,9 +56,9 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - ./data:/app
-      - /mnt/cd2/115/PT下载:/watch
+      - /CloudNAS/username/PT下载:/watch
       - /tmp/iso-output:/output
-      - /mnt/cd2:/cd2:rslave
+      - /CloudNAS:/cd2:rslave
 EOF
 
 # 3. 启动服务
@@ -179,15 +179,15 @@ exit
 
 ```bash
 # 确认 CD2 已挂载
-mount | grep cd2
-# 应该看到: clouddrived on /mnt/cd2 type fuse...
+mount | grep CloudNAS
+# 应该看到: clouddrived on /CloudNAS type fuse...
 
 # 检查挂载点可访问
-ls -la /mnt/cd2/115/
+ls -la /CloudNAS/username/
 
 # 创建网盘目录结构
-# 建议在 115 网盘创建：
-#   /VPS_Transfer/
+# 建议在网盘创建：
+#   /username/
 #   ├── PT下载/        （CD2 拉取源）
 #   └── ISO备份/       （封装后上传）
 ```
@@ -230,7 +230,7 @@ docker-compose logs -f
 ☑ 启用 CD2 转移
 
 CD2 挂载根目录: /cd2
-CD2 目标目录: /cd2/115/VPS_Transfer/ISO备份
+CD2 目标目录: /cd2/username/ISO备份
 ```
 
 点击 **保存并扫描**。
@@ -239,7 +239,7 @@ CD2 目标目录: /cd2/115/VPS_Transfer/ISO备份
 
 ```bash
 # 1. 在监控目录创建测试蓝光文件夹
-mkdir -p /mnt/cd2/115/VPS_Transfer/PT下载/测试蓝光/BDMV
+mkdir -p /CloudNAS/username/PT下载/测试蓝光/BDMV
 
 # 2. 观察 Web 界面
 # 应该在几分钟内看到任务出现
@@ -260,15 +260,15 @@ docker logs -f iso-packer
            │ PT 下载完成
            ↓
 ┌──────────────────────┐
-│    115 网盘          │
-│  /VPS_Transfer/      │
+│    网盘              │
+│  /username/          │
 │    └─ PT下载/        │  ← 本地上传到这里
 └──────────┬───────────┘
            │ CD2 拉取到 VPS
            ↓
 ┌──────────────────────┐
 │   VPS 监控目录       │
-│  /mnt/cd2/115/...    │  ← iso-packer 监控
+│  /CloudNAS/...       │  ← iso-packer 监控
 └──────────┬───────────┘
            │ 识别蓝光原盘
            ↓
@@ -285,8 +285,8 @@ docker logs -f iso-packer
            │ CD2 转移（带进度监控）
            ↓
 ┌──────────────────────┐
-│    115 网盘          │
-│  /VPS_Transfer/      │
+│    网盘              │
+│  /username/          │
 │    └─ ISO备份/       │  ← 最终存储
 └──────────────────────┘
            │ CD2 后台上传

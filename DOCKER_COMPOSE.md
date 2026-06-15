@@ -40,14 +40,14 @@ services:
       - ./data:/app
       
       # 【必改】监控目录 - CD2 挂载的 115 网盘下载目录
-      - /mnt/cd2/115/PT下载:/watch
+      - /CloudNAS/username/PT下载:/watch
       
       # 【必改】临时输出目录 - ISO 封装临时存放
       - /tmp/iso-output:/output
       
       # 【必改】CD2 挂载根目录 - 用于转移文件
       # 重要：必须使用 :rslave 参数
-      - /mnt/cd2:/cd2:rslave
+      - /CloudNAS:/cd2:rslave
     
     logging:
       driver: "json-file"
@@ -135,9 +135,9 @@ docker-compose logs -f
 ```yaml
 volumes:
   - ./data:/app
-  - /mnt/cd2/115/PT下载:/watch
+  - /CloudNAS/username/PT下载:/watch
   - /tmp/iso-output:/output
-  - /mnt/cd2:/cd2:rslave
+  - /CloudNAS:/cd2:rslave
 ```
 
 ### 示例 2: 自定义路径
@@ -292,13 +292,13 @@ ports:
 **解决方法**：
 ```bash
 # 检查挂载点是否存在
-ls -la /mnt/cd2
+ls -la /CloudNAS
 
 # 检查 CD2 是否正常挂载
-mount | grep cd2
+mount | grep CloudNAS
 
 # 确保目录权限正确
-sudo chmod -R 755 /mnt/cd2
+sudo chmod -R 755 /CloudNAS
 ```
 
 ### 问题 3: 容器无法启动
@@ -324,7 +324,7 @@ docker-compose up -d --build
 确保使用 `:rslave` 参数：
 ```yaml
 volumes:
-  - /mnt/cd2:/cd2:rslave  # :rslave 是必须的
+  - /CloudNAS:/cd2:rslave  # :rslave 是必须的
 ```
 
 ---
@@ -351,9 +351,9 @@ services:
     
     volumes:
       - ./data:/app
-      - /mnt/cd2/115/PT下载:/watch
+      - /CloudNAS/username/PT下载:/watch
       - /tmp/iso-output:/output
-      - /mnt/cd2:/cd2:rslave
+      - /CloudNAS:/cd2:rslave
     
     logging:
       driver: "json-file"
