@@ -34,38 +34,67 @@
 
 ## 🚀 快速部署
 
-### 方式一：Docker Compose（推荐）
+### 方式一：Docker Compose + Docker Hub 镜像（最简单）⭐
 
-1. **克隆或下载本仓库**
+1. **下载 docker-compose.yml**
+
+```bash
+mkdir ~/iso-packer && cd ~/iso-packer
+wget https://raw.githubusercontent.com/Ebichuu/iso-packer/main/docker-compose.yml
+```
+
+或手动创建 `docker-compose.yml`：
+
+```yaml
+version: '3.8'
+services:
+  iso-packer:
+    image: ebichuu/iso-packer:latest  # 使用 Docker Hub 镜像
+    container_name: iso-packer
+    restart: unless-stopped
+    ports:
+      - "15865:15865"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/app
+      - /mnt/cd2/115/PT下载:/watch           # 修改为实际路径
+      - /tmp/iso-output:/output              # 修改为实际路径
+      - /mnt/cd2:/cd2:rslave                 # 修改为实际路径
+```
+
+2. **启动服务**
+
+```bash
+docker-compose up -d
+```
+
+3. **访问 Web 界面**
+
+```
+http://your-vps-ip:15865
+```
+
+### 方式二：Docker Compose + 源码构建
+
+1. **克隆仓库**
 
 ```bash
 git clone https://github.com/Ebichuu/iso-packer.git
 cd iso-packer
 ```
 
-2. **编辑 docker-compose.yml 配置路径**
+2. **编辑 docker-compose.yml**
 
-```yaml
-volumes:
-  # 修改为您的实际路径
-  - /mnt/cd2/115/PT下载:/watch           # CD2 挂载的监控目录
-  - /tmp/iso-output:/output              # 临时 ISO 输出目录
-  - /mnt/cd2:/cd2:rslave                 # CD2 挂载根目录
-```
+将 `image: ebichuu/iso-packer:latest` 改为 `build: .`
 
-3. **启动服务**
+3. **构建并启动**
 
 ```bash
-docker-compose up -d
+docker-compose up -d --build
 ```
 
-4. **访问 Web 界面**
-
-```
-http://your-vps-ip:15865
-```
-
-### 方式二：Docker Run
+### 方式三：Docker Run
 
 ```bash
 docker run -d \
@@ -80,7 +109,7 @@ docker run -d \
   ebichuu/iso-packer:latest
 ```
 
-### 方式三：本地运行
+### 方式四：本地运行
 
 ```bash
 # 安装系统依赖

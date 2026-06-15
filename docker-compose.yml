@@ -2,7 +2,12 @@ version: '3.8'
 
 services:
   iso-packer:
-    build: .
+    # 方式 1: 使用 Docker Hub 预构建镜像（推荐，开箱即用）
+    image: ebichuu/iso-packer:latest
+
+    # 方式 2: 从本地源码构建（如需自定义，取消下面注释，注释上面 image）
+    # build: .
+
     container_name: iso-packer
     restart: unless-stopped
 
@@ -40,9 +45,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-# 可选：使用预构建镜像而不是本地构建
-# 取消注释以下内容，注释掉上面的 build: .
-#   iso-packer:
-#     image: ebichuu/iso-packer:latest
-#     # ... 其他配置保持不变
