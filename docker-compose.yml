@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  iso-packer:
+    build: .
+    container_name: iso-packer
+    restart: unless-stopped
+
+    ports:
+      - "15865:15865"
+
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      # 数据持久化目录（配置、状态、日志）
+      - ./data:/app
+
+      # 【必改】监控目录 - CD2 挂载的 115 网盘下载目录
+      # 格式：宿主机路径:容器内路径
+      - /mnt/cd2/115/PT下载:/watch
+
+      # 【必改】临时输出目录 - ISO 封装临时存放
+      - /tmp/iso-output:/output
+
+      # 【必改】CD2 挂载根目录 - 用于转移文件
+      # 重要：必须使用 :rslave 参数支持挂载传播
+      - /mnt/cd2:/cd2:rslave
+
+    # 特权模式（可选，某些 CD2 挂载需要）
+    # privileged: false
+
+    # 网络模式
+    network_mode: bridge
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# 可选：使用预构建镜像而不是本地构建
+# 取消注释以下内容，注释掉上面的 build: .
+#   iso-packer:
+#     image: ebichuu/iso-packer:latest
+#     # ... 其他配置保持不变
