@@ -15,6 +15,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     genisoimage \
     xorriso \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制应用文件
@@ -36,7 +37,7 @@ EXPOSE 15865
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:15865').read()" || exit 1
+    CMD curl -f http://localhost:15865/ || exit 1
 
 # 启动命令
 CMD ["python", "-u", "app.py"]
