@@ -12,7 +12,8 @@ from typing import Dict, Optional
 
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
-APP_DIR = Path(__file__).resolve().parent
+# 数据目录：优先使用 /data（持久化挂载），否则使用当前目录
+APP_DIR = Path(os.getenv("DATA_DIR", "/data"))
 CONFIG_PATH = APP_DIR / "config.json"
 STATE_PATH = APP_DIR / "state.json"
 LOG_PATH = APP_DIR / "iso-packer.log"
