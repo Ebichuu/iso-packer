@@ -1,11 +1,6 @@
 services:
   iso-packer:
-    # 方式 1: 使用 Docker Hub 预构建镜像（推荐，开箱即用）
     image: ebichu/iso-packer:latest
-
-    # 方式 2: 从本地源码构建（如需自定义，取消下面注释，注释上面 image）
-    # build: .
-
     container_name: iso-packer
     restart: unless-stopped
 
@@ -26,15 +21,12 @@ services:
       # 临时输出目录 - ISO 封装临时存放
       - /mnt/iso-output:/output
 
-      # CD2 挂载根目录 - 用于转移文件
-      # 重要：挂载父目录并使用 rslave 接收来自 CD2 容器的挂载传播
-      # 参考：CLOUDDRIVE2_INTEGRATION.md
+      # CD2 挂载根目录 - 修复方案 3：模仿 Symedia，挂载父目录
+      # 使用 rslave 接收来自 CD2 容器的挂载传播
       - /CloudNAS:/CloudNAS:rslave
 
-    # 网络模式
     network_mode: bridge
 
-    # 日志配置
     logging:
       driver: "json-file"
       options:

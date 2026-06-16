@@ -37,7 +37,7 @@ services:
     
     volumes:
       # 数据持久化（配置、状态、日志）
-      - ./data:/app
+      - ./data:/data
       
       # 【必改】监控目录 - CD2 挂载的 115 网盘下载目录
       - /CloudNAS/username/PT下载:/watch
@@ -62,7 +62,7 @@ services:
 
 ```yaml
 volumes:
-  - ./data:/app                          # 保持不变
+  - ./data:/data                          # 保持不变
   - /your/cd2/mount/path:/watch         # 改成您的 CD2 监控路径
   - /your/tmp/output:/output            # 改成您的临时输出路径
   - /your/cd2/root:/cd2:rslave          # 改成您的 CD2 根目录
@@ -134,7 +134,7 @@ docker-compose logs -f
 
 ```yaml
 volumes:
-  - ./data:/app
+  - ./data:/data
   - /CloudNAS/username/PT下载:/watch
   - /tmp/iso-output:/output
   - /CloudNAS:/cd2:rslave
@@ -144,7 +144,7 @@ volumes:
 
 ```yaml
 volumes:
-  - ./data:/app
+  - ./data:/data
   - /data/clouddrive/downloads:/watch
   - /data/iso-temp:/output
   - /data/clouddrive:/cd2:rslave
@@ -350,7 +350,7 @@ services:
       - PYTHONUNBUFFERED=1
     
     volumes:
-      - ./data:/app
+      - ./data:/data
       - /CloudNAS/username/PT下载:/watch
       - /tmp/iso-output:/output
       - /CloudNAS:/cd2:rslave

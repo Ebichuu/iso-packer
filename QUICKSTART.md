@@ -30,7 +30,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
     volumes:
-      - ./data:/app
+      - ./data:/data
       - /CloudNAS/username/PT下载:/watch            # 修改为实际路径
       - /tmp/iso-output:/output                     # 修改为实际路径
       - /CloudNAS:/cd2:rslave                       # 修改为实际路径
@@ -65,7 +65,7 @@ cd iso-packer
 
 ```yaml
 volumes:
-  - ./data:/app
+  - ./data:/data
   - /your/actual/watch/path:/watch      # 改成实际路径
   - /your/actual/output/path:/output    # 改成实际路径
   - /your/actual/cd2/path:/cd2:rslave   # 改成实际路径
@@ -86,7 +86,7 @@ docker run -d \
   --name iso-packer \
   --restart unless-stopped \
   -p 15865:15865 \
-  -v $(pwd)/data:/app \
+  -v $(pwd)/data:/data \
   -v /CloudNAS/username/PT下载:/watch \
   -v /tmp/iso-output:/output \
   -v /CloudNAS:/cd2:rslave \

@@ -92,7 +92,7 @@ echo "6️⃣  启动测试容器..."
 docker run -d \
     --name iso-packer-test \
     -p 15866:15865 \
-    -v $TEST_DIR/data:/app \
+    -v $TEST_DIR/data:/data \
     -v $TEST_DIR/watch:/watch \
     -v $TEST_DIR/output:/output \
     -v $TEST_DIR/cd2:/cd2 \
@@ -145,13 +145,13 @@ sleep 2
 if [ -f "$TEST_DIR/data/config.json" ]; then
     test_passed "配置文件已生成: config.json"
 else
-    test_warning "配置文件未生成"
+    test_warning "配置文件未生成（应用可能使用内存配置）"
 fi
 
 if [ -f "$TEST_DIR/data/state.json" ]; then
     test_passed "状态文件已生成: state.json"
 else
-    test_warning "状态文件未生成"
+    test_warning "状态文件未生成（应用可能使用内存状态）"
 fi
 
 # 13. 显示容器信息

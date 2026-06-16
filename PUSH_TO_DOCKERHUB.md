@@ -148,7 +148,7 @@ dir iso-packer\*.py
    docker run -d \
      --name iso-packer \
      -p 15865:15865 \
-     -v ./data:/app \
+     -v ./data:/data \
      -v /watch:/watch \
      -v /output:/output \
      -v /CloudNAS:/cd2:rslave \

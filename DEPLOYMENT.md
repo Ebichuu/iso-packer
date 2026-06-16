@@ -55,7 +55,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
     volumes:
-      - ./data:/app
+      - ./data:/data
       - /CloudNAS/username/PT下载:/watch
       - /tmp/iso-output:/output
       - /CloudNAS:/cd2:rslave
