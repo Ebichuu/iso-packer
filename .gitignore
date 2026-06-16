@@ -1,67 +1,36 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
 *.egg
+*.egg-info/
+dist/
+build/
 
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Environments
+# Environment
 .env
 .venv
-env/
 venv/
-ENV/
-env.bak/
-venv.bak/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# iso-packer specific
-iso-packer/config.json
-iso-packer/state.json
-iso-packer/*.log
+# Project specific
 data/
-*.iso
-*.packing
-*.uploading
-*.partial
+*.log
 
-# Docker
-.dockerignore
-AutoISO/
-iso-packer.gz
-原始git.txt
+# UI/UX Skills (local only, not part of project)
+.agents/
+skills-lock.json
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
