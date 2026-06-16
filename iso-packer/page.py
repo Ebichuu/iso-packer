@@ -224,6 +224,22 @@ body {
   background: rgba(255,255,255,0.15);
   box-shadow: 0 0 0 3px rgba(232, 93, 117, 0.2);
 }
+.path-picker-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+}
+.path-picker-btn {
+  border: 1px solid rgba(255,255,255,0.13);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.12);
+  color: rgba(255,255,255,0.9);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 10px;
+  cursor: pointer;
+}
+.path-picker-btn:hover { background: rgba(255,255,255,0.18); }
 .settings-options {
   margin: 16px 0 12px;
   border-top: 1px solid rgba(255,255,255,0.1);
@@ -527,12 +543,270 @@ tr:hover td { background: #fff8f7; }
 .btn-secondary { background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.9); border: 1px solid rgba(255,255,255,0.12); }
 .btn-secondary:hover { background: rgba(255,255,255,0.18); }
 
+/* Directory Picker */
+.dir-modal {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(12, 10, 10, 0.42);
+  z-index: 1000;
+  padding: 14px;
+}
+.dir-modal.open { display: flex; }
+.dir-dialog {
+  width: min(958px, calc(100vw - 28px));
+  height: min(732px, calc(100vh - 28px));
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 28px 90px rgba(15, 23, 42, 0.35);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dir-header {
+  height: 64px;
+  padding: 0 20px 0 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #eef0f4;
+}
+.dir-title { font-size: 18px; color: #252525; font-weight: 500; }
+.dir-close {
+  width: 38px;
+  height: 38px;
+  border: none;
+  background: transparent;
+  color: #333;
+  font-size: 34px;
+  line-height: 34px;
+  cursor: pointer;
+}
+.dir-path {
+  margin: 14px 20px 0;
+  padding: 9px 12px;
+  border: 1px solid #d9e2f6;
+  border-radius: 6px;
+  color: #51627f;
+  background: #f7f9fe;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dir-list {
+  margin: 14px 20px;
+  flex: 1;
+  overflow: auto;
+  border-radius: 4px;
+}
+.dir-row {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 82px;
+  color: #111827;
+  cursor: pointer;
+  user-select: none;
+}
+.dir-row:hover,
+.dir-row.selected { background: #e7eefc; color: #2563eb; }
+.dir-row.disabled { color: #a3a8b4; cursor: not-allowed; }
+.dir-icon {
+  width: 22px;
+  height: 16px;
+  border-radius: 3px;
+  background: #88a8e8;
+  position: relative;
+  flex: 0 0 auto;
+}
+.dir-icon::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: -5px;
+  width: 10px;
+  height: 6px;
+  border-radius: 3px 3px 0 0;
+  background: #88a8e8;
+}
+.dir-footer {
+  height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 26px;
+  padding: 0 28px;
+  border-top: 1px solid #eef0f4;
+}
+.dir-action {
+  border: none;
+  background: transparent;
+  color: #2563eb;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 8px 0;
+}
+.dir-empty { padding: 40px; color: #7b8497; text-align: center; }
+
 /* Responsive */
 @media (max-width: 1024px) {
   body { display: block; height: auto; overflow: auto; }
   .sidebar { width: 100%; min-height: auto; }
   .sidebar-content { overflow: visible; }
   .main { padding: 18px; }
+}
+
+@media (max-width: 640px) {
+  body {
+    background: var(--main-bg);
+    font-size: 14px;
+  }
+
+  .sidebar {
+    box-shadow: 0 10px 28px rgba(30, 24, 18, 0.14);
+  }
+  .sidebar::after {
+    opacity: 0.28;
+    right: -92px;
+    top: 38px;
+  }
+  .sidebar-header {
+    padding: 16px;
+    gap: 12px;
+  }
+  .brand-mark {
+    width: 42px;
+    height: 42px;
+  }
+  .sidebar-header h1 { font-size: 18px; }
+  .sidebar-content { padding: 14px; }
+  .sidebar form {
+    padding: 12px;
+    box-shadow: none;
+  }
+  .form-group { margin-bottom: 10px; }
+  .path-picker-row {
+    grid-template-columns: minmax(0, 1fr) 64px;
+  }
+  .path-picker-btn,
+  .btn,
+  .rerun-btn,
+  .dir-action {
+    min-height: 42px;
+  }
+
+  .main {
+    padding: 12px;
+    gap: 12px;
+  }
+  .header-stats {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .stat-card {
+    padding: 14px;
+  }
+  .stat-value { font-size: 21px; }
+
+  .task-card {
+    padding: 16px;
+    gap: 14px;
+  }
+  .task-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .task-title {
+    width: 100%;
+    font-size: 15px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+  .task-status {
+    align-self: flex-start;
+  }
+  .progress-info {
+    gap: 6px;
+    flex-wrap: wrap;
+    line-height: 1.4;
+  }
+
+  .card-header {
+    padding: 14px 16px;
+    gap: 10px;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .live-badge {
+    min-height: 24px;
+  }
+  .table-wrap {
+    -webkit-overflow-scrolling: touch;
+  }
+  table {
+    min-width: 760px;
+  }
+  th,
+  td {
+    padding: 12px 16px;
+  }
+  .history-wrap {
+    max-height: 420px;
+  }
+  .target-text {
+    max-width: 180px;
+  }
+  .table-progress {
+    min-width: 230px;
+  }
+
+  .logs {
+    min-height: 160px;
+    max-height: 260px;
+    padding: 12px;
+    font-size: 11px;
+  }
+
+  .dir-modal {
+    padding: 8px;
+    align-items: stretch;
+  }
+  .dir-dialog {
+    width: calc(100vw - 16px);
+    height: calc(100vh - 16px);
+    border-radius: 8px;
+  }
+  .dir-header {
+    height: 56px;
+    padding: 0 12px 0 16px;
+  }
+  .dir-title { font-size: 16px; }
+  .dir-close {
+    width: 42px;
+    height: 42px;
+    font-size: 32px;
+  }
+  .dir-path {
+    margin: 10px 12px 0;
+  }
+  .dir-list {
+    margin: 10px 12px;
+  }
+  .dir-row {
+    min-height: 44px;
+    padding: 0 14px;
+    gap: 12px;
+  }
+  .dir-footer {
+    height: 56px;
+    padding: 0 16px;
+    gap: 18px;
+  }
 }
 </style>
 </head>
@@ -565,11 +839,17 @@ tr:hover td { background: #fff8f7; }
       <form method="post" action="/settings" id="settings-form">
         <div class="form-group">
           <label>监控目录</label>
-          <input name="watch_dir" type="text" value="{{cfg.watch_dir}}" required>
+          <div class="path-picker-row">
+            <input name="watch_dir" type="text" value="{{cfg.watch_dir}}" required>
+            <button class="path-picker-btn" type="button" data-pick-dir="watch_dir">选择</button>
+          </div>
         </div>
         <div class="form-group">
           <label>输出目录</label>
-          <input name="output_dir" type="text" value="{{cfg.output_dir}}" required>
+          <div class="path-picker-row">
+            <input name="output_dir" type="text" value="{{cfg.output_dir}}" required>
+            <button class="path-picker-btn" type="button" data-pick-dir="output_dir">选择</button>
+          </div>
         </div>
         <div class="form-group">
           <label>扫描间隔 (秒)</label>
@@ -585,11 +865,17 @@ tr:hover td { background: #fff8f7; }
         </div>
         <div class="form-group">
           <label>CloudDrive2 挂载根目录</label>
-          <input name="cd2_mount_root" type="text" value="{{cfg.cd2_mount_root}}">
+          <div class="path-picker-row">
+            <input name="cd2_mount_root" type="text" value="{{cfg.cd2_mount_root}}">
+            <button class="path-picker-btn" type="button" data-pick-dir="cd2_mount_root">选择</button>
+          </div>
         </div>
         <div class="form-group">
           <label>CloudDrive2 目标目录</label>
-          <input name="cd2_target_dir" type="text" value="{{cfg.cd2_target_dir}}">
+          <div class="path-picker-row">
+            <input name="cd2_target_dir" type="text" value="{{cfg.cd2_target_dir}}">
+            <button class="path-picker-btn" type="button" data-pick-dir="cd2_target_dir">选择</button>
+          </div>
         </div>
         
         <div class="settings-options">
@@ -741,9 +1027,24 @@ tr:hover td { background: #fff8f7; }
     </div>
   </main>
 
+  <div class="dir-modal" id="dir-modal" aria-hidden="true">
+    <div class="dir-dialog" role="dialog" aria-modal="true" aria-labelledby="dir-title">
+      <div class="dir-header">
+        <div class="dir-title" id="dir-title">选择目录</div>
+        <button class="dir-close" type="button" id="dir-close" aria-label="关闭">&times;</button>
+      </div>
+      <div class="dir-path" id="dir-current-path">/</div>
+      <div class="dir-list" id="dir-list"></div>
+      <div class="dir-footer">
+        <button class="dir-action" type="button" id="dir-cancel">取消</button>
+        <button class="dir-action" type="button" id="dir-confirm">确认</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 (function(){
-const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiting_stable:"\u7b49\u5f85\u7a33\u5b9a",waiting_partial:"\u7b49\u5f85\u4e0b\u8f7d\u5b8c\u6210",ready:"\u51c6\u5907\u6253\u5305",running:"\u6b63\u5728\u5c01\u88c5",done:"\u5df2\u5b8c\u6210",failed:"\u5931\u8d25",verify_failed:"\u9a8c\u8bc1\u5931\u8d25",uploading:"\u6b63\u5728\u4e0a\u4f20",upload_done:"\u4e0a\u4f20\u5b8c\u6210",upload_failed:"\u4e0a\u4f20\u5931\u8d25",transferring:"\u6b63\u5728\u79fb\u52a8\u5230 CD2",transfer_done:"\u5df2\u79fb\u52a8\u5230 CD2",transfer_failed:"\u79fb\u52a8\u5931\u8d25",removed:"\u6e90\u5df2\u79fb\u9664"};
+const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiting_stable:"\u7b49\u5f85\u7a33\u5b9a",waiting_partial:"\u7b49\u5f85\u4e0b\u8f7d\u5b8c\u6210",ready:"\u51c6\u5907\u6253\u5305",running:"\u6b63\u5728\u5c01\u88c5",done:"\u5df2\u5b8c\u6210",failed:"\u5931\u8d25",verify_failed:"\u9a8c\u8bc1\u5931\u8d25",transferring:"\u6b63\u5728\u79fb\u52a8\u5230 CD2",transfer_done:"\u5df2\u79fb\u52a8\u5230 CD2",transfer_failed:"\u79fb\u52a8\u5931\u8d25",removed:"\u6e90\u5df2\u79fb\u9664"};
 const $=id=>document.getElementById(id);
 let alertTimer;
 const seenLogEvents = new Set();
@@ -813,9 +1114,9 @@ function setupSettingsForm(){
 }
 
 function getBadgeClass(status) {
-  if (['done', 'upload_done', 'transfer_done'].includes(status)) return 'badge-green';
-  if (['failed', 'verify_failed', 'upload_failed', 'transfer_failed'].includes(status)) return 'badge-red';
-  if (['running', 'uploading', 'transferring'].includes(status)) return 'badge-yellow';
+  if (['done', 'transfer_done'].includes(status)) return 'badge-green';
+  if (['failed', 'verify_failed', 'transfer_failed'].includes(status)) return 'badge-red';
+  if (['running', 'transferring'].includes(status)) return 'badge-yellow';
   if (['skipped', 'removed'].includes(status)) return 'badge-gray';
   return 'badge-blue';
 }
@@ -823,24 +1124,109 @@ function getBadgeClass(status) {
 function label(s){return labels[s]||s||"未知"}
   function esc(v){return String(v??"").replace(/[&<>'"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]))}
 
+let dirPickerTarget = null;
+let dirPickerPath = "/";
+
+function dirname(path) {
+  const value = String(path || "/").replace(/\\/+$/, "") || "/";
+  if(value === "/") return "/";
+  const index = value.lastIndexOf("/");
+  return index <= 0 ? "/" : value.slice(0, index);
+}
+
+function closeDirectoryPicker() {
+  const modal = $("dir-modal");
+  if(modal) {
+    modal.classList.remove("open");
+    modal.setAttribute("aria-hidden", "true");
+  }
+  dirPickerTarget = null;
+}
+
+function setDirectoryValue() {
+  if(!dirPickerTarget) return;
+  dirPickerTarget.value = dirPickerPath || "/";
+  closeDirectoryPicker();
+}
+
+async function loadDirectory(path) {
+  const list = $("dir-list");
+  const current = $("dir-current-path");
+  if(list) list.innerHTML = `<div class="dir-empty">\u6b63\u5728\u8bfb\u53d6...</div>`;
+  try {
+    const res = await fetch("/api/directories?path=" + encodeURIComponent(path || "/"));
+    const payload = await res.json();
+    if(!res.ok || payload.ok === false) throw new Error(payload.message || ("HTTP " + res.status));
+    dirPickerPath = payload.path || "/";
+    if(current) current.textContent = dirPickerPath;
+    const rows = [];
+    if(payload.parent) {
+      rows.push(`<div class="dir-row" data-dir-path="${esc(payload.parent)}"><span class="dir-icon"></span><span>..</span></div>`);
+    }
+    (payload.entries || []).forEach(entry => {
+      rows.push(`<div class="dir-row${entry.readable ? "" : " disabled"}" data-dir-path="${esc(entry.path)}"><span class="dir-icon"></span><span>${esc(entry.name)}</span></div>`);
+    });
+    if(list) list.innerHTML = rows.join("") || `<div class="dir-empty">\u6ca1\u6709\u53ef\u9009\u5b50\u76ee\u5f55</div>`;
+  } catch(e) {
+    if(list) list.innerHTML = `<div class="dir-empty">${esc(e.message || "\u8bfb\u53d6\u76ee\u5f55\u5931\u8d25")}</div>`;
+  }
+}
+
+function openDirectoryPicker(input) {
+  dirPickerTarget = input;
+  const modal = $("dir-modal");
+  if(!modal) return;
+  modal.classList.add("open");
+  modal.setAttribute("aria-hidden", "false");
+  const startPath = input.value || dirname(input.getAttribute("value") || "/") || "/";
+  loadDirectory(startPath);
+}
+
+function setupDirectoryPicker() {
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-pick-dir]");
+    if(button) {
+      const input = document.querySelector(`[name="${button.dataset.pickDir}"]`);
+      if(input) openDirectoryPicker(input);
+      return;
+    }
+    const row = event.target.closest("[data-dir-path]");
+    if(row && !row.classList.contains("disabled")) {
+      loadDirectory(row.dataset.dirPath);
+    }
+  });
+  const close = $("dir-close");
+  const cancel = $("dir-cancel");
+  const confirm = $("dir-confirm");
+  if(close) close.addEventListener("click", closeDirectoryPicker);
+  if(cancel) cancel.addEventListener("click", closeDirectoryPicker);
+  if(confirm) confirm.addEventListener("click", setDirectoryValue);
+  const modal = $("dir-modal");
+  if(modal) {
+    modal.addEventListener("click", (event) => {
+      if(event.target === modal) closeDirectoryPicker();
+    });
+  }
+  document.addEventListener("keydown", (event) => {
+    if(event.key === "Escape" && $("dir-modal")?.classList.contains("open")) closeDirectoryPicker();
+  });
+}
+
 function statusBadgeText(status, item={}) {
   if (status === "running") return "\u6b63\u5728\u5c01\u88c5";
   if (status === "transferring") return "\u6b63\u5728\u79fb\u52a8\u5230 CD2";
-  if (status === "uploading") return "\u6b63\u5728\u4e0a\u4f20";
   if (status === "transfer_done") return "\u5df2\u79fb\u52a8\u5230 CD2";
-  if (status === "upload_done") return "\u5df2\u4e0a\u4f20\u5b8c\u6210";
   if (status === "done") return item.pack_iso === false ? "\u8df3\u8fc7\u5c01\u88c5" : "\u5df2\u5c01\u88c5 ISO";
   if (status === "skipped") return "\u8df3\u8fc7\u5c01\u88c5";
   return label(status);
 }
 
 function phaseStatusText(active) {
-  const progress = (active && (active.progress || active.upload_progress || {})) || {};
+  const progress = (active && (active.progress || {})) || {};
   const phase = progress.phase || "";
   const status = active && active.status;
   if (phase === "packing" || status === "running") return "\u6b63\u5728\u5c01\u88c5";
   if (phase === "transfer" || status === "transferring") return "\u6b63\u5728\u79fb\u52a8\u5230 CD2";
-  if (phase === "uploading" || status === "uploading") return "\u6b63\u5728\u4e0a\u4f20";
   return statusBadgeText(status, active || {});
 }
 
@@ -852,8 +1238,8 @@ function formatSize(value){
 }
 
 function getTaskProgress(item, active, key) {
-  const activeProgress = active && active.source === key ? (active.progress || active.upload_progress || {}) : {};
-  const doneStatuses = ['done', 'upload_done', 'transfer_done'];
+  const activeProgress = active && active.source === key ? (active.progress || {}) : {};
+  const doneStatuses = ['done', 'transfer_done'];
   const current = Number(
     activeProgress.current ?? activeProgress.uploaded ?? item.currentSize ?? item.current ?? item.last_size ?? item.size ?? 0
   );
@@ -877,14 +1263,14 @@ function renderTaskStatus(item, active, key) {
 }
 
 function getEventTime(eventText) {
-  const match = String(eventText || "").match(/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/);
+  const match = String(eventText || "").match(/^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})\\]/);
   return match ? new Date(match[1].replace(" ", "T")).getTime() : 0;
 }
 
 function normalizeEvents(events) {
   const text = Array.isArray(events) ? events.join("\\n") : String(events || "");
   return text
-    .replace(/\s*(?=\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\])/g, "\\n")
+    .replace(/\\s*(?=\\[\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\])/g, "\\n")
     .split("\\n")
     .map(line => line.trim())
     .filter(Boolean);
@@ -900,7 +1286,7 @@ function renderEvents(events) {
   seenLogEvents.clear();
   latestFirstEvents.forEach(eventText => seenLogEvents.add(eventText));
   logs.innerHTML = latestFirstEvents.map(eventText => {
-    const match = String(eventText).match(/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s*(.*)$/);
+    const match = String(eventText).match(/^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})\\]\\s*(.*)$/);
     const time = match ? match[1] : "";
     const message = match ? match[2] : eventText;
     return `<div class="log-line"><span class="log-time">${esc(time ? "[" + time + "] " : "")}</span><span class="log-message">${esc(message)}</span></div>`;
@@ -910,7 +1296,7 @@ function renderEvents(events) {
 function createLogLine(eventText) {
   const line = document.createElement("div");
   line.className = "log-line";
-  const match = String(eventText).match(/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s*(.*)$/);
+  const match = String(eventText).match(/^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})\\]\\s*(.*)$/);
   const time = document.createElement("span");
   time.className = "log-time";
   time.textContent = match ? `[${match[1]}] ` : "";
@@ -951,7 +1337,7 @@ function renderProgress(active){
   }
   card.style.display = "flex";
   
-  const p = active.progress || active.upload_progress || {};
+  const p = active.progress || {};
   const percent = Math.max(0, Math.min(100, Number(p.percent || 0)));
   const phase = phaseStatusText(active);
   
@@ -959,7 +1345,7 @@ function renderProgress(active){
   $("active-status-badge").innerHTML = `<span class="badge ${getBadgeClass(active.status)}">${phase}</span>`;
   
   let totalPercent = percent;
-  if (active.status === "transferring" || active.status === "uploading") {
+  if (active.status === "transferring") {
     totalPercent = 50 + (percent * 0.5);
   } else if (active.status === "running") {
     totalPercent = percent * 0.5;
@@ -1008,7 +1394,7 @@ function taskEntries(items, active) {
     const activeEntry = entries.splice(index, 1)[0];
     return [activeEntry, ...entries].slice(0, 5);
   }
-  const progress = (active.progress || active.upload_progress || {});
+  const progress = (active.progress || {});
   const activeItem = {
     status: active.status,
     target: active.target,
@@ -1034,7 +1420,7 @@ function historyEntries(items, active) {
     const activeEntry = entries.splice(index, 1)[0];
     return [activeEntry, ...entries];
   }
-  const progress = (active.progress || active.upload_progress || {});
+  const progress = (active.progress || {});
   const activeItem = {
     status: active.status,
     target: active.target,
@@ -1131,6 +1517,7 @@ async function refresh(){
 
 setupSettingsForm();
 setupTaskActions();
+setupDirectoryPicker();
 const initialLogText = $("events") ? $("events").textContent : "";
 if(initialLogText.trim()) renderEvents(initialLogText);
 setInterval(refresh, 2000);

@@ -18,25 +18,17 @@ STATE_PATH = APP_DIR / "state.json"
 LOG_PATH = APP_DIR / "iso-packer.log"
 
 DEFAULT_CONFIG = {
-    'watch_dir': '',
-    'output_dir': '',
-    'delete_source_after_success': False,
-    'scan_interval_seconds': 20,
-    'stable_seconds': 180,
-    'min_free_space_gb': 5,
-    'enabled': False,
-    'upload_115_enabled': False,
-    'upload_115_cookie': '',
-    'upload_115_cookie_path': '',
-    'upload_115_target_cid': '',
-    'upload_115_fast_retries': 0,
-    'upload_115_part_size_mb': 64,
-    'upload_115_delete_local_iso_after_success': False,
-    'upload_115_helper_python': '',
-    'cd2_transfer_enabled': False,
-    'cd2_mount_root': '',
-    'cd2_target_dir': '',
-    'cd2_require_mount': True,
+    "watch_dir": "/root/iso-watch",
+    "output_dir": "/root/iso-output",
+    "delete_source_after_success": True,
+    "scan_interval_seconds": 20,
+    "stable_seconds": 180,
+    "min_free_space_gb": 5,
+    "enabled": True,
+    "cd2_transfer_enabled": False,
+    "cd2_mount_root": "/mnt/cd2",
+    "cd2_target_dir": "/mnt/cd2",
+    "cd2_require_mount": True,
 }
 
 PARTIAL_EXTENSIONS = {".part", ".tmp", ".download", ".crdownload", ".aria2", ".!qb"}
@@ -149,9 +141,6 @@ def status_label(status: str) -> str:
         "done": "已完成",
         "failed": "失败",
         "verify_failed": "验证失败",
-        "uploading": "\u6b63\u5728\u4e0a\u4f20",
-        "upload_done": "115上传完成",
-        "upload_failed": "115上传失败",
         "transferring": "\u6b63\u5728\u79fb\u52a8\u5230 CD2",
         "transfer_done": "\u5df2\u79fb\u52a8\u5230 CD2",
         "transfer_failed": "转移失败",
@@ -163,11 +152,11 @@ def status_label(status: str) -> str:
 
 
 def badge_class(status: str) -> str:
-    if status in {"done", "upload_done", "transfer_done"}:
+    if status in {"done", "transfer_done"}:
         return "badge-green"
-    if status in {"failed", "verify_failed", "upload_failed", "transfer_failed"}:
+    if status in {"failed", "verify_failed", "transfer_failed"}:
         return "badge-red"
-    if status in {"running", "uploading", "transferring"}:
+    if status in {"running", "transferring"}:
         return "badge-yellow"
     if status in {"skipped", "removed"}:
         return "badge-gray"
@@ -294,14 +283,6 @@ def update_active_progress(phase: str, target: Path, percent: float, current: in
         active = state.get("active") or {}
         active["target"] = str(target)
         active["progress"] = progress
-        if phase == "uploading":
-            active["upload_progress"] = {
-                "percent": progress["percent"],
-                "uploaded": progress["current"],
-                "total": progress["total"],
-                "updated_at": progress["updated_at"],
-                **{k: v for k, v in extra.items() if k in {"verifying", "verified"}},
-            }
         state["active"] = active
         save_state_locked()
 
@@ -351,149 +332,6 @@ def validate_iso(target: Path) -> bool:
     result = subprocess.run(["xorriso", "-indev", str(target), "-toc"], text=True, capture_output=True)
     return result.returncode == 0
 
-
-def sanitize_115_result(raw: str) -> str:
-    raw = (raw or "").strip()
-    if not raw:
-        return "无输出"
-    lines = [line.strip() for line in raw.splitlines() if line.strip()]
-    if not lines:
-        return "无输出"
-    last = lines[-1]
-    try:
-        data = json.loads(last)
-    except Exception:
-        return last[-1000:]
-    if isinstance(data, dict):
-        data.pop("cookie", None)
-    return json.dumps(data, ensure_ascii=False)[:1200]
-
-
-def update_upload_progress(target: Path, payload: Dict) -> None:
-    percent = max(0.0, min(100.0, float(payload.get("percent") or 0)))
-    uploaded = int(payload.get("uploaded") or 0)
-    total = int(payload.get("total") or 0)
-    update_active_progress("uploading", target, percent, uploaded, total)
-
-
-def handle_115_event(target: Path, payload: Dict) -> Optional[Dict]:
-    if payload.get("ok") is not None:
-        return payload
-    event = payload.get("event")
-    if event == "progress":
-        update_upload_progress(target, payload)
-        return None
-    if event == "fast_attempt":
-        log(f"115秒传尝试 {payload.get('attempt')}/{payload.get('retries')}: {target}")
-    elif event == "fast_result":
-        response = payload.get("response") or {}
-        log(f"115秒传结果 第{payload.get('attempt')}次: reuse={response.get('reuse')} status={response.get('status')}")
-    elif event == "normal_start":
-        log(f"115普通上传开始: {format_size(payload.get('size'))}, 分块 {format_size(payload.get('part_size'))}")
-        update_upload_progress(target, {"percent": 0, "uploaded": 0, "total": int(payload.get("size") or 0)})
-    elif event == "normal_init":
-        response = payload.get("response") or {}
-        log(f"115普通上传初始化: state={response.get('state')} errno={response.get('errno')} status={response.get('status')} data_keys={response.get('data_keys')}")
-    elif event == "completing":
-        with lock:
-            active = state.get("active") or {}
-            old = active.get("progress") or active.get("upload_progress") or {}
-            percent = float(old.get("percent") or 100)
-            current = int(old.get("current") or old.get("uploaded") or 0)
-            total = int(old.get("total") or current)
-            state["active"] = active
-            save_state_locked()
-        update_active_progress("uploading", target, percent, current, total, verifying=True)
-        log("115上传完成，正在提交并确认完整性")
-    return None
-
-
-def upload_iso_to_115(target: Path, cfg: Dict) -> bool:
-    if not cfg.get("upload_115_enabled"):
-        return True
-    cid = str(cfg.get("upload_115_target_cid") or "").strip()
-    cookie = str(cfg.get("upload_115_cookie") or "").strip()
-    cookie_path = str(cfg.get("upload_115_cookie_path") or "").strip()
-    helper_python = Path(str(cfg.get("upload_115_helper_python") or DEFAULT_CONFIG["upload_115_helper_python"])).expanduser()
-    helper_script = APP_DIR / "115_upload_helper.py"
-
-    if not cid:
-        log("115上传未配置目录 cid，跳过上传并标记失败")
-        return False
-    if not cookie and not cookie_path:
-        log("115上传未配置 cookie 或 cookie 文件路径，跳过上传并标记失败")
-        return False
-    if not helper_python.exists():
-        log(f"115上传 Python 环境不存在: {helper_python}")
-        return False
-    if not helper_script.exists():
-        log(f"115上传 helper 不存在: {helper_script}")
-        return False
-
-    cmd = [
-        str(helper_python),
-        str(helper_script),
-        "--file", str(target),
-        "--cid", cid,
-        "--retries", str(max(0, int(cfg.get("upload_115_fast_retries", 3)))),
-        "--part-size-mb", str(max(10, int(cfg.get("upload_115_part_size_mb", 64)))),
-    ]
-    env = os.environ.copy()
-    if cookie_path:
-        cmd.extend(["--cookie-path", cookie_path])
-    else:
-        env["P115_COOKIE"] = cookie
-
-    log(f"开始上传到115: {target} -> cid {cid}")
-    final_payload = None
-    output_lines = []
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(APP_DIR),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=env,
-        bufsize=1,
-    )
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
-        output_lines.append(line)
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        maybe_final = handle_115_event(target, payload)
-        if maybe_final is not None:
-            final_payload = maybe_final
-    returncode = proc.wait()
-
-    if final_payload is None:
-        output = sanitize_115_result("\n".join(output_lines))
-        log(f"115上传失败: {target}; {output}")
-        return False
-    output = json.dumps(final_payload, ensure_ascii=False)[:1200]
-    if returncode == 0 and final_payload.get("ok"):
-        method = final_payload.get("method") or "unknown"
-        log(f"115上传成功并确认完整性: {target}; method={method}; {output}")
-        with lock:
-            active = state.get("active") or {}
-            state["active"] = active
-            save_state_locked()
-        final_size = target.stat().st_size if target.exists() else 0
-        update_active_progress("uploading", target, 100.0, final_size, final_size, verified=True)
-        if cfg.get("upload_115_delete_local_iso_after_success"):
-            try:
-                target.unlink()
-                log(f"115上传成功后已删除本地 ISO: {target}")
-            except Exception as exc:
-                log(f"删除本地 ISO 失败 {target}: {exc}")
-        return True
-    log(f"115上传失败: {target}; {output}")
-    return False
 
 
 def unique_destination_path(path: Path) -> Path:
@@ -649,19 +487,7 @@ def process_item(source: Path, cfg: Dict) -> None:
                 save_state_locked()
             return
         final_target = moved_target
-    elif cfg.get("upload_115_enabled"):
-        with lock:
-            state["active"] = {"source": str(source), "target": str(target), "started_at": now(), "status": "uploading", "progress": {"phase": "uploading", "percent": 0, "current": 0, "total": target.stat().st_size if target.exists() else 0, "updated_at": now()}}
-            state["items"].setdefault(str(source), {})["status"] = "uploading"
-            save_state_locked()
-        if not upload_iso_to_115(target, cfg):
-            with lock:
-                item = state["items"].setdefault(str(source), {})
-                item.update({"status": "upload_failed", "target": str(target), "done_at": now(), "size": source_size})
-                item["last_changed"] = now()
-                state["active"] = None
-                save_state_locked()
-            return
+
 
     if cfg.get("delete_source_after_success"):
         try:
@@ -677,8 +503,6 @@ def process_item(source: Path, cfg: Dict) -> None:
         item = state["items"].setdefault(str(source), {})
         if cfg.get("cd2_transfer_enabled"):
             status = "transfer_done"
-        elif cfg.get("upload_115_enabled"):
-            status = "upload_done"
         else:
             status = "done"
         item.update({"status": status, "target": str(final_target), "done_at": now(), "size": source_size})
@@ -725,8 +549,8 @@ def scan_once(cfg: Dict) -> None:
         with lock:
             item = state["items"].setdefault(key, {"first_seen": now(), "status": "watching"})
             item["pack_iso"] = True
-            terminal_statuses = {"done", "upload_done", "transfer_done", "failed", "verify_failed", "upload_failed", "transfer_failed"}
-            active_statuses = {"running", "uploading", "transferring"}
+            terminal_statuses = {"done", "transfer_done", "failed", "verify_failed", "transfer_failed"}
+            active_statuses = {"running", "transferring"}
             if item.get("status") in terminal_statuses | active_statuses:
                 item.setdefault("last_size", size)
                 item["partial_files"] = partial
@@ -760,7 +584,7 @@ def scan_once(cfg: Dict) -> None:
 
     with lock:
         for key, item in list(state.get("items", {}).items()):
-            if key not in current and item.get("status") not in {"done", "upload_done", "transfer_done", "failed", "verify_failed", "upload_failed", "transfer_failed"}:
+            if key not in current and item.get("status") not in {"done", "transfer_done", "failed", "verify_failed", "transfer_failed"}:
                 item["status"] = "removed"
         save_state_locked()
 
@@ -779,7 +603,7 @@ def ordered_visible_items(items: Dict, active: Optional[Dict] = None):
     for index, entry in enumerate(entries):
         if entry[0] == source:
             return [entry] + entries[:index] + entries[index + 1:]
-    progress = active.get("progress") or active.get("upload_progress") or {}
+    progress = active.get("progress") or {}
     active_item = {
         "status": active.get("status"),
         "target": active.get("target"),
@@ -866,14 +690,6 @@ def settings():
     cfg["cd2_require_mount"] = "cd2_require_mount" in request.form
     cfg["cd2_mount_root"] = request.form.get("cd2_mount_root", cfg.get("cd2_mount_root", "/mnt/cd2")).strip()
     cfg["cd2_target_dir"] = request.form.get("cd2_target_dir", cfg.get("cd2_target_dir", "/mnt/cd2")).strip()
-    cfg["upload_115_enabled"] = False
-    cfg["upload_115_delete_local_iso_after_success"] = False
-    cfg["upload_115_target_cid"] = ""
-    cfg["upload_115_cookie"] = ""
-    cfg["upload_115_cookie_path"] = ""
-    cfg["upload_115_fast_retries"] = 0
-    cfg["upload_115_part_size_mb"] = 64
-    cfg["upload_115_helper_python"] = cfg.get("upload_115_helper_python") or DEFAULT_CONFIG["upload_115_helper_python"]
     save_config(cfg)
     Path(cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
@@ -929,12 +745,54 @@ def rerun_item():
 @app.route("/api/status")
 def api_status():
     cfg = load_config()
-    if cfg.get("upload_115_cookie"):
-        cfg["upload_115_cookie"] = "***"
     with lock:
         snapshot = json.loads(json.dumps(state, ensure_ascii=False))
         snapshot["items"] = visible_iso_items(snapshot.get("items", {}))
     return jsonify({"config": cfg, "state": snapshot})
+
+
+@app.route("/api/directories")
+def api_directories():
+    raw_path = (request.args.get("path") or "/").strip() or "/"
+    try:
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = Path("/") / path
+        path = path.resolve()
+    except Exception as exc:
+        return jsonify({"ok": False, "message": f"路径无效: {exc}"}), 400
+
+    if not path.exists():
+        return jsonify({"ok": False, "message": "目录不存在"}), 404
+    if not path.is_dir():
+        path = path.parent
+
+    try:
+        children = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except PermissionError:
+        children = []
+    except OSError as exc:
+        return jsonify({"ok": False, "message": f"无法读取目录: {exc}"}), 400
+
+    entries = []
+    for child in children:
+        try:
+            if not child.is_dir():
+                continue
+            entries.append({
+                "name": child.name,
+                "path": str(child),
+                "readable": os.access(child, os.R_OK | os.X_OK),
+            })
+        except OSError:
+            continue
+
+    return jsonify({
+        "ok": True,
+        "path": str(path),
+        "parent": str(path.parent) if path.parent != path else None,
+        "entries": entries,
+    })
 
 
 if __name__ == "__main__":
