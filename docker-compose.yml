@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   iso-packer:
     # 方式 1: 使用 Docker Hub 预构建镜像（推荐，开箱即用）
@@ -22,19 +20,15 @@ services:
       # 数据持久化目录（配置、状态、日志）
       - ./data:/app
 
-      # 【必改】监控目录 - CD2 挂载的 115 网盘下载目录
-      # 格式：宿主机路径:容器内路径
-      - /CloudNAS/username/PT下载:/watch
+      # 监控目录 - CD2 挂载的 115 网盘下载目录
+      - /mnt/115Download:/watch
 
-      # 【必改】临时输出目录 - ISO 封装临时存放
-      - /tmp/iso-output:/output
+      # 临时输出目录 - ISO 封装临时存放
+      - /mnt/iso-output:/output
 
-      # 【必改】CD2 挂载根目录 - 用于转移文件
+      # CD2 挂载根目录 - 用于转移文件
       # 重要：必须使用 :rslave 参数支持挂载传播
-      - /CloudNAS:/cd2:rslave
-
-    # 特权模式（可选，某些 CD2 挂载需要）
-    # privileged: false
+      - /CloudNAS/CloudDrive:/cd2:rslave
 
     # 网络模式
     network_mode: bridge
