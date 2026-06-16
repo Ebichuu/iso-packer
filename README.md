@@ -49,7 +49,7 @@ wget https://raw.githubusercontent.com/Ebichuu/iso-packer/main/docker-compose.ym
 version: '3.8'
 services:
   iso-packer:
-    image: ebichuu/iso-packer:latest  # 使用 Docker Hub 镜像
+    image: ebichu/iso-packer:latest  # 使用 Docker Hub 镜像
     container_name: iso-packer
     restart: unless-stopped
     ports:
@@ -86,7 +86,7 @@ cd iso-packer
 
 2. **编辑 docker-compose.yml**
 
-将 `image: ebichuu/iso-packer:latest` 改为 `build: .`
+将 `image: ebichu/iso-packer:latest` 改为 `build: .`
 
 3. **构建并启动**
 
@@ -106,7 +106,7 @@ docker run -d \
   -v /tmp/iso-output:/output \
   -v /CloudNAS:/cd2:rslave \
   -e TZ=Asia/Shanghai \
-  ebichuu/iso-packer:latest
+  ebichu/iso-packer:latest
 ```
 
 ### 方式四：本地运行

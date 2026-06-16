@@ -24,7 +24,7 @@ version: '3.8'
 
 services:
   iso-packer:
-    image: ebichuu/iso-packer:latest  # 直接使用 Docker Hub 镜像
+    image: ebichu/iso-packer:latest  # 直接使用 Docker Hub 镜像
     container_name: iso-packer
     restart: unless-stopped
     
@@ -107,7 +107,7 @@ cd iso-packer
 services:
   iso-packer:
     build: .                            # 从源码构建
-    # image: ebichuu/iso-packer:latest  # 注释掉这行
+    # image: ebichu/iso-packer:latest  # 注释掉这行
     container_name: iso-packer
     # ... 其他配置
 ```
@@ -338,7 +338,7 @@ version: '3.8'
 
 services:
   iso-packer:
-    image: ebichuu/iso-packer:latest
+    image: ebichu/iso-packer:latest
     container_name: iso-packer
     restart: unless-stopped
     

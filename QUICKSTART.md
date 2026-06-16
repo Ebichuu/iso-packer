@@ -22,7 +22,7 @@ version: '3.8'
 
 services:
   iso-packer:
-    image: ebichuu/iso-packer:latest  # 替换为实际镜像
+    image: ebichu/iso-packer:latest  # 替换为实际镜像
     container_name: iso-packer
     restart: unless-stopped
     ports:
@@ -91,7 +91,7 @@ docker run -d \
   -v /tmp/iso-output:/output \
   -v /CloudNAS:/cd2:rslave \
   -e TZ=Asia/Shanghai \
-  ebichuu/iso-packer:latest
+  ebichu/iso-packer:latest
 ```
 
 ---

@@ -3,7 +3,7 @@ version: '3.8'
 services:
   iso-packer:
     # 方式 1: 使用 Docker Hub 预构建镜像（推荐，开箱即用）
-    image: ebichuu/iso-packer:latest
+    image: ebichu/iso-packer:latest
 
     # 方式 2: 从本地源码构建（如需自定义，取消下面注释，注释上面 image）
     # build: .

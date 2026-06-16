@@ -78,7 +78,7 @@
 2. **构建 Docker 镜像**
    ```bash
    chmod +x build-and-push.sh
-   ./build-and-push.sh 1.0.0 ebichuu
+   ./build-and-push.sh 1.0.0 ebichu
    ```
 
 3. **发布到 Docker Hub**

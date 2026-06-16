@@ -5,7 +5,7 @@ set -e
 # 使用方法: ./build-and-push.sh [版本号] [Docker Hub 用户名]
 
 VERSION=${1:-"latest"}
-DOCKERHUB_USER=${2:-"ebichuu"}
+DOCKERHUB_USER=${2:-"ebichu"}
 IMAGE_NAME="iso-packer"
 FULL_IMAGE="${DOCKERHUB_USER}/${IMAGE_NAME}:${VERSION}"
 

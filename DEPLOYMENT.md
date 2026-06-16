@@ -47,7 +47,7 @@ cat > docker-compose.yml << 'EOF'
 version: '3.8'
 services:
   iso-packer:
-    image: ebichuu/iso-packer:latest
+    image: ebichu/iso-packer:latest
     container_name: iso-packer
     restart: unless-stopped
     ports:
@@ -125,7 +125,7 @@ docker login
 
 # 2. 使用构建脚本
 chmod +x build-and-push.sh
-./build-and-push.sh 1.0.0 ebichuu
+./build-and-push.sh 1.0.0 ebichu
 
 # 3. 确认推送
 # 脚本会询问是否推送，输入 y
@@ -383,7 +383,7 @@ tar -czf iso-packer-backup-$(date +%Y%m%d).tar.gz data/
 docker-compose up -d --build
 
 # 方式 3: 推送到 Docker Hub
-./build-and-push.sh 1.0.0 ebichuu
+./build-and-push.sh 1.0.0 ebichu
 ```
 
 ---
