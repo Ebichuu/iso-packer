@@ -44,7 +44,7 @@ DEFAULT_CONFIG = {
     "web_password_hash": "",
     "web_secret_key": "",
     "cd2_api_enabled": False,
-    "cd2_api_addr": "http://host.docker.internal:19798",
+    "cd2_api_addr": "host.docker.internal:19798",
     "cd2_api_username": "",
     "cd2_api_password": "",
     "cd2_queue_poll_seconds": 10,
@@ -60,10 +60,18 @@ DISC_STRUCTURE_DIRS = {"bdmv", "video_ts"}
 app = Flask(__name__)
 lock = threading.RLock()
 cd2_lock = threading.RLock()
+worker_lock = threading.Lock()
 cd2_client_cache = {"key": None, "client": None, "last_error": None, "checked_at": None, "upload_map": {}, "upload_status": None}
 state = {"items": {}, "last_scan": None, "active": None, "events": [], "cd2": {}}
 worker_started = False
 last_log_prune = 0.0
+DIRECTORY_PICKER_ROOT = "@roots"
+DIRECTORY_PICKER_SCOPES = {
+    "watch_dir": ("watch_dir",),
+    "output_dir": ("output_dir",),
+    "cd2_mount_root": ("cd2_mount_root",),
+    "cd2_target_dir": ("cd2_mount_root", "cd2_target_dir"),
+}
 
 
 def now() -> str:
@@ -157,6 +165,7 @@ def load_config() -> Dict:
         data = {}
     cfg = DEFAULT_CONFIG.copy()
     cfg.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
+    cfg["cd2_api_addr"] = normalize_cd2_api_addr(cfg.get("cd2_api_addr"))
     if not cfg.get("web_secret_key"):
         cfg["web_secret_key"] = secrets.token_urlsafe(32)
         save_config(cfg)
@@ -244,6 +253,68 @@ def path_in_root(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def normalize_cd2_api_addr(value: str) -> str:
+    addr = str(value or "").strip()
+    if not addr:
+        return ""
+    addr = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", addr)
+    addr = addr.split("/", 1)[0].rstrip("/")
+    return addr
+
+
+def resolve_absolute_path(value: str) -> Path:
+    path = Path(str(value or "")).expanduser()
+    if not path.is_absolute():
+        path = Path("/") / path
+    return path.resolve()
+
+
+def path_in_any_root(path: Path, roots) -> bool:
+    return any(path_in_root(path, root) for root in roots)
+
+
+def directory_picker_roots(cfg: Dict, scope: str):
+    fields = DIRECTORY_PICKER_SCOPES.get(scope, ())
+    roots = []
+    for field in fields:
+        for raw in (cfg.get(field), DEFAULT_CONFIG.get(field)):
+            if not raw:
+                continue
+            try:
+                candidate = resolve_absolute_path(raw)
+            except Exception:
+                continue
+            if candidate not in roots:
+                roots.append(candidate)
+    return roots
+
+
+def directory_picker_payload_for_roots(roots):
+    entries = []
+    for root in roots:
+        entries.append({
+            "name": root.name or str(root),
+            "path": str(root),
+            "readable": root.exists() and os.access(root, os.R_OK | os.X_OK),
+        })
+    return {
+        "ok": True,
+        "path": DIRECTORY_PICKER_ROOT,
+        "display_path": "可选目录",
+        "parent": None,
+        "entries": entries,
+    }
+
+
+def directory_picker_parent(path: Path, roots) -> Optional[str]:
+    parent = path.parent
+    if parent == path:
+        return None
+    if path_in_any_root(parent, roots):
+        return str(parent)
+    return DIRECTORY_PICKER_ROOT
 
 
 def parse_int_form(name: str, fallback, minimum: Optional[int] = None) -> int:
@@ -365,7 +436,7 @@ def get_cd2_client(cfg: Dict):
         return None
     if not cfg.get("cd2_api_enabled"):
         return None
-    addr = str(cfg.get("cd2_api_addr") or "").strip()
+    addr = normalize_cd2_api_addr(cfg.get("cd2_api_addr"))
     username = str(cfg.get("cd2_api_username") or "").strip()
     password = str(cfg.get("cd2_api_password") or "")
     if not addr or not username or not password:
@@ -1031,7 +1102,11 @@ def recover_interrupted_task() -> None:
 
 def start_worker_once():
     global worker_started
-    if not worker_started:
+    if worker_started:
+        return
+    with worker_lock:
+        if worker_started:
+            return
         cfg = load_config()
         set_app_secret(cfg)
         load_state()
@@ -1144,7 +1219,7 @@ def settings():
     cfg["cd2_mount_root"] = request.form.get("cd2_mount_root", cfg.get("cd2_mount_root", "/CloudNAS")).strip()
     cfg["cd2_target_dir"] = request.form.get("cd2_target_dir", cfg.get("cd2_target_dir", "/CloudNAS/CloudDrive/00-未整理/00-mkiso")).strip()
     cfg["cd2_api_enabled"] = "cd2_api_enabled" in request.form
-    cfg["cd2_api_addr"] = request.form.get("cd2_api_addr", cfg.get("cd2_api_addr", "http://host.docker.internal:19798")).strip()
+    cfg["cd2_api_addr"] = normalize_cd2_api_addr(request.form.get("cd2_api_addr", cfg.get("cd2_api_addr", "host.docker.internal:19798")))
     cfg["cd2_api_username"] = request.form.get("cd2_api_username", cfg.get("cd2_api_username", "")).strip()
     new_password = (request.form.get("web_password") or "").strip()
     new_password_confirm = (request.form.get("web_password_confirm") or "").strip()

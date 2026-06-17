@@ -1227,7 +1227,7 @@ tr:hover td { background: #fff8f7; }
         </div>
         <div class="form-group">
           <label>CD2 API 地址</label>
-          <input name="cd2_api_addr" type="text" value="{{cfg.cd2_api_addr}}" placeholder="http://host.docker.internal:19798">
+          <input name="cd2_api_addr" type="text" value="{{cfg.cd2_api_addr}}" placeholder="host.docker.internal:19798">
         </div>
         <div class="form-group">
           <label>CD2 API 用户名</label>
@@ -1575,6 +1575,7 @@ let dirPickerPath = "/";
 
 function dirname(path) {
   const value = String(path || "/").replace(/\\/+$/, "") || "/";
+  if(value === "@roots") return "@roots";
   if(value === "/") return "/";
   const index = value.lastIndexOf("/");
   return index <= 0 ? "/" : value.slice(0, index);
@@ -1600,9 +1601,10 @@ async function loadDirectory(path) {
   const current = $("dir-current-path");
   if(list) list.innerHTML = `<div class="dir-empty">\u6b63\u5728\u8bfb\u53d6...</div>`;
   try {
-    const payload = await fetchJson("/api/directories?path=" + encodeURIComponent(path || "/"));
-    dirPickerPath = payload.path || "/";
-    if(current) current.textContent = dirPickerPath;
+    const scope = dirPickerTarget?.name || "";
+    const payload = await fetchJson("/api/directories?scope=" + encodeURIComponent(scope) + "&path=" + encodeURIComponent(path || "@roots"));
+    dirPickerPath = payload.path || "@roots";
+    if(current) current.textContent = payload.display_path || dirPickerPath;
     const rows = [];
     if(payload.parent) {
       rows.push(`<div class="dir-row" data-dir-path="${esc(payload.parent)}"><span class="dir-icon"></span><span>..</span></div>`);
@@ -1622,7 +1624,7 @@ function openDirectoryPicker(input) {
   if(!modal) return;
   modal.classList.add("open");
   modal.setAttribute("aria-hidden", "false");
-  const startPath = input.value || dirname(input.getAttribute("value") || "/") || "/";
+  const startPath = input.value || input.getAttribute("value") || "@roots";
   loadDirectory(startPath);
 }
 
