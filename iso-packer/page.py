@@ -205,6 +205,7 @@ body {
       <div class="login-alert">{{ message }}</div>
       {% endif %}
       <form class="login-form" method="post" action="/login">
+        <input name="next" type="hidden" value="{{ next_path|default('/') }}">
         <div class="login-field">
           <label>Web 密码</label>
           <input name="web_password" type="password" autocomplete="{% if first_setup %}new-password{% else %}current-password{% endif %}" placeholder="{% if first_setup %}设置一个密码{% else %}请输入密码{% endif %}" required>

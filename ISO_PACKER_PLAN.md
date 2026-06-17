@@ -1,100 +1,98 @@
-# ISO Packer 基础增强计划
+# ISO Packer 当前计划状态
 
-## 目标
+## 基线
 
-以当前 `ebichu/iso-packer:latest` 这一条轻量版本为唯一基线，继续保留现在的单 VPS 固定流程：
+- 主线版本：`ebichu/iso-packer:latest`
+- 使用方式：单 VPS、单容器、个人自用
+- 固定流程：
 
 ```text
 /watch -> /output -> /CloudNAS/CloudDrive/00-未整理/00-mkiso
 ```
 
-本次计划只补个人使用最需要的基础能力：
+## 已完成
 
-- 登录保护
-- 任务耗时
-- CD2 上传进度观察
-- 目录观察
+### 核心封装链路
 
-同时保持 Docker Compose 尽量简单，不强制通过环境变量配置，只做封装、转移和观察。
+- 识别 `BDMV` / `VIDEO_TS` 原盘目录
+- 使用 `genisoimage` 打包 ISO
+- 使用 `xorriso` 做封装后校验
+- 成功后把 ISO 从 `/output` 转移到 `/CloudNAS/CloudDrive/00-未整理/00-mkiso`
 
-## 计划内容
+### Web 管理界面
 
-### 1. 登录保护
+- Web 登录保护
+- 首次进入自动要求设置密码
+- 首页状态总览
+- 最近任务列表
+- 历史任务列表
+- 手动“重新封装”按钮
 
-- 增加简单的 Web 密码登录
-- 默认保护首页、设置页、重封装接口、状态接口、目录观察接口
-- 首次启动如果还没有密码，引导用户先完成首次设置
-- 密码优先保存到 `/data/config.json`
-- 健康检查接口 `/healthz` 单独放行
+### 任务状态与耗时
 
-### 2. 任务耗时
-
-- 记录每个任务的开始、结束和总耗时
+- 记录任务开始时间、结束时间、总耗时
 - 区分封装耗时和转移耗时
-- 运行中的任务显示实时耗时
+- 运行中实时显示耗时
 - 历史任务显示固定耗时
 
-### 3. CD2 上传进度观察
+### CD2 观察能力
 
-- 保留现有固定流程：`/watch -> /output -> /CloudNAS/CloudDrive/00-未整理/00-mkiso`
-- 接入 CloudDrive2 API，只用于读取上传队列和展示进度
-- 不做 API 直传，也不替代文件系统移动
-- API 不可用时，只提示未连接或未找到任务，不影响封装和转移
+- 读取 CloudDrive2 API 上传队列
+- 显示上传进度
+- 显示 API 不可用/未连接状态
+- 修改 CD2 API 设置后自动清理旧缓存和旧连接
 
-### 4. 目录观察
+### 目录观察
 
-- 增加只读目录观察区域
-- 支持三个入口：`/watch`、`/output`、`/CloudNAS/CloudDrive/00-未整理/00-mkiso`
-- 显示文件名、类型、大小、修改时间、当前路径
+- 只读浏览 `watch` / `output` / `cd2`
+- 显示文件名、类型、大小、修改时间
+- 支持进入子目录
 - 支持返回上级和刷新
-- 只允许浏览配置内的根目录及其子目录
+- 限制在允许根目录范围内浏览
 
-## 封装系统现状
+### 已完成的稳定性修复
 
-当前封装系统整体没有大问题，核心链路是：
+- worker 只启动一次，避免重复起扫描线程
+- `config.json` / `state.json` 使用原子写入
+- 登录跳转 `next` 只允许站内路径
+- 登录成功后保留原始回跳路径
+- 目录选择器和目录浏览器限制越权访问
+- 根目录“返回上级”不再触发 403
+- 扫描逻辑统一使用当前配置，不再中途重新取 `output_dir`
+- 中断恢复不再误改已终态任务
+- `process_item()` 启动前先 claim `active`，避免重复起任务
+- `process_item()` 增加异常兜底，避免异常后 `active` 卡死
 
-- 识别 `BDMV` / `VIDEO_TS` 原盘结构
-- 使用 `genisoimage -iso-level 3 -udf -allow-limited-size`
-- 用 `xorriso` 校验 ISO
+## 未完成
 
-所以：
+### 结构优化
 
-- 双层盘、三层盘、UHD 原盘都可以按原样打包
-- Dolby Vision、Atmos 等音视频内容不会被重新编码
-- 只要原盘目录结构完整，就能正常封装
+- 将 `iso-packer/app.py` 拆分为更小的模块
+- 降低 `process_item()`、`fetch_cd2_uploads()`、`transfer_iso_to_mount()` 的复杂度
+- 把部分状态处理抽成更清晰的小函数
 
-需要注意：
+### 测试完善
 
-- 只处理原盘目录，不处理普通单文件视频
-- `/output` 需要足够临时空间
-- 封装完成后再交给 CD2 挂载目录和后台上传
+- 目前已做脚本级和 Flask 测试客户端回归
+- 还没有独立的自动化测试文件
+- 还没有覆盖真实 `genisoimage` / `xorriso` / CD2 环境的集成测试
 
-## 接口与配置
+### 可选增强
 
-- 增加登录相关页面和接口
-- 扩展状态接口，返回任务耗时和 CD2 上传观察状态
-- 增加目录浏览接口，只访问 `/watch`、`/output`、`/CloudNAS/CloudDrive/00-未整理/00-mkiso`
-- CD2 API 地址、账号等配置放到 Web 设置页里
-- Docker Compose 只保留必要挂载和最小网络说明
+- CD2 区域显示“最后成功刷新时间 / 最后错误”
+- 手动重封装按钮做更细的前端状态控制
+- 补一个更明确的任务失败原因展示
 
-## 测试重点
+## 本轮检查结论
 
-- 未完成首次设置时访问首页会进入设置流程
-- 完成登录后，首页、设置、重封装、状态刷新、目录观察都正常
-- 任务运行时能看到耗时递增，完成后显示固定耗时
-- 目录观察只能访问三个根目录及其子目录
-- CD2 API 可用时能显示真实上传进度
-- CD2 API 不可用时不影响封装和文件移动
-- 大体积原盘、BDMV 结构、4 GB 以上文件都能正常封装和校验
+- 当前代码逻辑整体是可用的
+- 核心链路没有发现新的阻断性问题
+- 本轮实际修复了 3 类真实问题：
+  - 登录回跳丢失
+  - 任务异常时 `active` 可能残留
+  - CD2 API 设置修改后旧缓存不会立即失效
 
-## 默认假设
+## 后续建议
 
-- 主流程固定为 `/watch -> /output -> /CloudNAS/CloudDrive/00-未整理/00-mkiso`
-- CD2 API 只用于看上传进度和测试连接
-- SA / Symedia 继续负责观影入库、刮削和媒体库流程
-- 当前项目继续以 `ebichu/iso-packer:latest` 为唯一主线
-
-## 参考
-
-- [CloudDrive.proto](https://raw.githubusercontent.com/ge-fei-fan/clouddrive2api/master/clouddrive/CloudDrive.proto)
-- [Symedia CloudDrive2 插件文档](https://wiki.viplee.cc/symedia_config/plugin/cd2/)
+- 现在适合继续以这个版本稳定使用
+- 下一阶段如果要继续优化，优先做模块拆分和测试补齐

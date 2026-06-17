@@ -273,6 +273,16 @@ def normalize_cd2_api_addr(value: str) -> str:
     return addr
 
 
+def cd2_client_key_from_cfg(cfg: Dict):
+    cfg = cfg or {}
+    return (
+        bool(cfg.get("cd2_api_enabled")),
+        normalize_cd2_api_addr(cfg.get("cd2_api_addr")),
+        str(cfg.get("cd2_api_username") or "").strip(),
+        str(cfg.get("cd2_api_password") or ""),
+    )
+
+
 def resolve_absolute_path(value: str) -> Path:
     path = Path(str(value or "")).expanduser()
     if not path.is_absolute():
@@ -884,113 +894,129 @@ def process_item(source: Path, cfg: Dict) -> None:
         log(skip_message)
         return
     log(f"开始生成 ISO: {source} -> {target}")
-
-    if partial.exists():
-        partial.unlink()
-    result = run_iso(source, partial, source_size)
-    if result.returncode != 0:
-        log(f"生成失败 {source}: {result.stderr.strip()[-1000:]}")
-        try:
+    try:
+        if partial.exists():
             partial.unlink()
-        except FileNotFoundError:
+        result = run_iso(source, partial, source_size)
+        if result.returncode != 0:
+            log(f"生成失败 {source}: {result.stderr.strip()[-1000:]}")
+            try:
+                partial.unlink()
+            except FileNotFoundError:
+                pass
+            with lock:
+                state["active"] = None
+                item = state["items"].setdefault(str(source), {})
+                item["status"] = "failed"
+                item["pack_finished_at"] = now()
+                item["finished_at"] = now()
+                item["last_changed"] = now()
+                save_state_locked()
+            return
+
+        partial.replace(target)
+        if not validate_iso(target):
+            log(f"ISO 验证失败，保留源文件: {target}")
+            with lock:
+                state["active"] = None
+                item = state["items"].setdefault(str(source), {})
+                item["status"] = "verify_failed"
+                item["pack_finished_at"] = now()
+                item["finished_at"] = now()
+                item["last_changed"] = now()
+                save_state_locked()
+            return
+
+        log(f"ISO 完成并验证通过: {target}")
+        final_target = target
+        if cfg.get("cd2_transfer_enabled"):
+            transfer_started_at = now()
+            with lock:
+                item = state["items"].setdefault(str(source), {})
+                item["status"] = "transferring"
+                item["pack_finished_at"] = now()
+                item["transfer_started_at"] = transfer_started_at
+                state["active"] = {
+                    "source": str(source),
+                    "target": str(target),
+                    "started_at": task_started_at,
+                    "task_started_at": task_started_at,
+                    "pack_started_at": task_started_at,
+                    "pack_finished_at": item["pack_finished_at"],
+                    "transfer_started_at": transfer_started_at,
+                    "status": "transferring",
+                    "progress": {"phase": "transfer", "percent": 0, "current": 0, "total": target.stat().st_size if target.exists() else 0, "updated_at": now()},
+                }
+                save_state_locked()
+            moved_target = transfer_iso_to_mount(target, cfg)
+            transfer_finished_at = now()
+            if not moved_target:
+                with lock:
+                    item = state["items"].setdefault(str(source), {})
+                    item.update({
+                        "status": "transfer_failed",
+                        "target": str(target),
+                        "done_at": transfer_finished_at,
+                        "finished_at": transfer_finished_at,
+                        "pack_finished_at": item.get("pack_finished_at") or transfer_finished_at,
+                        "transfer_finished_at": transfer_finished_at,
+                        "size": source_size,
+                    })
+                    item["last_changed"] = now()
+                    state["active"] = None
+                    save_state_locked()
+                return
+            final_target = moved_target
+        else:
+            transfer_started_at = None
+            transfer_finished_at = None
+
+        if cfg.get("delete_source_after_success"):
+            try:
+                if source.is_dir():
+                    shutil.rmtree(source)
+                else:
+                    source.unlink()
+                log(f"已删除源文件: {source}")
+            except Exception as exc:
+                log(f"删除源文件失败 {source}: {exc}")
+
+        with lock:
+            item = state["items"].setdefault(str(source), {})
+            if cfg.get("cd2_transfer_enabled"):
+                status = "transfer_done"
+            else:
+                status = "done"
+            finished_at = now()
+            item.update({
+                "status": status,
+                "target": str(final_target),
+                "done_at": finished_at,
+                "finished_at": finished_at,
+                "pack_finished_at": item.get("pack_finished_at") or finished_at,
+                "transfer_started_at": transfer_started_at,
+                "transfer_finished_at": transfer_finished_at,
+                "size": source_size,
+            })
+            state["active"] = None
+            save_state_locked()
+    except Exception as exc:
+        log(f"处理任务异常 {source}: {exc}")
+        try:
+            if partial.exists():
+                partial.unlink()
+        except Exception:
             pass
         with lock:
             state["active"] = None
             item = state["items"].setdefault(str(source), {})
-            item["status"] = "failed"
-            item["pack_finished_at"] = now()
-            item["finished_at"] = now()
-            item["last_changed"] = now()
+            if item.get("status") not in TERMINAL_STATUSES:
+                failed_at = now()
+                item["status"] = "failed"
+                item["pack_finished_at"] = item.get("pack_finished_at") or failed_at
+                item["finished_at"] = failed_at
+                item["last_changed"] = failed_at
             save_state_locked()
-        return
-
-    partial.replace(target)
-    if not validate_iso(target):
-        log(f"ISO 验证失败，保留源文件: {target}")
-        with lock:
-            state["active"] = None
-            item = state["items"].setdefault(str(source), {})
-            item["status"] = "verify_failed"
-            item["pack_finished_at"] = now()
-            item["finished_at"] = now()
-            item["last_changed"] = now()
-            save_state_locked()
-        return
-
-    log(f"ISO 完成并验证通过: {target}")
-    final_target = target
-    if cfg.get("cd2_transfer_enabled"):
-        transfer_started_at = now()
-        with lock:
-            item = state["items"].setdefault(str(source), {})
-            item["status"] = "transferring"
-            item["pack_finished_at"] = now()
-            item["transfer_started_at"] = transfer_started_at
-            state["active"] = {
-                "source": str(source),
-                "target": str(target),
-                "started_at": task_started_at,
-                "task_started_at": task_started_at,
-                "pack_started_at": task_started_at,
-                "pack_finished_at": item["pack_finished_at"],
-                "transfer_started_at": transfer_started_at,
-                "status": "transferring",
-                "progress": {"phase": "transfer", "percent": 0, "current": 0, "total": target.stat().st_size if target.exists() else 0, "updated_at": now()},
-            }
-            save_state_locked()
-        moved_target = transfer_iso_to_mount(target, cfg)
-        transfer_finished_at = now()
-        if not moved_target:
-            with lock:
-                item = state["items"].setdefault(str(source), {})
-                item.update({
-                    "status": "transfer_failed",
-                    "target": str(target),
-                    "done_at": transfer_finished_at,
-                    "finished_at": transfer_finished_at,
-                    "pack_finished_at": item.get("pack_finished_at") or transfer_finished_at,
-                    "transfer_finished_at": transfer_finished_at,
-                    "size": source_size,
-                })
-                item["last_changed"] = now()
-                state["active"] = None
-                save_state_locked()
-            return
-        final_target = moved_target
-    else:
-        transfer_started_at = None
-        transfer_finished_at = None
-
-
-    if cfg.get("delete_source_after_success"):
-        try:
-            if source.is_dir():
-                shutil.rmtree(source)
-            else:
-                source.unlink()
-            log(f"已删除源文件: {source}")
-        except Exception as exc:
-            log(f"删除源文件失败 {source}: {exc}")
-
-    with lock:
-        item = state["items"].setdefault(str(source), {})
-        if cfg.get("cd2_transfer_enabled"):
-            status = "transfer_done"
-        else:
-            status = "done"
-        finished_at = now()
-        item.update({
-            "status": status,
-            "target": str(final_target),
-            "done_at": finished_at,
-            "finished_at": finished_at,
-            "pack_finished_at": item.get("pack_finished_at") or finished_at,
-            "transfer_started_at": transfer_started_at,
-            "transfer_finished_at": transfer_finished_at,
-            "size": source_size,
-        })
-        state["active"] = None
-        save_state_locked()
 
 
 def scanner_loop() -> None:
@@ -1175,6 +1201,7 @@ def login():
     set_app_secret(cfg)
     has_password = auth_password_set(cfg)
     error = ""
+    next_path = safe_next_path(request.values.get("next"))
     if request.method == "POST":
         password = (request.form.get("web_password") or "").strip()
         confirm = (request.form.get("web_password_confirm") or "").strip()
@@ -1188,18 +1215,19 @@ def login():
                 session["logged_in"] = True
                 session["login_at"] = now()
                 session["login_user"] = "admin"
-                return redirect(safe_next_path(request.args.get("next")))
+                return redirect(next_path)
         else:
             if verify_login_password(cfg, password):
                 session["logged_in"] = True
                 session["login_at"] = now()
                 session["login_user"] = "admin"
-                return redirect(safe_next_path(request.args.get("next")))
+                return redirect(next_path)
             error = "密码不正确"
     return render_template_string(
         PAGE_LOGIN,
         first_setup=not has_password,
         message=error,
+        next_path=next_path,
         login_hint="首次进入请先设置 Web 密码" if not has_password else "输入 Web 密码后继续",
     )
 
@@ -1228,6 +1256,7 @@ def index():
 @app.route("/settings", methods=["POST"])
 def settings():
     cfg = load_config()
+    old_cd2_key = cd2_client_key_from_cfg(cfg)
     cfg["watch_dir"] = request.form.get("watch_dir", cfg["watch_dir"]).strip()
     cfg["output_dir"] = request.form.get("output_dir", cfg["output_dir"]).strip()
     try:
@@ -1258,6 +1287,8 @@ def settings():
     if new_cd2_password:
         cfg["cd2_api_password"] = new_cd2_password
     save_config(cfg)
+    if old_cd2_key != cd2_client_key_from_cfg(cfg):
+        close_cd2_client()
     Path(cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg.get("cd2_mount_root", "/CloudNAS")).expanduser().mkdir(parents=True, exist_ok=True)
