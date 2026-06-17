@@ -165,7 +165,6 @@ def load_config() -> Dict:
         data = {}
     cfg = DEFAULT_CONFIG.copy()
     cfg.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
-    cfg["cd2_api_addr"] = normalize_cd2_api_addr(cfg.get("cd2_api_addr"))
     if not cfg.get("web_secret_key"):
         cfg["web_secret_key"] = secrets.token_urlsafe(32)
         save_config(cfg)
@@ -1300,19 +1299,27 @@ def api_status():
 
 @app.route("/api/directories")
 def api_directories():
-    raw_path = (request.args.get("path") or "/").strip() or "/"
+    cfg = load_config()
+    scope = (request.args.get("scope") or "").strip()
+    roots = directory_picker_roots(cfg, scope)
+    if not roots:
+        return jsonify({"ok": False, "message": "无效的目录选择范围"}), 400
+    raw_path = (request.args.get("path") or DIRECTORY_PICKER_ROOT).strip() or DIRECTORY_PICKER_ROOT
+    if raw_path in {"/", DIRECTORY_PICKER_ROOT}:
+        return jsonify(directory_picker_payload_for_roots(roots))
     try:
-        path = Path(raw_path).expanduser()
-        if not path.is_absolute():
-            path = Path("/") / path
-        path = path.resolve()
+        path = resolve_absolute_path(raw_path)
     except Exception as exc:
         return jsonify({"ok": False, "message": f"路径无效: {exc}"}), 400
+    if not path_in_any_root(path, roots):
+        return jsonify({"ok": False, "message": "禁止访问允许范围外的路径"}), 403
 
     if not path.exists():
         return jsonify({"ok": False, "message": "目录不存在"}), 404
     if not path.is_dir():
         path = path.parent
+    if not path_in_any_root(path, roots):
+        return jsonify({"ok": False, "message": "禁止访问允许范围外的路径"}), 403
 
     try:
         children = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
@@ -1337,7 +1344,8 @@ def api_directories():
     return jsonify({
         "ok": True,
         "path": str(path),
-        "parent": str(path.parent) if path.parent != path else None,
+        "display_path": str(path),
+        "parent": directory_picker_parent(path, roots),
         "entries": entries,
     })
 

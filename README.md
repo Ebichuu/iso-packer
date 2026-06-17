@@ -112,7 +112,7 @@ services:
 
    ```text
    启用 CD2 API: 勾选
-   CD2 API 地址: http://host.docker.internal:19798
+   CD2 API 地址: host.docker.internal:19798
    CD2 API 用户名: 按你的 CD2 实际配置填写
    CD2 API 密码: 按你的 CD2 实际配置填写
    轮询秒数: 10

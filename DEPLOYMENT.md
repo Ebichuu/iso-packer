@@ -134,7 +134,7 @@ CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso
 
 ```text
 启用 CD2 API: 开
-CD2 API 地址: http://host.docker.internal:19798
+CD2 API 地址: host.docker.internal:19798
 CD2 API 用户名: 你的 CD2 用户名
 CD2 API 密码: 你的 CD2 密码
 轮询秒数: 10
@@ -218,7 +218,7 @@ docker exec -it iso-packer ls -la /CloudNAS/CloudDrive
 
 - CD2 Web/API 本身是否可访问
 - `extra_hosts` 是否已配置
-- 地址是否写成了 `http://host.docker.internal:19798`
+- 地址是否写成了 `host.docker.internal:19798`
 
 ### 任务一直不进入封装
 
