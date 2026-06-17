@@ -1472,6 +1472,14 @@ let alertTimer;
 const seenLogEvents = new Set();
 let currentBrowseRoot = "watch";
 let currentBrowsePath = "/";
+function browseRootPath(root) {
+  if(root === "watch") return $("watch_dir")?.value || "/";
+  if(root === "output") return $("output_dir")?.value || "/";
+  return $("cd2_target_dir")?.value || "/";
+}
+function normalizeBrowsePath(path) {
+  return String(path || "/").replace(/\\/+$/, "") || "/";
+}
 
 function showSettingsAlert(message, isError=false) {
   const alert = $("settings-alert");
@@ -2021,7 +2029,7 @@ function updateBrowserRows(items) {
 async function loadBrowser(root = currentBrowseRoot, path = currentBrowsePath) {
   currentBrowseRoot = root || "watch";
   if(!path || path === "/") {
-    currentBrowsePath = currentBrowseRoot === "watch" ? $("watch_dir")?.value || "/" : currentBrowseRoot === "output" ? $("output_dir")?.value || "/" : $("cd2_target_dir")?.value || "/";
+    currentBrowsePath = browseRootPath(currentBrowseRoot);
   } else {
     currentBrowsePath = path;
   }
@@ -2056,8 +2064,9 @@ function setupBrowser() {
   const up = $("browser-up");
   const refreshButton = $("browser-refresh");
   if(up) up.addEventListener("click", () => {
-    const current = String(currentBrowsePath || "/").replace(/\\/+$/, "") || "/";
-    if(current === "/") return;
+    const current = normalizeBrowsePath(currentBrowsePath);
+    const rootPath = normalizeBrowsePath(browseRootPath(currentBrowseRoot));
+    if(current === "/" || current === rootPath) return;
     const index = current.lastIndexOf("/");
     loadBrowser(currentBrowseRoot, index <= 0 ? "/" : current.slice(0, index));
   });

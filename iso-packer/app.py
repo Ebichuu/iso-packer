@@ -56,6 +56,7 @@ VIDEO_EXTENSIONS = {
     ".mpg", ".mpeg", ".ts", ".m2ts", ".mts", ".vob", ".rmvb", ".3gp",
 }
 DISC_STRUCTURE_DIRS = {"bdmv", "video_ts"}
+TERMINAL_STATUSES = {"done", "transfer_done", "failed", "verify_failed", "transfer_failed"}
 
 app = Flask(__name__)
 lock = threading.RLock()
@@ -173,7 +174,9 @@ def load_config() -> Dict:
 
 def save_config(cfg: Dict) -> None:
     ensure_app_dir()
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(CONFIG_PATH)
 
 
 def sanitize_config(cfg: Dict) -> Dict:
@@ -227,10 +230,17 @@ def wants_json_response() -> bool:
     return request.path.startswith("/api/") or request.path in {"/rerun", "/settings"}
 
 
+def safe_next_path(value: Optional[str]) -> str:
+    path = str(value or "").strip()
+    if not path.startswith("/") or path.startswith("//"):
+        return "/"
+    return path
+
+
 def unauthorized_response(message: str = "请先登录"):
     if wants_json_response():
         return jsonify({"ok": False, "message": message}), 401
-    return redirect(url_for("login", next=request.path or "/"))
+    return redirect(url_for("login", next=safe_next_path(request.path or "/")))
 
 
 def verify_login_password(cfg: Dict, password: str) -> bool:
@@ -641,10 +651,10 @@ def should_pack_iso(source: Path) -> tuple[bool, str]:
     return False, "未知路径类型"
 
 
-def get_candidates(watch_dir: Path):
+def get_candidates(watch_dir: Path, output_dir: Path):
     if not watch_dir.exists():
         watch_dir.mkdir(parents=True, exist_ok=True)
-    output_dir = Path(load_config()["output_dir"]).resolve()
+    output_dir = output_dir.resolve()
     for child in sorted(watch_dir.iterdir(), key=lambda p: p.name.lower()):
         if child.name.startswith("."):
             continue
@@ -674,15 +684,16 @@ def iso_path_for(source: Path, output_dir: Path) -> Path:
     return output_dir / f"{base}-{suffix}.iso"
 
 
-def update_active_progress(phase: str, target: Path, percent: float, current: int, total: int, **extra) -> None:
+def update_active_progress(phase: str, target: Path, progress: Dict) -> None:
+    progress = dict(progress or {})
     progress = {
+        **progress,
         "phase": phase,
-        "percent": max(0.0, min(100.0, float(percent or 0))),
-        "current": int(current or 0),
-        "total": int(total or 0),
+        "percent": max(0.0, min(100.0, float(progress.get("percent") or 0))),
+        "current": int(progress.get("current") or 0),
+        "total": int(progress.get("total") or 0),
         "updated_at": now(),
     }
-    progress.update(extra)
     with lock:
         active = state.get("active") or {}
         active["target"] = str(target)
@@ -714,7 +725,7 @@ def run_iso(source: Path, target: Path, source_size: int) -> subprocess.Complete
             percent = 100.0 if source_size <= 0 else current * 100 / source_size
             current_time = time.time()
             if current_time - last_update >= 2:
-                update_active_progress("packing", target, min(percent, 99.9), current, source_size)
+                update_active_progress("packing", target, {"percent": min(percent, 99.9), "current": current, "total": source_size})
                 last_update = current_time
             time.sleep(1)
         proc.wait()
@@ -726,7 +737,7 @@ def run_iso(source: Path, target: Path, source_size: int) -> subprocess.Complete
     except FileNotFoundError:
         pass
     current = target.stat().st_size if target.exists() else 0
-    update_active_progress("packing", target, 100.0 if proc.returncode == 0 else min(current * 100 / max(source_size, 1), 99.9), current, source_size)
+    update_active_progress("packing", target, {"percent": 100.0 if proc.returncode == 0 else min(current * 100 / max(source_size, 1), 99.9), "current": current, "total": source_size})
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
@@ -793,7 +804,7 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
                 current_time = time.time()
                 if current_time - last_update >= 2:
                     percent = 100.0 if total <= 0 else copied * 100 / total
-                    update_active_progress("transfer", final_path, min(percent, 99.9), copied, total)
+                    update_active_progress("transfer", final_path, {"percent": min(percent, 99.9), "current": copied, "total": total})
                     last_update = current_time
             dst.flush()
             os.fsync(dst.fileno())
@@ -804,7 +815,7 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
         if final_path.stat().st_size != total:
             log(f"CloudDrive2最终文件大小校验失败: {final_path.stat().st_size} != {total}")
             return None
-        update_active_progress("transfer", final_path, 100.0, total, total, verified=True)
+        update_active_progress("transfer", final_path, {"percent": 100.0, "current": total, "total": total, "verified": True})
         target.unlink()
         log(f"CloudDrive2转移完成并校验通过，已删除本地ISO: {final_path}")
         return final_path
@@ -842,24 +853,36 @@ def process_item(source: Path, cfg: Dict) -> None:
     target = iso_path_for(source, output_dir)
     partial = target.with_suffix(target.suffix + ".partial")
     task_started_at = now()
+    skip_message = None
     with lock:
-        item = state["items"].setdefault(str(source), {})
-        item.update({
-            "task_started_at": task_started_at,
-            "pack_started_at": task_started_at,
-            "status": "running",
-            "target": str(target),
-        })
-        state["active"] = {
-            "source": str(source),
-            "target": str(target),
-            "started_at": task_started_at,
-            "task_started_at": task_started_at,
-            "pack_started_at": task_started_at,
-            "status": "running",
-            "progress": {"phase": "packing", "percent": 0, "current": 0, "total": source_size, "updated_at": now()},
-        }
-        save_state_locked()
+        active_task = state.get("active")
+        if active_task is not None:
+            active_source = active_task.get("source") or "unknown"
+            if active_source == str(source):
+                skip_message = f"跳过重复启动任务: {source}"
+            else:
+                skip_message = f"已有任务执行中，跳过 {source}: {active_source}"
+        else:
+            item = state["items"].setdefault(str(source), {})
+            item.update({
+                "task_started_at": task_started_at,
+                "pack_started_at": task_started_at,
+                "status": "running",
+                "target": str(target),
+            })
+            state["active"] = {
+                "source": str(source),
+                "target": str(target),
+                "started_at": task_started_at,
+                "task_started_at": task_started_at,
+                "pack_started_at": task_started_at,
+                "status": "running",
+                "progress": {"phase": "packing", "percent": 0, "current": 0, "total": source_size, "updated_at": now()},
+            }
+            save_state_locked()
+    if skip_message:
+        log(skip_message)
+        return
     log(f"开始生成 ISO: {source} -> {target}")
 
     if partial.exists():
@@ -984,6 +1007,7 @@ def scanner_loop() -> None:
 
 def scan_once(cfg: Dict) -> None:
     watch_dir = Path(cfg["watch_dir"]).expanduser().resolve()
+    output_dir = Path(cfg["output_dir"]).expanduser().resolve()
     stable_seconds = max(30, int(cfg.get("stable_seconds", 180)))
     current = set()
     with lock:
@@ -993,7 +1017,7 @@ def scan_once(cfg: Dict) -> None:
     if active:
         return
 
-    for candidate in get_candidates(watch_dir):
+    for candidate in get_candidates(watch_dir, output_dir):
         key = str(candidate.resolve())
         pack_iso, pack_reason = should_pack_iso(candidate)
         if not pack_iso:
@@ -1009,9 +1033,8 @@ def scan_once(cfg: Dict) -> None:
         with lock:
             item = state["items"].setdefault(key, {"first_seen": now(), "status": "watching"})
             item["pack_iso"] = True
-            terminal_statuses = {"done", "transfer_done", "failed", "verify_failed", "transfer_failed"}
             active_statuses = {"running", "transferring"}
-            if item.get("status") in terminal_statuses | active_statuses:
+            if item.get("status") in TERMINAL_STATUSES | active_statuses:
                 item.setdefault("last_size", size)
                 item["partial_files"] = partial
                 save_state_locked()
@@ -1026,7 +1049,7 @@ def scan_once(cfg: Dict) -> None:
                 continue
             item["last_size"] = size
             item["partial_files"] = partial
-            elapsed = time.time() - time.mktime(time.strptime(last_changed, "%Y-%m-%d %H:%M:%S"))
+            elapsed = seconds_between(last_changed)
             if partial:
                 item["status"] = "waiting_partial"
             elif elapsed >= stable_seconds:
@@ -1082,6 +1105,7 @@ def recover_interrupted_task() -> None:
             return
         source = active.get("source")
         target = active.get("target")
+        recovered = False
         if target:
             try:
                 Path(str(target) + ".partial").unlink()
@@ -1091,10 +1115,12 @@ def recover_interrupted_task() -> None:
                 pass
         if source and Path(source).exists():
             item = state.setdefault("items", {}).setdefault(source, {})
-            if item.get("status") not in {"done", "verify_failed"}:
+            if item.get("status") not in TERMINAL_STATUSES:
                 item["status"] = "waiting_stable"
                 item["last_changed"] = now()
-        state["events"] = state.get("events", [])[-199:] + [f"[{now()}] 检测到上次任务中断，已恢复等待重新扫描"]
+                recovered = True
+        if recovered:
+            state["events"] = state.get("events", [])[-199:] + [f"[{now()}] 检测到上次任务中断，已恢复等待重新扫描"]
         state["active"] = None
         save_state_locked()
 
@@ -1162,13 +1188,13 @@ def login():
                 session["logged_in"] = True
                 session["login_at"] = now()
                 session["login_user"] = "admin"
-                return redirect(request.args.get("next") or url_for("index"))
+                return redirect(safe_next_path(request.args.get("next")))
         else:
             if verify_login_password(cfg, password):
                 session["logged_in"] = True
                 session["login_at"] = now()
                 session["login_user"] = "admin"
-                return redirect(request.args.get("next") or url_for("index"))
+                return redirect(safe_next_path(request.args.get("next")))
             error = "密码不正确"
     return render_template_string(
         PAGE_LOGIN,
