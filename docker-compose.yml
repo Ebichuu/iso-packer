@@ -1,9 +1,7 @@
 services:
   iso-packer:
-    # 方式 1: 使用 Docker Hub 预构建镜像（推荐，开箱即用）
     image: ebichu/iso-packer:latest
-
-    # 方式 2: 从本地源码构建（如需自定义，取消下面注释，注释上面 image）
+    # 如需本地构建，取消下一行注释
     # build: .
 
     container_name: iso-packer
@@ -17,24 +15,17 @@ services:
       - PYTHONUNBUFFERED=1
 
     volumes:
-      # 数据持久化目录（配置、状态、日志）
       - ./data:/data
-
-      # 监控目录 - CD2 挂载的 115 网盘下载目录
       - /mnt/115Download:/watch
-
-      # 临时输出目录 - ISO 封装临时存放
       - /mnt/iso-output:/output
-
-      # CD2 挂载根目录 - 用于转移文件
-      # 重要：挂载父目录并使用 rslave 接收来自 CD2 容器的挂载传播
-      # 参考：CLOUDDRIVE2_INTEGRATION.md
       - /CloudNAS:/CloudNAS:rslave
 
-    # 网络模式
     network_mode: bridge
 
-    # 日志配置
+    extra_hosts:
+      # Linux bridge 模式下访问宿主机 CD2 API
+      - "host.docker.internal:host-gateway"
+
     logging:
       driver: "json-file"
       options:

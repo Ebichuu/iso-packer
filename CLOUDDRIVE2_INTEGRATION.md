@@ -1,208 +1,157 @@
-# CloudDrive2 集成配置指南
+# CloudDrive2 集成说明
 
-## 正确的配置方案（已验证）
+当前项目和 CloudDrive2 的关系很明确：
 
-### CloudDrive2 容器配置
+- 真正的文件转移依旧走文件系统
+- CD2 API 只用于观察上传进度和测试连接
+- 默认目标目录是 `/CloudNAS/CloudDrive/00-未整理/00-mkiso`
 
-```yaml
-services:
-  cloudnas:
-    container_name: clouddrive2
-    image: cloudnas/clouddrive2-unstable:latest
-    
-    # 网络配置
-    network_mode: host  # 使用 host 网络，避免端口映射问题
-    pid: host           # 共享进程命名空间，FUSE 需要
-    
-    # 权限配置
-    privileged: true
-    devices:
-      - /dev/fuse:/dev/fuse
-    
-    # 环境变量
-    environment:
-      - CLOUDDRIVE_HOME=/Config
-      - ENABLE_RUN_AFTER_START=true
-    
-    # 挂载配置
-    volumes:
-      # 关键：使用 shared 传播，让其他容器能看到 CD2 的子挂载
-      - /CloudNAS:/CloudNAS:shared
-      
-      # 配置目录
-      - /root/clouddrive2:/Config
-      
-      # 可选：挂载整个根目录（灵活但权限高）
-      - /:/host:rshared
-    
-    restart: always
+也就是说，当前主线不是“通过 API 直传到网盘”，而是：
+
+```text
+/output -> /CloudNAS/CloudDrive/00-未整理/00-mkiso -> CD2 后台继续上传
 ```
 
-**关键点**：
-- ✅ `network_mode: host` - 避免端口映射问题
-- ✅ `/CloudNAS:/CloudNAS:shared` - 创建挂载传播源
-- ✅ `pid: host` - FUSE 文件系统需要
+## 1. 为什么还需要 `/CloudNAS:/CloudNAS:rslave`
 
----
+因为 CD2 的挂载点通常是动态出现在 `/CloudNAS` 下的。`iso-packer` 想在容器里看到这些目录，就要接收挂载传播。
 
-### iso-packer 容器配置
+推荐挂载：
+
+```yaml
+volumes:
+  - /CloudNAS:/CloudNAS:rslave
+```
+
+不要只挂载子目录来赌运气，父目录更稳。
+
+## 2. iso-packer 侧推荐配置
 
 ```yaml
 services:
   iso-packer:
-    container_name: iso-packer
     image: ebichu/iso-packer:latest
-    
-    # 网络配置
-    network_mode: bridge
+    container_name: iso-packer
+    restart: unless-stopped
+
     ports:
       - "15865:15865"
-    
-    # 环境变量
+
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
-    
-    # 挂载配置
+
     volumes:
-      # 数据持久化
       - ./data:/data
-      
-      # 监控和输出目录
       - /mnt/115Download:/watch
       - /mnt/iso-output:/output
-      
-      # 关键：使用 rslave 接收 CD2 的挂载传播
       - /CloudNAS:/CloudNAS:rslave
-    
-    # 日志配置
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    
-    restart: unless-stopped
+
+    network_mode: bridge
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 ```
 
-**关键点**：
-- ✅ `/CloudNAS:/CloudNAS:rslave` - 接收来自 CD2 的挂载传播
-- ✅ 挂载父目录 `/CloudNAS`，不是子目录 `/CloudNAS/CloudDrive`
+这里的 `extra_hosts` 是为了访问宿主机上的 CD2 API。
 
----
+## 3. 如果你自己也管 CD2 容器
 
-## 配置文件设置
+CD2 那边通常需要确保宿主机上的 `/CloudNAS` 是共享传播来源。常见做法是：
 
-iso-packer 的 `config.json` 需要相应调整：
-
-```json
-{
-  "watch_dir": "/mnt/115Download",
-  "output_dir": "/mnt/iso-output",
-  "cd2_transfer_enabled": true,
-  "cd2_mount_root": "/CloudNAS",
-  "cd2_target_dir": "/CloudNAS/CloudDrive",
-  "cd2_require_mount": true,
-  "delete_source_after_success": true
-}
+```yaml
+volumes:
+  - /CloudNAS:/CloudNAS:shared
 ```
 
-**关键点**：
-- ✅ `cd2_mount_root`: `/CloudNAS` - 挂载根目录
-- ✅ `cd2_target_dir`: `/CloudNAS/CloudDrive` - CD2 实际目录
+`iso-packer` 再通过 `:rslave` 接收这层传播。
 
----
+如果你的 CD2 已经正常工作，并且宿主机能看到 `/CloudNAS/CloudDrive`，那 `iso-packer` 这边通常只需要按当前文档挂载就行，不一定要重做整套 CD2 部署。
 
-## 挂载传播原理
+## 4. Web 设置页怎么填
 
-```
-宿主机 /CloudNAS
-    ↓ (shared 传播)
-CD2 容器 /CloudNAS
-    ↓ (CD2 在内部创建 FUSE 挂载)
-CD2 容器 /CloudNAS/CloudDrive (动态挂载)
-    ↓ (rslave 传播)
-iso-packer 容器 /CloudNAS/CloudDrive (能看到)
+基础设置建议：
+
+```text
+CD2 挂载根目录: /CloudNAS
+CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso
 ```
 
-**工作流程**：
-1. CD2 容器用 `:shared` 挂载 `/CloudNAS`
-2. CD2 在容器内创建 `/CloudNAS/CloudDrive` FUSE 挂载
-3. iso-packer 用 `:rslave` 接收这个子挂载
-4. iso-packer 能看到 `/CloudNAS/CloudDrive` 的所有文件
+如果要显示上传进度，再额外填写：
 
----
+```text
+启用 CD2 API: 开
+CD2 API 地址: http://host.docker.internal:19798
+CD2 API 用户名: 你的 CD2 用户名
+CD2 API 密码: 你的 CD2 密码
+轮询秒数: 10
+```
 
-## 常见问题
+再强调一次：这里不是 API 直传，只是读取上传队列。
 
-### Q1: 为什么 iso-packer 要用 rslave？
-**A**: 因为 CD2 使用 FUSE 动态挂载，`:rslave` 能接收这些动态挂载的传播。
+## 5. 现在能看到哪些 CD2 信息
 
-### Q2: 为什么不直接挂载 /CloudNAS/CloudDrive？
-**A**: 因为 `/CloudNAS/CloudDrive` 是 CD2 容器内部动态创建的挂载点，如果直接挂载子目录，`:rslave` 参数无效。必须挂载父目录。
+启用 CD2 API 后，Web 界面会展示：
 
-### Q3: CD2 为什么需要 network_mode: host？
-**A**: 避免端口映射问题，让 CD2 的 Web 界面（19798 端口）直接暴露在宿主机网络。
+- 当前上传任务数
+- 每个任务的目标路径
+- 已上传大小 / 总大小
+- 上传百分比
+- 上传状态
 
-### Q4: CD2 为什么同时挂载 /CloudNAS 和 /:/host？
-**A**: 
-- `/CloudNAS:shared` - 用于挂载传播
-- `/:/host:rshared` - 灵活访问宿主机任意路径（可选）
+同时，你还可以直接在“目录观察”里看：
 
----
+- `watch`
+- `output`
+- `cd2`
 
-## 验证步骤
+这样比反复进 CD2 容器里看更方便。
 
-### 1. 检查 CD2 挂载
+## 6. 验证方法
+
+先看健康检查：
+
 ```bash
-# 查看 CD2 容器挂载
-docker exec -it clouddrive2 ls -la /CloudNAS/
-
-# 检查 CloudDrive 挂载
-docker exec -it clouddrive2 ls -la /CloudNAS/CloudDrive/
+curl http://127.0.0.1:15865/healthz
 ```
 
-### 2. 检查 iso-packer 能否看到
+再确认容器里能看到目标路径：
+
 ```bash
-# iso-packer 应该能看到相同的内容
-docker exec -it iso-packer ls -la /CloudNAS/CloudDrive/
+docker exec -it iso-packer ls -la /CloudNAS
+docker exec -it iso-packer ls -la /CloudNAS/CloudDrive
+docker exec -it iso-packer ls -la /CloudNAS/CloudDrive/00-未整理/00-mkiso
 ```
 
-### 3. 测试 CD2 转移功能
-- 访问 iso-packer Web 界面：http://your-vps-host/
-- 完成一个 ISO 封装任务
-- 检查是否能成功转移到 CD2
+如果启用了 CD2 API，再去 Web 看上传进度区是否有返回。
 
----
+## 7. 常见问题
 
-## 部署顺序
+### 为什么不用 CD2 API 直接创建文件上传
 
-1. **先部署 CloudDrive2**
-   ```bash
-   docker compose up -d cloudnas
-   ```
+因为你现在的实际使用方式已经固定，文件路径也固定，走文件系统移动更直接，项目也更轻。CD2 API 只拿来做观察层正好够用。
 
-2. **等待 CD2 完全启动**（约 10-30 秒）
-   ```bash
-   docker logs clouddrive2 -f
-   ```
+### 为什么 API 地址建议写 `host.docker.internal`
 
-3. **再部署 iso-packer**
-   ```bash
-   docker compose up -d iso-packer
-   ```
+因为当前 `iso-packer` 通常跑在 bridge 网络里，而 CD2 往往跑在宿主机或 host 网络里。这个地址配合：
 
-**原因**：iso-packer 的 `:rslave` 需要 CD2 先创建 `:shared` 挂载。
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
 
----
+在 Linux 环境里比较省事。
 
-## 参考
+### 为什么目录观察和 API 都保留
 
-- **基于 Symedia 项目的最佳实践**
-- **CloudDrive2 官方文档**: https://www.clouddrive2.com/
-- **Docker 挂载传播**: https://docs.docker.com/storage/bind-mounts/#configure-bind-propagation
+因为两者解决的问题不一样：
 
----
+- 目录观察：看文件有没有真的落到目标路径
+- CD2 API：看后台上传队列有没有在跑
 
-**状态**：✅ 已验证正常工作  
-**更新日期**：2026-06-16
+两者一起用，排查会顺手很多。
+
+## 8. 参考
+
+- [Symedia CloudDrive2 插件文档](https://wiki.viplee.cc/symedia_config/plugin/cd2/)
+- [CloudDrive2 官方站点](https://www.clouddrive2.com/)

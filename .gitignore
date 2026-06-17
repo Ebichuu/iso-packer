@@ -25,6 +25,8 @@ Thumbs.db
 # Project specific
 data/
 *.log
+iso-packer/config.json
+iso-packer/state.json
 
 # UI/UX Skills (local only, not part of project)
 .agents/
@@ -34,3 +36,9 @@ skills-lock.json
 *.tmp
 *.bak
 *.backup
+*.gz
+*.rar
+
+# Archived / duplicate experiments
+AutoISO/
+iso-packer-v2/

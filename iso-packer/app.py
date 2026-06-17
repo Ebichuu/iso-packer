@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import secrets
 import subprocess
 import threading
 import time
@@ -10,7 +11,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
 
-from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
+
+try:
+    from clouddrive2_client import CloudDriveClient
+except Exception:
+    CloudDriveClient = None
 
 # 数据目录：优先使用 /data（持久化挂载），否则使用当前目录
 APP_DIR = Path(os.getenv("DATA_DIR", "/data"))
@@ -18,18 +25,29 @@ CONFIG_PATH = APP_DIR / "config.json"
 STATE_PATH = APP_DIR / "state.json"
 LOG_PATH = APP_DIR / "iso-packer.log"
 
+
+def ensure_app_dir() -> None:
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+
 DEFAULT_CONFIG = {
-    "watch_dir": "/root/iso-watch",
-    "output_dir": "/root/iso-output",
+    "watch_dir": "/watch",
+    "output_dir": "/output",
     "delete_source_after_success": True,
     "scan_interval_seconds": 20,
     "stable_seconds": 180,
     "min_free_space_gb": 5,
     "enabled": True,
     "cd2_transfer_enabled": False,
-    "cd2_mount_root": "/mnt/cd2",
-    "cd2_target_dir": "/mnt/cd2",
+    "cd2_mount_root": "/CloudNAS",
+    "cd2_target_dir": "/CloudNAS/CloudDrive/00-未整理/00-mkiso",
     "cd2_require_mount": True,
+    "web_password_hash": "",
+    "web_secret_key": "",
+    "cd2_api_enabled": False,
+    "cd2_api_addr": "http://host.docker.internal:19798",
+    "cd2_api_username": "",
+    "cd2_api_password": "",
+    "cd2_queue_poll_seconds": 10,
 }
 
 PARTIAL_EXTENSIONS = {".part", ".tmp", ".download", ".crdownload", ".aria2", ".!qb"}
@@ -41,13 +59,51 @@ DISC_STRUCTURE_DIRS = {"bdmv", "video_ts"}
 
 app = Flask(__name__)
 lock = threading.RLock()
-state = {"items": {}, "last_scan": None, "active": None, "events": []}
+cd2_lock = threading.RLock()
+cd2_client_cache = {"key": None, "client": None, "last_error": None, "checked_at": None, "upload_map": {}, "upload_status": None}
+state = {"items": {}, "last_scan": None, "active": None, "events": [], "cd2": {}}
 worker_started = False
 last_log_prune = 0.0
 
 
 def now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_time(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def seconds_between(start: Optional[str], end: Optional[str] = None) -> int:
+    start_dt = parse_time(start)
+    if not start_dt:
+        return 0
+    end_dt = parse_time(end) if end else datetime.now()
+    if not end_dt:
+        return 0
+    return max(0, int((end_dt - start_dt).total_seconds()))
+
+
+def format_duration(seconds: Optional[int]) -> str:
+    total = max(0, int(seconds or 0))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def duration_summary(timings: Dict) -> str:
+    return (
+        f"总 {format_duration(timings.get('total', 0))} / "
+        f"封装 {format_duration(timings.get('pack', 0))} / "
+        f"转移 {format_duration(timings.get('transfer', 0))}"
+    )
 
 
 def prune_log_file() -> None:
@@ -82,25 +138,45 @@ def log(message: str) -> None:
         state["events"] = state["events"][-200:]
         save_state_locked()
     prune_log_file()
+    ensure_app_dir()
     with LOG_PATH.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
 
 def load_config() -> Dict:
+    ensure_app_dir()
     if not CONFIG_PATH.exists():
-        save_config(DEFAULT_CONFIG.copy())
-        return DEFAULT_CONFIG.copy()
+        cfg = DEFAULT_CONFIG.copy()
+        if not cfg.get("web_secret_key"):
+            cfg["web_secret_key"] = secrets.token_urlsafe(32)
+        save_config(cfg)
+        return cfg
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         data = {}
     cfg = DEFAULT_CONFIG.copy()
     cfg.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
+    if not cfg.get("web_secret_key"):
+        cfg["web_secret_key"] = secrets.token_urlsafe(32)
+        save_config(cfg)
     return cfg
 
 
 def save_config(cfg: Dict) -> None:
+    ensure_app_dir()
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def sanitize_config(cfg: Dict) -> Dict:
+    safe = dict(cfg or {})
+    safe.pop("web_password_hash", None)
+    safe.pop("web_secret_key", None)
+    return safe
+
+
+def auth_enabled(cfg: Dict) -> bool:
+    return True
 
 
 def load_state() -> None:
@@ -115,9 +191,70 @@ def load_state() -> None:
 
 
 def save_state_locked() -> None:
+    ensure_app_dir()
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(STATE_PATH)
+
+
+def set_app_secret(cfg: Dict) -> None:
+    app.secret_key = cfg.get("web_secret_key") or secrets.token_urlsafe(32)
+
+
+try:
+    set_app_secret(load_config())
+except Exception:
+    app.secret_key = secrets.token_urlsafe(32)
+
+
+def auth_password_set(cfg: Dict) -> bool:
+    return bool((cfg or {}).get("web_password_hash"))
+
+
+def is_logged_in() -> bool:
+    return bool(session.get("logged_in"))
+
+
+def wants_json_response() -> bool:
+    return request.path.startswith("/api/") or request.path in {"/rerun", "/settings"}
+
+
+def unauthorized_response(message: str = "请先登录"):
+    if wants_json_response():
+        return jsonify({"ok": False, "message": message}), 401
+    return redirect(url_for("login", next=request.path or "/"))
+
+
+def verify_login_password(cfg: Dict, password: str) -> bool:
+    stored = (cfg or {}).get("web_password_hash") or ""
+    return bool(stored and check_password_hash(stored, password or ""))
+
+
+def update_password(cfg: Dict, password: str) -> None:
+    cfg["web_password_hash"] = generate_password_hash(password)
+    if not cfg.get("web_secret_key"):
+        cfg["web_secret_key"] = secrets.token_urlsafe(32)
+    save_config(cfg)
+    set_app_secret(cfg)
+
+
+def path_in_root(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def parse_int_form(name: str, fallback, minimum: Optional[int] = None) -> int:
+    raw = request.form.get(name, fallback)
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} 必须是数字")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} 不能小于 {minimum}")
+    return value
 
 
 def safe_filename(name: str) -> str:
@@ -179,6 +316,202 @@ def format_size(value) -> str:
     if kb >= 0.01:
         return f"{kb:.2f} KB"
     return f"{int(size)} B"
+
+
+def apply_task_timings(item: Dict, active: Optional[Dict] = None) -> Dict:
+    source = dict(item or {})
+    active = active or {}
+    progress = active.get("progress") or {}
+    phase = progress.get("phase")
+    task_started_at = source.get("task_started_at") or active.get("task_started_at") or source.get("pack_started_at") or active.get("pack_started_at") or source.get("started_at") or active.get("started_at")
+    task_finished_at = source.get("finished_at") or active.get("finished_at") or source.get("done_at") or active.get("done_at")
+    pack_started_at = source.get("pack_started_at") or active.get("pack_started_at") or task_started_at
+    pack_finished_at = source.get("pack_finished_at") or active.get("pack_finished_at")
+    transfer_started_at = source.get("transfer_started_at") or active.get("transfer_started_at")
+    transfer_finished_at = source.get("transfer_finished_at") or active.get("transfer_finished_at")
+    pack_end = pack_finished_at or (now() if active and phase == "packing" else None)
+    transfer_end = transfer_finished_at or (now() if active and phase == "transfer" else None)
+    total_end = task_finished_at or (now() if active else None)
+    durations = {
+        "total": seconds_between(task_started_at, total_end),
+        "pack": seconds_between(pack_started_at, pack_end),
+        "transfer": seconds_between(transfer_started_at, transfer_end),
+    }
+    source["timings"] = {
+        "started_at": task_started_at,
+        "pack_started_at": pack_started_at,
+        "pack_finished_at": pack_finished_at,
+        "transfer_started_at": transfer_started_at,
+        "transfer_finished_at": transfer_finished_at,
+        "finished_at": task_finished_at,
+        "duration": durations["total"],
+        "seconds": durations["total"],
+        "elapsed": durations["total"],
+        "total_seconds": durations["total"],
+        "human": duration_summary(durations),
+        "duration_human": duration_summary(durations),
+        "durations": durations,
+        "summary": duration_summary(durations),
+    }
+    return source
+
+
+def normalize_upload_path(path: str) -> str:
+    return str(Path(str(path or "")).expanduser()).replace("\\", "/").rstrip("/")
+
+
+def get_cd2_client(cfg: Dict):
+    if not CloudDriveClient:
+        return None
+    if not cfg.get("cd2_api_enabled"):
+        return None
+    addr = str(cfg.get("cd2_api_addr") or "").strip()
+    username = str(cfg.get("cd2_api_username") or "").strip()
+    password = str(cfg.get("cd2_api_password") or "")
+    if not addr or not username or not password:
+        return None
+    key = (addr, username, password)
+    with cd2_lock:
+        cached = cd2_client_cache.get("client")
+        if cached is not None and cd2_client_cache.get("key") == key:
+            return cached
+        if cached is not None:
+            try:
+                cached.close()
+            except Exception:
+                pass
+        client = CloudDriveClient(addr)
+        try:
+            if not client.authenticate(username, password):
+                client.close()
+                cd2_client_cache.update({"key": None, "client": None, "last_error": "CD2 认证失败", "checked_at": now()})
+                return None
+        except Exception as exc:
+            try:
+                client.close()
+            except Exception:
+                pass
+            cd2_client_cache.update({"key": None, "client": None, "last_error": str(exc), "checked_at": now()})
+            return None
+        cd2_client_cache.update({"key": key, "client": client, "last_error": None, "checked_at": now()})
+        return client
+
+
+def close_cd2_client() -> None:
+    with cd2_lock:
+        client = cd2_client_cache.get("client")
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        cd2_client_cache.update({"key": None, "client": None, "last_error": None, "checked_at": None, "upload_map": {}, "upload_status": None})
+
+
+def extract_upload_status(upload) -> str:
+    status = getattr(upload, "status", None)
+    if status not in (None, ""):
+        return str(status)
+    enum_status = getattr(upload, "statusEnum", None)
+    if enum_status not in (None, ""):
+        return str(enum_status)
+    return "unknown"
+
+
+def fetch_cd2_uploads(cfg: Dict):
+    poll_seconds = max(1, int(cfg.get("cd2_queue_poll_seconds", 10) or 10))
+    with cd2_lock:
+        cached_status = cd2_client_cache.get("upload_status")
+        cached_map = cd2_client_cache.get("upload_map") or {}
+        cached_checked_at = cd2_client_cache.get("checked_at")
+        if cached_status and cached_checked_at and seconds_between(cached_checked_at) < poll_seconds:
+            return dict(cached_map), dict(cached_status)
+    status = {
+        "enabled": bool(cfg.get("cd2_api_enabled")),
+        "available": CloudDriveClient is not None,
+        "connected": False,
+        "checked_at": cd2_client_cache.get("checked_at"),
+        "last_error": cd2_client_cache.get("last_error"),
+        "uploads": [],
+    }
+    if not status["enabled"]:
+        status["last_error"] = "CD2 API 未启用"
+        status["human"] = "CD2 API 未启用"
+        return {}, status
+    if not status["available"]:
+        status["last_error"] = "缺少 clouddrive2-client 依赖"
+        status["human"] = "缺少 clouddrive2-client 依赖"
+        return {}, status
+    client = get_cd2_client(cfg)
+    if client is None:
+        status["checked_at"] = cd2_client_cache.get("checked_at")
+        status["last_error"] = cd2_client_cache.get("last_error") or "CD2 API 未连接"
+        status["human"] = status["last_error"]
+        return {}, status
+    try:
+        result = client.get_upload_file_list(get_all=True)
+    except Exception as exc:
+        with cd2_lock:
+            cd2_client_cache["last_error"] = str(exc)
+            cd2_client_cache["checked_at"] = now()
+            cd2_client_cache["upload_map"] = {}
+            cd2_client_cache["upload_status"] = None
+        status["checked_at"] = cd2_client_cache.get("checked_at")
+        status["last_error"] = str(exc)
+        status["human"] = str(exc)
+        return {}, status
+
+    upload_map = {}
+    status.update({
+        "connected": True,
+        "checked_at": now(),
+        "last_error": None,
+        "upload_count": int(getattr(result, "totalCount", 0) or 0),
+        "global_bytes_per_second": float(getattr(result, "globalBytesPerSecond", 0) or 0),
+        "total_bytes": int(getattr(result, "totalBytes", 0) or 0),
+        "finished_bytes": int(getattr(result, "finishedBytes", 0) or 0),
+    })
+    for upload in getattr(result, "uploadFiles", []) or []:
+        current = int(getattr(upload, "transferedBytes", 0) or 0)
+        total = int(getattr(upload, "size", 0) or 0)
+        percent = 100.0 if total <= 0 else min(100.0, max(0.0, current * 100 / total))
+        info = {
+            "key": getattr(upload, "key", "") or "",
+            "path": getattr(upload, "destPath", "") or "",
+            "status": extract_upload_status(upload),
+            "current": current,
+            "total": total,
+            "percent": percent,
+            "summary": f"{format_size(current)} / {format_size(total)}",
+            "human": f"{percent:.1f}% ({format_size(current)} / {format_size(total)})" if total > 0 else format_size(current),
+            "error": getattr(upload, "errorMessage", "") or "",
+        }
+        upload_map[normalize_upload_path(info["path"])] = info
+        status["uploads"].append(info)
+    status["human"] = f"{status['upload_count']} 项上传任务" if status["upload_count"] else "未发现上传任务"
+    with cd2_lock:
+        cd2_client_cache["checked_at"] = status["checked_at"]
+        cd2_client_cache["last_error"] = None
+        cd2_client_cache["upload_map"] = dict(upload_map)
+        cd2_client_cache["upload_status"] = dict(status)
+    return upload_map, status
+
+
+def attach_cd2_uploads(cfg: Dict, items: Dict, active: Optional[Dict] = None):
+    upload_map, cd2_status = fetch_cd2_uploads(cfg)
+    enriched = {}
+    for key, item in (items or {}).items():
+        copy = dict(item or {})
+        upload = upload_map.get(normalize_upload_path(copy.get("target") or ""))
+        if upload:
+            copy["cd2_upload"] = upload
+        enriched[key] = copy
+    if active:
+        upload = upload_map.get(normalize_upload_path(active.get("target") or ""))
+        if upload:
+            active = dict(active)
+            active["cd2_upload"] = upload
+    return enriched, active, cd2_status
 
 
 def size_of(path: Path) -> int:
@@ -343,8 +676,8 @@ def unique_destination_path(path: Path) -> Path:
 
 
 def resolve_cd2_target_dir(cfg: Dict) -> Optional[Path]:
-    mount_root = Path(str(cfg.get("cd2_mount_root") or "/mnt/cd2")).expanduser()
-    target_dir = Path(str(cfg.get("cd2_target_dir") or str(mount_root))).expanduser()
+    mount_root = Path(str(cfg.get("cd2_mount_root") or "/CloudNAS")).expanduser()
+    target_dir = Path(str(cfg.get("cd2_target_dir") or str(mount_root / "CloudDrive" / "00-未整理" / "00-mkiso"))).expanduser()
     if cfg.get("cd2_require_mount", True) and not mount_root.is_mount():
         log(f"CloudDrive2挂载目录未挂载，停止转移: {mount_root}")
         return None
@@ -438,8 +771,24 @@ def process_item(source: Path, cfg: Dict) -> None:
 
     target = iso_path_for(source, output_dir)
     partial = target.with_suffix(target.suffix + ".partial")
+    task_started_at = now()
     with lock:
-        state["active"] = {"source": str(source), "target": str(target), "started_at": now(), "status": "running", "progress": {"phase": "packing", "percent": 0, "current": 0, "total": source_size, "updated_at": now()}}
+        item = state["items"].setdefault(str(source), {})
+        item.update({
+            "task_started_at": task_started_at,
+            "pack_started_at": task_started_at,
+            "status": "running",
+            "target": str(target),
+        })
+        state["active"] = {
+            "source": str(source),
+            "target": str(target),
+            "started_at": task_started_at,
+            "task_started_at": task_started_at,
+            "pack_started_at": task_started_at,
+            "status": "running",
+            "progress": {"phase": "packing", "percent": 0, "current": 0, "total": source_size, "updated_at": now()},
+        }
         save_state_locked()
     log(f"开始生成 ISO: {source} -> {target}")
 
@@ -456,6 +805,8 @@ def process_item(source: Path, cfg: Dict) -> None:
             state["active"] = None
             item = state["items"].setdefault(str(source), {})
             item["status"] = "failed"
+            item["pack_finished_at"] = now()
+            item["finished_at"] = now()
             item["last_changed"] = now()
             save_state_locked()
         return
@@ -467,6 +818,8 @@ def process_item(source: Path, cfg: Dict) -> None:
             state["active"] = None
             item = state["items"].setdefault(str(source), {})
             item["status"] = "verify_failed"
+            item["pack_finished_at"] = now()
+            item["finished_at"] = now()
             item["last_changed"] = now()
             save_state_locked()
         return
@@ -474,20 +827,46 @@ def process_item(source: Path, cfg: Dict) -> None:
     log(f"ISO 完成并验证通过: {target}")
     final_target = target
     if cfg.get("cd2_transfer_enabled"):
+        transfer_started_at = now()
         with lock:
-            state["active"] = {"source": str(source), "target": str(target), "started_at": now(), "status": "transferring", "progress": {"phase": "transfer", "percent": 0, "current": 0, "total": target.stat().st_size if target.exists() else 0, "updated_at": now()}}
-            state["items"].setdefault(str(source), {})["status"] = "transferring"
+            item = state["items"].setdefault(str(source), {})
+            item["status"] = "transferring"
+            item["pack_finished_at"] = now()
+            item["transfer_started_at"] = transfer_started_at
+            state["active"] = {
+                "source": str(source),
+                "target": str(target),
+                "started_at": task_started_at,
+                "task_started_at": task_started_at,
+                "pack_started_at": task_started_at,
+                "pack_finished_at": item["pack_finished_at"],
+                "transfer_started_at": transfer_started_at,
+                "status": "transferring",
+                "progress": {"phase": "transfer", "percent": 0, "current": 0, "total": target.stat().st_size if target.exists() else 0, "updated_at": now()},
+            }
             save_state_locked()
         moved_target = transfer_iso_to_mount(target, cfg)
+        transfer_finished_at = now()
         if not moved_target:
             with lock:
                 item = state["items"].setdefault(str(source), {})
-                item.update({"status": "transfer_failed", "target": str(target), "done_at": now(), "size": source_size})
+                item.update({
+                    "status": "transfer_failed",
+                    "target": str(target),
+                    "done_at": transfer_finished_at,
+                    "finished_at": transfer_finished_at,
+                    "pack_finished_at": item.get("pack_finished_at") or transfer_finished_at,
+                    "transfer_finished_at": transfer_finished_at,
+                    "size": source_size,
+                })
                 item["last_changed"] = now()
                 state["active"] = None
                 save_state_locked()
             return
         final_target = moved_target
+    else:
+        transfer_started_at = None
+        transfer_finished_at = None
 
 
     if cfg.get("delete_source_after_success"):
@@ -506,7 +885,17 @@ def process_item(source: Path, cfg: Dict) -> None:
             status = "transfer_done"
         else:
             status = "done"
-        item.update({"status": status, "target": str(final_target), "done_at": now(), "size": source_size})
+        finished_at = now()
+        item.update({
+            "status": status,
+            "target": str(final_target),
+            "done_at": finished_at,
+            "finished_at": finished_at,
+            "pack_finished_at": item.get("pack_finished_at") or finished_at,
+            "transfer_started_at": transfer_started_at,
+            "transfer_finished_at": transfer_finished_at,
+            "size": source_size,
+        })
         state["active"] = None
         save_state_locked()
 
@@ -590,7 +979,7 @@ def scan_once(cfg: Dict) -> None:
         save_state_locked()
 
 
-from page import PAGE
+from page import PAGE, PAGE_LOGIN
 def visible_iso_items(items: Dict) -> Dict:
     return {key: item for key, item in (items or {}).items() if item.get("pack_iso") is True}
 
@@ -643,6 +1032,8 @@ def recover_interrupted_task() -> None:
 def start_worker_once():
     global worker_started
     if not worker_started:
+        cfg = load_config()
+        set_app_secret(cfg)
         load_state()
         recover_interrupted_task()
         t = threading.Thread(target=scanner_loop, daemon=True)
@@ -653,6 +1044,16 @@ def start_worker_once():
 @app.before_request
 def before_request():
     start_worker_once()
+    cfg = load_config()
+    if not auth_enabled(cfg):
+        return None
+    if request.path in {"/login", "/healthz"}:
+        return None
+    if not auth_password_set(cfg):
+        return None if request.path == "/login" else unauthorized_response("请先设置登录密码")
+    if is_logged_in():
+        return None
+    return unauthorized_response()
 
 
 @app.after_request
@@ -661,6 +1062,52 @@ def add_no_cache_headers(response):
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"ok": True})
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    cfg = load_config()
+    set_app_secret(cfg)
+    has_password = auth_password_set(cfg)
+    error = ""
+    if request.method == "POST":
+        password = (request.form.get("web_password") or "").strip()
+        confirm = (request.form.get("web_password_confirm") or "").strip()
+        if not has_password:
+            if not password:
+                error = "请先设置密码"
+            elif password != confirm:
+                error = "两次密码不一致"
+            else:
+                update_password(cfg, password)
+                session["logged_in"] = True
+                session["login_at"] = now()
+                session["login_user"] = "admin"
+                return redirect(request.args.get("next") or url_for("index"))
+        else:
+            if verify_login_password(cfg, password):
+                session["logged_in"] = True
+                session["login_at"] = now()
+                session["login_user"] = "admin"
+                return redirect(request.args.get("next") or url_for("index"))
+            error = "密码不正确"
+    return render_template_string(
+        PAGE_LOGIN,
+        first_setup=not has_password,
+        message=error,
+        login_hint="首次进入请先设置 Web 密码" if not has_password else "输入 Web 密码后继续",
+    )
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 @app.route("/")
@@ -674,7 +1121,8 @@ def index():
         ordered_items = ordered_visible_items(visible_items, snapshot.get("active"))
         items = ordered_items[:5]
         history_items = ordered_items
-    return render_template_string(PAGE, cfg=cfg, state=snapshot, items=items, history_items=history_items, events=events, status_label=status_label, badge_class=badge_class, format_size=format_size)
+    safe_cfg = sanitize_config(cfg)
+    return render_template_string(PAGE, cfg=safe_cfg, state=snapshot, items=items, history_items=history_items, events=events, status_label=status_label, badge_class=badge_class, format_size=format_size)
 
 
 @app.route("/settings", methods=["POST"])
@@ -682,19 +1130,37 @@ def settings():
     cfg = load_config()
     cfg["watch_dir"] = request.form.get("watch_dir", cfg["watch_dir"]).strip()
     cfg["output_dir"] = request.form.get("output_dir", cfg["output_dir"]).strip()
-    cfg["scan_interval_seconds"] = int(request.form.get("scan_interval_seconds", cfg["scan_interval_seconds"]))
-    cfg["stable_seconds"] = int(request.form.get("stable_seconds", cfg["stable_seconds"]))
-    cfg["min_free_space_gb"] = int(float(request.form.get("min_free_space_gb", cfg["min_free_space_gb"])))
+    try:
+        cfg["scan_interval_seconds"] = parse_int_form("scan_interval_seconds", cfg["scan_interval_seconds"], minimum=5)
+        cfg["stable_seconds"] = parse_int_form("stable_seconds", cfg["stable_seconds"], minimum=30)
+        cfg["min_free_space_gb"] = parse_int_form("min_free_space_gb", cfg["min_free_space_gb"], minimum=0)
+        cfg["cd2_queue_poll_seconds"] = parse_int_form("cd2_queue_poll_seconds", cfg.get("cd2_queue_poll_seconds", 10), minimum=1)
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
     cfg["enabled"] = "enabled" in request.form
     cfg["delete_source_after_success"] = "delete_source_after_success" in request.form
     cfg["cd2_transfer_enabled"] = "cd2_transfer_enabled" in request.form
     cfg["cd2_require_mount"] = "cd2_require_mount" in request.form
-    cfg["cd2_mount_root"] = request.form.get("cd2_mount_root", cfg.get("cd2_mount_root", "/mnt/cd2")).strip()
-    cfg["cd2_target_dir"] = request.form.get("cd2_target_dir", cfg.get("cd2_target_dir", "/mnt/cd2")).strip()
+    cfg["cd2_mount_root"] = request.form.get("cd2_mount_root", cfg.get("cd2_mount_root", "/CloudNAS")).strip()
+    cfg["cd2_target_dir"] = request.form.get("cd2_target_dir", cfg.get("cd2_target_dir", "/CloudNAS/CloudDrive/00-未整理/00-mkiso")).strip()
+    cfg["cd2_api_enabled"] = "cd2_api_enabled" in request.form
+    cfg["cd2_api_addr"] = request.form.get("cd2_api_addr", cfg.get("cd2_api_addr", "http://host.docker.internal:19798")).strip()
+    cfg["cd2_api_username"] = request.form.get("cd2_api_username", cfg.get("cd2_api_username", "")).strip()
+    new_password = (request.form.get("web_password") or "").strip()
+    new_password_confirm = (request.form.get("web_password_confirm") or "").strip()
+    if new_password:
+        if new_password != new_password_confirm:
+            return jsonify({"ok": False, "message": "登录密码两次输入不一致"}), 400
+        cfg["web_password_hash"] = generate_password_hash(new_password)
+        if not cfg.get("web_secret_key"):
+            cfg["web_secret_key"] = secrets.token_urlsafe(32)
+    new_cd2_password = (request.form.get("cd2_api_password") or "").strip()
+    if new_cd2_password:
+        cfg["cd2_api_password"] = new_cd2_password
     save_config(cfg)
     Path(cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
-    Path(cfg.get("cd2_mount_root", "/mnt/cd2")).expanduser().mkdir(parents=True, exist_ok=True)
+    Path(cfg.get("cd2_mount_root", "/CloudNAS")).expanduser().mkdir(parents=True, exist_ok=True)
     log("设置已保存")
     if request.form.get("scan"):
         threading.Thread(target=scan_once, args=(cfg,), daemon=True).start()
@@ -748,8 +1214,13 @@ def api_status():
     cfg = load_config()
     with lock:
         snapshot = json.loads(json.dumps(state, ensure_ascii=False))
-        snapshot["items"] = visible_iso_items(snapshot.get("items", {}))
-    return jsonify({"config": cfg, "state": snapshot})
+    snapshot["items"] = visible_iso_items(snapshot.get("items", {}))
+    snapshot_items, snapshot_active, cd2_status = attach_cd2_uploads(cfg, snapshot.get("items", {}), snapshot.get("active"))
+    snapshot["items"] = {key: apply_task_timings(item, snapshot_active if snapshot_active and snapshot_active.get("source") == key else None) for key, item in snapshot_items.items()}
+    if snapshot_active:
+        snapshot["active"] = apply_task_timings(dict(snapshot_active), snapshot_active)
+    snapshot["cd2_status"] = cd2_status
+    return jsonify({"config": sanitize_config(cfg), "state": snapshot, "cd2_status": cd2_status})
 
 
 @app.route("/api/directories")
@@ -796,10 +1267,64 @@ def api_directories():
     })
 
 
+@app.route("/api/browse")
+def api_browse():
+    cfg = load_config()
+    roots = {
+        "watch": Path(cfg["watch_dir"]).expanduser(),
+        "output": Path(cfg["output_dir"]).expanduser(),
+        "cd2": Path(cfg["cd2_target_dir"]).expanduser(),
+    }
+    root_name = (request.args.get("root") or "watch").strip()
+    root = roots.get(root_name)
+    if not root:
+        return jsonify({"ok": False, "message": "无效的根目录"}), 400
+    raw_path = (request.args.get("path") or str(root)).strip() or str(root)
+    try:
+        path = Path(raw_path).expanduser().resolve()
+        root = root.resolve()
+    except Exception as exc:
+        return jsonify({"ok": False, "message": f"路径无效: {exc}"}), 400
+    if not path.exists():
+        return jsonify({"ok": False, "message": "目录不存在"}), 404
+    if not path.is_dir():
+        path = path.parent
+    if not path_in_root(path, root):
+        return jsonify({"ok": False, "message": "禁止访问根目录外路径"}), 403
+    try:
+        children = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except PermissionError:
+        children = []
+    except OSError as exc:
+        return jsonify({"ok": False, "message": f"无法读取目录: {exc}"}), 400
+    entries = []
+    for child in children:
+        try:
+            stat = child.stat()
+            entries.append({
+                "name": child.name,
+                "path": str(child),
+                "type": "dir" if child.is_dir() else "file",
+                "size": stat.st_size,
+                "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                "readable": os.access(child, os.R_OK | os.X_OK),
+            })
+        except OSError:
+            continue
+    parent = path.parent if path.parent != path and path_in_root(path.parent, root) else None
+    return jsonify({
+        "ok": True,
+        "root": root_name,
+        "path": str(path),
+        "parent": str(parent) if parent else None,
+        "entries": entries,
+    })
+
+
 if __name__ == "__main__":
     start_worker_once()
     cfg = load_config()
     Path(cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
-    Path(cfg.get("cd2_mount_root", "/mnt/cd2")).expanduser().mkdir(parents=True, exist_ok=True)
+    Path(cfg.get("cd2_mount_root", "/CloudNAS")).expanduser().mkdir(parents=True, exist_ok=True)
     app.run(host="0.0.0.0", port=15865, threaded=True)

@@ -1,4 +1,228 @@
 
+PAGE_LOGIN = """
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ISO Packer 登录</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0f1218;
+  --panel: rgba(18, 22, 30, 0.9);
+  --panel-border: rgba(255,255,255,0.1);
+  --text: #f8fafc;
+  --muted: rgba(248,250,252,0.68);
+  --accent: #e85d75;
+  --accent-deep: #c73555;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color: var(--text);
+  background:
+    linear-gradient(145deg, rgba(7,10,15,0.94), rgba(18,22,30,0.92)),
+    linear-gradient(125deg, rgba(232,93,117,0.16), transparent 42%),
+    var(--bg);
+}
+.login-shell {
+  width: min(980px, calc(100vw - 32px));
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 18px;
+}
+.login-hero, .login-panel {
+  min-height: 560px;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 28px 80px rgba(0,0,0,0.34);
+  overflow: hidden;
+}
+.login-hero {
+  padding: 34px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  position: relative;
+}
+.login-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 18% 18%, rgba(255,255,255,0.08), transparent 24%),
+    radial-gradient(circle at 82% 22%, rgba(232,93,117,0.18), transparent 26%);
+  pointer-events: none;
+}
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  position: relative;
+  z-index: 1;
+}
+.login-mark {
+  width: 54px;
+  height: 54px;
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(255,255,255,0.16), rgba(255,255,255,0.05));
+  border: 1px solid rgba(255,255,255,0.12);
+}
+.login-brand h1 {
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: 0;
+}
+.login-brand p,
+.login-copy p,
+.login-foot {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.login-copy {
+  position: relative;
+  z-index: 1;
+  max-width: 34ch;
+}
+.login-copy h2 {
+  margin: 18px 0 12px;
+  font-size: 40px;
+  line-height: 1.05;
+}
+.login-copy p { font-size: 14px; }
+.login-foot {
+  position: relative;
+  z-index: 1;
+  font-size: 12px;
+}
+.login-panel {
+  padding: 34px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.login-kicker {
+  margin: 0 0 10px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.login-title {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.12;
+}
+.login-subtitle {
+  margin: 10px 0 26px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.7;
+}
+.login-alert {
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(232,93,117,0.22);
+  background: rgba(232,93,117,0.12);
+  color: #ffd8df;
+  font-size: 13px;
+}
+.login-form { display: grid; gap: 14px; }
+.login-field label {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.login-field input {
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.04);
+  color: var(--text);
+  font-size: 15px;
+}
+.login-field input:focus {
+  outline: none;
+  border-color: rgba(232,93,117,0.58);
+  box-shadow: 0 0 0 3px rgba(232,93,117,0.16);
+}
+.login-submit {
+  margin-top: 6px;
+  height: 48px;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent-deep), var(--accent));
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.login-submit:hover { filter: brightness(1.04); }
+@media (max-width: 900px) {
+  .login-shell { grid-template-columns: 1fr; }
+  .login-hero, .login-panel { min-height: auto; }
+  .login-copy h2 { font-size: 32px; }
+}
+</style>
+</head>
+<body>
+  <main class="login-shell">
+    <section class="login-hero" aria-hidden="true">
+      <div class="login-brand">
+        <svg class="login-mark" viewBox="0 0 64 64">
+          <path d="M12 48 C24 38 35 25 51 13" fill="none" stroke="#f8fafc" stroke-width="4" stroke-linecap="round"/>
+          <g fill="#e85d75">
+            <circle cx="24" cy="26" r="5"/><circle cx="30" cy="20" r="5"/><circle cx="37" cy="26" r="5"/><circle cx="31" cy="33" r="5"/>
+          </g>
+        </svg>
+        <div>
+          <h1>ISO Packer</h1>
+          <p>任务封装控制台</p>
+        </div>
+      </div>
+      <div class="login-copy">
+        <p class="login-kicker">{% if first_setup %}首次设置密码{% else %}登录控制台{% endif %}</p>
+        <h2>把打包、上传和目录监控放在一个地方。</h2>
+        <p>{{ login_hint|default('输入 Web 密码后继续。首次进入时会要求你先设置密码。') }}</p>
+      </div>
+      <div class="login-foot">ISO Packer Dashboard</div>
+    </section>
+    <section class="login-panel">
+      {% if message|default('') %}
+      <div class="login-alert">{{ message }}</div>
+      {% endif %}
+      <form class="login-form" method="post" action="/login">
+        <div class="login-field">
+          <label>Web 密码</label>
+          <input name="web_password" type="password" autocomplete="{% if first_setup %}new-password{% else %}current-password{% endif %}" placeholder="{% if first_setup %}设置一个密码{% else %}请输入密码{% endif %}" required>
+        </div>
+        {% if first_setup %}
+        <div class="login-field">
+          <label>确认密码</label>
+          <input name="web_password_confirm" type="password" autocomplete="new-password" placeholder="再次输入密码" required>
+        </div>
+        {% endif %}
+        <button class="login-submit" type="submit">{% if first_setup %}保存并进入{% else %}登录{% endif %}</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
 PAGE = """
 <!doctype html>
 <html lang="zh-CN">
@@ -206,7 +430,10 @@ body {
   margin-bottom: 6px;
   text-transform: uppercase;
 }
-.sidebar input[type=text], .sidebar input[type=number] {
+.sidebar input[type=text],
+.sidebar input[type=number],
+.sidebar input[type=password],
+.sidebar input[type=url] {
   width: 100%;
   background: rgba(255,255,255,0.1);
   border: 1px solid rgba(255,255,255,0.13);
@@ -244,6 +471,20 @@ body {
   margin: 16px 0 12px;
   border-top: 1px solid rgba(255,255,255,0.1);
   padding-top: 14px;
+}
+.settings-section-title {
+  margin: 16px 0 10px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.86);
+  font-size: 12px;
+  font-weight: 700;
+}
+.settings-help {
+  margin: -3px 0 10px;
+  color: rgba(255,255,255,0.48);
+  font-size: 11px;
+  line-height: 1.5;
 }
 .checkbox-group {
   display: flex;
@@ -329,6 +570,28 @@ body {
   transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .progress-bar-fill.total { background: linear-gradient(90deg, #c73555, #e86f58, #d6a34b); }
+.task-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.task-meta {
+  border: 1px solid #eadfd5;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.62);
+}
+.task-meta-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.task-meta-value {
+  margin-top: 4px;
+  color: var(--text-main);
+  font-size: 14px;
+  font-weight: 700;
+}
 
 /* Table Section */
 .card {
@@ -443,6 +706,11 @@ tr:hover td { background: #fff8f7; }
   color: #1d4ed8;
   font-weight: 700;
 }
+.small-muted {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
 .target-cell {
   display: flex;
   align-items: center;
@@ -519,6 +787,68 @@ tr:hover td { background: #fff8f7; }
 }
 .log-message {
   color: #000000;
+}
+
+/* Browser */
+.browser-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.browser-tabs {
+  display: inline-flex;
+  border: 1px solid #ddd4c8;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fffaf4;
+}
+.browser-tab,
+.browser-btn {
+  border: none;
+  background: transparent;
+  color: #5f5040;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  min-height: 34px;
+  padding: 0 12px;
+}
+.browser-tab.active {
+  background: #c73555;
+  color: #fff;
+}
+.browser-btn {
+  border: 1px solid #d8cfc3;
+  border-radius: 7px;
+  background: #fffdfa;
+}
+.browser-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.browser-path {
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.browser-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.browser-kind {
+  color: #246478;
+  font-size: 12px;
+  font-weight: 700;
+}
+.browser-empty {
+  padding: 28px 24px;
+  color: var(--text-muted);
+  text-align: center;
 }
 
 /* Buttons */
@@ -877,6 +1207,40 @@ tr:hover td { background: #fff8f7; }
             <button class="path-picker-btn" type="button" data-pick-dir="cd2_target_dir">选择</button>
           </div>
         </div>
+
+        <div class="settings-section-title">Web 访问</div>
+        <div class="settings-help">密码留空表示不修改现有值。</div>
+        <div class="form-group">
+          <label>Web 密码</label>
+          <input name="web_password" type="password" value="" autocomplete="new-password" placeholder="留空不修改">
+        </div>
+        <div class="form-group">
+          <label>确认 Web 密码</label>
+          <input name="web_password_confirm" type="password" value="" autocomplete="new-password" placeholder="再次输入密码">
+        </div>
+
+        <div class="settings-section-title">CD2 API</div>
+        <div class="settings-help">启用后展示上传进度并按轮询间隔刷新状态。</div>
+        <div class="checkbox-group" style="margin-top: 0;">
+          <input name="cd2_api_enabled" type="checkbox" {% if cfg.cd2_api_enabled %}checked{% endif %}>
+          <span>启用 CD2 API</span>
+        </div>
+        <div class="form-group">
+          <label>CD2 API 地址</label>
+          <input name="cd2_api_addr" type="text" value="{{cfg.cd2_api_addr}}" placeholder="http://host.docker.internal:19798">
+        </div>
+        <div class="form-group">
+          <label>CD2 API 用户名</label>
+          <input name="cd2_api_username" type="text" value="{{cfg.cd2_api_username}}">
+        </div>
+        <div class="form-group">
+          <label>CD2 API 密码</label>
+          <input name="cd2_api_password" type="password" value="" autocomplete="new-password" placeholder="留空不修改">
+        </div>
+        <div class="form-group">
+          <label>CD2 轮询秒数</label>
+          <input name="cd2_queue_poll_seconds" type="number" min="1" value="{{cfg.cd2_queue_poll_seconds}}">
+        </div>
         
         <div class="settings-options">
           <label class="checkbox-group">
@@ -921,6 +1285,10 @@ tr:hover td { background: #fff8f7; }
         <div class="stat-label">监控状态</div>
         <div class="stat-value" style="color: var(--success); font-size: 18px;">运行中</div>
       </div>
+      <div class="stat-card">
+        <div class="stat-label">任务耗时</div>
+        <div class="stat-value" id="task-duration">--</div>
+      </div>
     </div>
 
     <div class="task-card" id="active-task-card" style="display: {% if state.active %}flex{% else %}none{% endif %};">
@@ -929,6 +1297,21 @@ tr:hover td { background: #fff8f7; }
           <div class="task-title" id="active-source-name">{% if state.active %}{{state.active.source}}{% endif %}</div>
         </div>
         <div id="active-status-badge">{% if state.active %}<span class="badge badge-yellow">{{status_label(state.active.status)}}</span>{% endif %}</div>
+      </div>
+
+      <div class="task-meta-grid">
+        <div class="task-meta">
+          <div class="task-meta-label">已耗时</div>
+          <div class="task-meta-value" id="active-duration">--</div>
+        </div>
+        <div class="task-meta">
+          <div class="task-meta-label">CD2 上传进度</div>
+          <div class="task-meta-value" id="active-cd2-upload">--</div>
+        </div>
+        <div class="task-meta">
+          <div class="task-meta-label">阶段</div>
+          <div class="task-meta-value" id="active-phase-label">--</div>
+        </div>
       </div>
       
       <div class="progress-container" id="total-progress-container">
@@ -963,6 +1346,8 @@ tr:hover td { background: #fff8f7; }
               <th>源路径</th>
               <th>状态</th>
               <th>文件大小</th>
+              <th>耗时</th>
+              <th>CD2 上传</th>
               <th>输出目标</th>
             </tr>
           </thead>
@@ -974,6 +1359,8 @@ tr:hover td { background: #fff8f7; }
                 <span class="badge {{badge_class(item.status)}}">{{status_label(item.status)}}</span>
               </td>
               <td style="color: var(--text-muted);">{{format_size(item.last_size or item.size or 0)}}</td>
+              <td class="small-muted">{{item.timings.human if item.timings and item.timings.human else (item.timings.duration if item.timings and item.timings.duration else '-')}}</td>
+              <td class="small-muted">{{item.cd2_upload.human if item.cd2_upload and item.cd2_upload.human else '-'}}</td>
               <td><span class="target-text" title="{{item.target or '-'}}">{{item.target or '-'}}</span></td>
             </tr>
             {% endfor %}
@@ -993,6 +1380,8 @@ tr:hover td { background: #fff8f7; }
               <th>&#28304;&#36335;&#24452;</th>
               <th>&#29366;&#24577;</th>
               <th>&#25991;&#20214;&#22823;&#23567;</th>
+              <th>耗时</th>
+              <th>CD2 上传</th>
               <th>&#36755;&#20986;&#30446;&#26631;</th>
               <th>&#25805;&#20316;</th>
             </tr>
@@ -1006,6 +1395,8 @@ tr:hover td { background: #fff8f7; }
               </td>
               <td><span class="badge {{badge_class(item.status)}}">{{status_label(item.status)}}</span></td>
               <td style="color: var(--text-muted);">{{format_size(item.last_size or item.size or 0)}}</td>
+              <td class="small-muted">{{item.timings.human if item.timings and item.timings.human else (item.timings.duration if item.timings and item.timings.duration else '-')}}</td>
+              <td class="small-muted">{{item.cd2_upload.human if item.cd2_upload and item.cd2_upload.human else '-'}}</td>
               <td><span class="target-text" title="{{item.target or '-'}}">{{item.target or '-'}}</span></td>
               <td><button class="rerun-btn" type="button" data-rerun-source="{{key}}">&#37325;&#26032;&#23553;&#35013;</button></td>
             </tr>
@@ -1023,6 +1414,37 @@ tr:hover td { background: #fff8f7; }
         {% for event in events %}
         <div class="log-line">{{event}}</div>
         {% endfor %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>目录观察</h2>
+        <div class="browser-toolbar">
+          <div class="browser-tabs" role="tablist" aria-label="目录根">
+            <button class="browser-tab active" type="button" data-browse-root="watch">watch</button>
+            <button class="browser-tab" type="button" data-browse-root="output">output</button>
+            <button class="browser-tab" type="button" data-browse-root="cd2">cd2</button>
+          </div>
+          <button class="browser-btn" type="button" id="browser-up">返回上级</button>
+          <button class="browser-btn" type="button" id="browser-refresh">刷新</button>
+        </div>
+      </div>
+      <div class="browser-path" id="browser-path">/</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>类型</th>
+              <th>大小</th>
+              <th>修改时间</th>
+            </tr>
+          </thead>
+          <tbody id="browser-body">
+            <tr><td colspan="4" class="browser-empty">正在加载...</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </main>
@@ -1048,6 +1470,8 @@ const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiti
 const $=id=>document.getElementById(id);
 let alertTimer;
 const seenLogEvents = new Set();
+let currentBrowseRoot = "watch";
+let currentBrowsePath = "/";
 
 function showSettingsAlert(message, isError=false) {
   const alert = $("settings-alert");
@@ -1058,6 +1482,25 @@ function showSettingsAlert(message, isError=false) {
   alert.classList.toggle("error", isError);
   alert.classList.add("show");
   alertTimer = setTimeout(() => alert.classList.remove("show"), 4500);
+}
+
+function isAuthFailure(res, payload) {
+  return (res && res.status === 401) || (payload && (payload.code === 401 || payload.error === "unauthorized"));
+}
+
+function goLogin() {
+  window.location.href = "/login";
+}
+
+async function fetchJson(url, options) {
+  const res = await fetch(url, options);
+  const payload = await res.json().catch(() => ({}));
+  if(isAuthFailure(res, payload)) {
+    goLogin();
+    throw new Error("unauthorized");
+  }
+  if(!res.ok || payload.ok === false) throw new Error(payload.message || ("HTTP " + res.status));
+  return payload;
 }
 
 function setupTaskActions(){
@@ -1075,6 +1518,7 @@ function setupTaskActions(){
       data.set("source", source);
       const res = await fetch("/rerun", { method: "POST", body: data });
       const payload = await res.json().catch(() => ({}));
+      if(isAuthFailure(res, payload)) return goLogin();
       if(!res.ok || payload.ok === false) throw new Error(payload.message || ("HTTP " + res.status));
       showSettingsAlert(payload.message || "\u5df2\u5f00\u59cb\u624b\u52a8\u5c01\u88c5");
       refresh();
@@ -1101,7 +1545,9 @@ function setupSettingsForm(){
     if(submitter) submitter.textContent = submitter.dataset.savingText || "保存中...";
     try {
       const res = await fetch(form.action, { method: "POST", body: data });
-      if(!res.ok) throw new Error("HTTP " + res.status);
+      const payload = await res.json().catch(() => ({}));
+      if(isAuthFailure(res, payload)) return goLogin();
+      if(!res.ok) throw new Error(payload.message || ("HTTP " + res.status));
       showSettingsAlert(data.has("scan") ? "设置已保存，已开始扫描" : "设置已保存");
       refresh();
     } catch(e) {
@@ -1154,9 +1600,7 @@ async function loadDirectory(path) {
   const current = $("dir-current-path");
   if(list) list.innerHTML = `<div class="dir-empty">\u6b63\u5728\u8bfb\u53d6...</div>`;
   try {
-    const res = await fetch("/api/directories?path=" + encodeURIComponent(path || "/"));
-    const payload = await res.json();
-    if(!res.ok || payload.ok === false) throw new Error(payload.message || ("HTTP " + res.status));
+    const payload = await fetchJson("/api/directories?path=" + encodeURIComponent(path || "/"));
     dirPickerPath = payload.path || "/";
     if(current) current.textContent = dirPickerPath;
     const rows = [];
@@ -1210,6 +1654,40 @@ function setupDirectoryPicker() {
   document.addEventListener("keydown", (event) => {
     if(event.key === "Escape" && $("dir-modal")?.classList.contains("open")) closeDirectoryPicker();
   });
+}
+
+function formatDuration(value) {
+  if(value == null || value === "") return "--";
+  if(typeof value === "string" && value.trim()) return value;
+  const seconds = Number(value);
+  if(!Number.isFinite(seconds) || seconds < 0) return "--";
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if(h) return `${h}时${String(m).padStart(2, "0")}分${String(s).padStart(2, "0")}秒`;
+  if(m) return `${m}分${String(s).padStart(2, "0")}秒`;
+  return `${s}秒`;
+}
+
+function pickTiming(item) {
+  const timings = (item && item.timings) || {};
+  return timings.human || timings.duration_human || timings.duration_text || formatDuration(timings.duration ?? timings.seconds ?? timings.elapsed ?? timings.total_seconds);
+}
+
+function pickCd2Upload(item) {
+  const up = (item && item.cd2_upload) || {};
+  if(typeof up === "string" || typeof up === "number") return String(up);
+  if(up.human) return up.human;
+  const percent = up.percent != null ? Number(up.percent) : null;
+  const current = up.current ?? up.uploaded ?? 0;
+  const total = up.total ?? up.size ?? 0;
+  if(percent != null && Number.isFinite(percent)) {
+    const body = `${Math.max(0, Math.min(100, percent)).toFixed(1)}%`;
+    return total ? `${body} (${formatSize(current)} / ${formatSize(total)})` : body;
+  }
+  if(current || total) return `${formatSize(current)} / ${formatSize(total)}`;
+  return "--";
 }
 
 function statusBadgeText(status, item={}) {
@@ -1333,6 +1811,8 @@ function renderProgress(active){
   const card = $("active-task-card");
   if(!active) {
     card.style.display = "none";
+    if($("active-duration")) $("active-duration").textContent = "--";
+    if($("active-cd2-upload")) $("active-cd2-upload").textContent = "--";
     return;
   }
   card.style.display = "flex";
@@ -1343,6 +1823,10 @@ function renderProgress(active){
   
   $("active-source-name").textContent = active.source.split('/').pop();
   $("active-status-badge").innerHTML = `<span class="badge ${getBadgeClass(active.status)}">${phase}</span>`;
+  $("active-phase-label").textContent = phase;
+  $("active-duration").textContent = pickTiming(active);
+  $("active-cd2-upload").textContent = pickCd2Upload(active);
+  $("task-duration").textContent = pickTiming(active);
   
   let totalPercent = percent;
   if (active.status === "transferring") {
@@ -1378,6 +1862,10 @@ function renderTaskSummary(state) {
   card.style.display = "flex";
   $("active-source-name").textContent = key.split('/').pop();
   $("active-status-badge").innerHTML = `<span class="badge ${getBadgeClass(item.status)}">${statusText}</span>`;
+  $("active-phase-label").textContent = statusText;
+  $("active-duration").textContent = pickTiming(item);
+  $("active-cd2-upload").textContent = pickCd2Upload(item);
+  $("task-duration").textContent = pickTiming(item);
   $("total-percent-text").textContent = progress.percent.toFixed(1) + "%";
   $("total-progress-bar").style.width = progress.percent.toFixed(1) + "%";
   $("phase-label").textContent = statusText;
@@ -1400,7 +1888,9 @@ function taskEntries(items, active) {
     target: active.target,
     first_seen: active.started_at || "",
     last_size: progress.total || progress.current || progress.uploaded || 0,
-    size: progress.total || 0
+    size: progress.total || 0,
+    timings: active.timings || {},
+    cd2_upload: active.cd2_upload || {}
   };
   return [[activeKey, activeItem], ...entries].slice(0, 5);
 }
@@ -1427,7 +1917,9 @@ function historyEntries(items, active) {
     first_seen: active.started_at || "",
     last_changed: active.started_at || "",
     last_size: progress.total || progress.current || progress.uploaded || 0,
-    size: progress.total || 0
+    size: progress.total || 0,
+    timings: active.timings || {},
+    cd2_upload: active.cd2_upload || {}
   };
   return [[activeKey, activeItem], ...entries];
 }
@@ -1446,6 +1938,8 @@ function renderHistory(items, active) {
       </td>
       <td><span class="badge ${getBadgeClass(status)}">${esc(taskStatusText(item || {}, active, key))}</span></td>
       <td style="color: var(--text-muted);">${esc(formatSize((item || {}).last_size || (item || {}).size || 0))}</td>
+      <td class="small-muted">${esc(pickTiming(item || {}))}</td>
+      <td class="small-muted">${esc(pickCd2Upload(item || {}))}</td>
       <td><span class="target-text" title="${esc((item || {}).target || "-")}">${esc((item || {}).target || "-")}</span></td>
       <td><button class="rerun-btn" type="button" data-rerun-source="${esc(key)}">&#37325;&#26032;&#23553;&#35013;</button></td>
     </tr>`;
@@ -1465,6 +1959,8 @@ function renderItems(items, active){
       </td>
       <td>${renderTaskStatus(item, active, key)}</td>
       <td style="color: var(--text-muted);">${esc(formatSize(item.last_size||item.size||0))}</td>
+      <td class="small-muted">${esc(pickTiming(item || {}))}</td>
+      <td class="small-muted">${esc(pickCd2Upload(item || {}))}</td>
       <td><span class="target-text" title="${esc(item.target||"-")}">${esc(item.target||"-")}</span></td>
     </tr>`
   }).join("");
@@ -1476,6 +1972,9 @@ function updateTaskRow(row, item, active, key) {
   if(!badge) return;
   badge.className = "badge " + getBadgeClass(status);
   badge.textContent = taskStatusText(item || {}, active, key);
+  const cells = row.querySelectorAll("td");
+  if(cells[3]) cells[3].textContent = pickTiming(item || {});
+  if(cells[4]) cells[4].textContent = pickCd2Upload(item || {});
 }
 
 function updateItems(items, active) {
@@ -1495,19 +1994,94 @@ function updateItems(items, active) {
   });
 }
 
+function updateBrowserRows(items) {
+  const body = $("browser-body");
+  if(!body) return;
+  if(!items || !items.length) {
+    body.innerHTML = `<tr><td colspan="4" class="browser-empty">没有内容</td></tr>`;
+    return;
+  }
+  body.innerHTML = items.map(item => {
+    const isDir = item.is_dir === true || item.type === "dir" || item.type === "directory";
+    const name = item.name || item.filename || item.path || "-";
+    const type = isDir ? "目录" : (item.type || "文件");
+    const size = isDir ? "-" : (item.size != null ? formatSize(item.size) : "-");
+    const mtime = item.mtime || item.modified_at || item.modified || "-";
+    return `<tr${isDir ? ' data-browser-dir="1"' : ""} data-browser-path="${esc(item.path || "")}">
+      <td><span class="browser-name">${esc(name)}</span></td>
+      <td><span class="browser-kind">${esc(type)}</span></td>
+      <td style="color: var(--text-muted);">${esc(size)}</td>
+      <td style="color: var(--text-muted);">${esc(mtime)}</td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadBrowser(root = currentBrowseRoot, path = currentBrowsePath) {
+  currentBrowseRoot = root || "watch";
+  if(!path || path === "/") {
+    currentBrowsePath = currentBrowseRoot === "watch" ? $("watch_dir")?.value || "/" : currentBrowseRoot === "output" ? $("output_dir")?.value || "/" : $("cd2_target_dir")?.value || "/";
+  } else {
+    currentBrowsePath = path;
+  }
+  document.querySelectorAll("[data-browse-root]").forEach(tab => {
+    tab.classList.toggle("active", tab.dataset.browseRoot === currentBrowseRoot);
+  });
+  const pathNode = $("browser-path");
+  if(pathNode) pathNode.textContent = `${currentBrowseRoot}:${currentBrowsePath}`;
+  try {
+    const payload = await fetchJson("/api/browse?root=" + encodeURIComponent(currentBrowseRoot) + "&path=" + encodeURIComponent(currentBrowsePath));
+    currentBrowsePath = payload.path || currentBrowsePath || "/";
+    if(pathNode) pathNode.textContent = `${currentBrowseRoot}:${currentBrowsePath}`;
+    updateBrowserRows(payload.entries || payload.items || []);
+  } catch(e) {
+    const body = $("browser-body");
+    if(body) body.innerHTML = `<tr><td colspan="4" class="browser-empty">${esc(e.message || "读取目录失败")}</td></tr>`;
+  }
+}
+
+function setupBrowser() {
+  document.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-browse-root]");
+    if(tab) {
+      loadBrowser(tab.dataset.browseRoot || "watch", "/");
+      return;
+    }
+    const row = event.target.closest("#browser-body tr[data-browser-path]");
+    if(row && row.dataset.browserDir === "1" && row.dataset.browserPath) {
+      loadBrowser(currentBrowseRoot, row.dataset.browserPath);
+    }
+  });
+  const up = $("browser-up");
+  const refreshButton = $("browser-refresh");
+  if(up) up.addEventListener("click", () => {
+    const current = String(currentBrowsePath || "/").replace(/\\/+$/, "") || "/";
+    if(current === "/") return;
+    const index = current.lastIndexOf("/");
+    loadBrowser(currentBrowseRoot, index <= 0 ? "/" : current.slice(0, index));
+  });
+  if(refreshButton) refreshButton.addEventListener("click", () => loadBrowser(currentBrowseRoot, currentBrowsePath));
+}
+
 async function refresh(){
   try{
-    const res=await fetch("/api/status?_="+Date.now());
-    const data = await res.json();
-    const state = data.state;
+    const data = await fetchJson("/api/status?_="+Date.now());
+    const state = data.state || data;
     
     $("last-scan").textContent = state.last_scan || "尚未扫描";
     $("task-count").textContent = Object.keys(state.items || {}).length;
+    const firstItem = Object.values(state.items || {})[0];
+    $("task-duration").textContent = state.active ? pickTiming(state.active) : (firstItem ? pickTiming(firstItem) : "--");
     
     renderTaskSummary(state);
     updateItems(state.items, state.active);
     renderHistory(state.items, state.active);
     appendNewEvents(state.events || []);
+    if(state.cd2_status && !state.active && $("active-cd2-upload")) {
+      $("active-cd2-upload").textContent = state.cd2_status.human || state.cd2_status.status || "--";
+    }
+    if(!state.active && firstItem && $("active-duration")) {
+      $("active-duration").textContent = pickTiming(firstItem);
+    }
     
     $("refresh-state").textContent = "最后同步：" + new Date().toLocaleTimeString();
   }catch(e){
@@ -1518,9 +2092,11 @@ async function refresh(){
 setupSettingsForm();
 setupTaskActions();
 setupDirectoryPicker();
+setupBrowser();
 const initialLogText = $("events") ? $("events").textContent : "";
 if(initialLogText.trim()) renderEvents(initialLogText);
 setInterval(refresh, 2000);
+loadBrowser();
 refresh();
 })();
 </script>
