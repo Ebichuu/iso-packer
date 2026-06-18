@@ -1268,6 +1268,22 @@ tr:hover td { background: #fff8f7; }
           <textarea name="cd2_remote_source_dirs_text" spellcheck="false" placeholder="/115/03-PT">{{cfg.cd2_remote_source_dirs_text}}</textarea>
           <div class="settings-help">每行一个 CD2 网盘目录，仅用于只读观察原盘候选。</div>
         </div>
+        <label class="checkbox-group">
+          <input name="cd2_manual_pull_enabled" type="checkbox" {% if cfg.cd2_manual_pull_enabled %}checked{% endif %}>
+          <span>启用 CD2 手动拉取</span>
+        </label>
+        <div class="form-group">
+          <label>CD2 本地拉取目录</label>
+          <div class="path-picker-row">
+            <input name="cd2_local_pull_dir" type="text" value="{{cfg.cd2_local_pull_dir}}">
+            <button class="path-picker-btn" type="button" data-pick-dir="cd2_local_pull_dir">选择</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>CD2 拉取目标目录</label>
+          <input name="cd2_remote_pull_dest_dir" type="text" value="{{cfg.cd2_remote_pull_dest_dir}}" placeholder="/115/Download">
+          <div class="settings-help">CD2 网盘路径；留空时尝试用路径别名把本地拉取目录转换为网盘路径。</div>
+        </div>
         <div class="settings-section-title">CD2 事件</div>
         <label class="checkbox-group" style="margin-top: 0;">
           <input name="cd2_webhook_enabled" type="checkbox" {% if cfg.cd2_webhook_enabled %}checked{% endif %}>
@@ -1523,10 +1539,11 @@ tr:hover td { background: #fff8f7; }
               <th>类型</th>
               <th>远程路径</th>
               <th>来源目录</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="remote-body">
-            <tr><td colspan="4" class="browser-empty">正在加载...</td></tr>
+            <tr><td colspan="5" class="browser-empty">正在加载...</td></tr>
           </tbody>
         </table>
       </div>
@@ -1581,7 +1598,7 @@ tr:hover td { background: #fff8f7; }
 
 <script>
 (function(){
-const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiting_cd2_confirm:"\u7b49\u5f85 CD2 \u786e\u8ba4",waiting_stable:"\u7b49\u5f85\u7a33\u5b9a",waiting_partial:"\u7b49\u5f85\u4e0b\u8f7d\u5b8c\u6210",ready:"\u51c6\u5907\u6253\u5305",running:"\u6b63\u5728\u5c01\u88c5",done:"\u5df2\u5b8c\u6210",failed:"\u5931\u8d25",verify_failed:"\u9a8c\u8bc1\u5931\u8d25",transferring:"\u6b63\u5728\u79fb\u52a8\u5230 CD2",waiting_cd2_upload:"\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210",transfer_done:"\u5df2\u4ea4\u7ed9 CD2",transfer_failed:"\u79fb\u52a8\u5931\u8d25",removed:"\u6e90\u5df2\u79fb\u9664"};
+const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiting_cd2_confirm:"\u7b49\u5f85 CD2 \u786e\u8ba4",waiting_cd2_pull:"\u7b49\u5f85 CD2 \u62c9\u53d6",waiting_stable:"\u7b49\u5f85\u7a33\u5b9a",waiting_partial:"\u7b49\u5f85\u4e0b\u8f7d\u5b8c\u6210",ready:"\u51c6\u5907\u6253\u5305",running:"\u6b63\u5728\u5c01\u88c5",done:"\u5df2\u5b8c\u6210",failed:"\u5931\u8d25",verify_failed:"\u9a8c\u8bc1\u5931\u8d25",transferring:"\u6b63\u5728\u79fb\u52a8\u5230 CD2",waiting_cd2_upload:"\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210",transfer_done:"\u5df2\u4ea4\u7ed9 CD2",transfer_failed:"\u79fb\u52a8\u5931\u8d25",removed:"\u6e90\u5df2\u79fb\u9664"};
 const $=id=>document.getElementById(id);
 let alertTimer;
 const seenLogEvents = new Set();
@@ -1723,7 +1740,7 @@ function setupSettingsForm(){
 function getBadgeClass(status) {
   if (['done', 'transfer_done'].includes(status)) return 'badge-green';
   if (['failed', 'verify_failed', 'transfer_failed'].includes(status)) return 'badge-red';
-  if (['running', 'transferring', 'waiting_cd2_upload', 'waiting_cd2_confirm'].includes(status)) return 'badge-yellow';
+  if (['running', 'transferring', 'waiting_cd2_upload', 'waiting_cd2_confirm', 'waiting_cd2_pull'].includes(status)) return 'badge-yellow';
   if (['skipped', 'removed'].includes(status)) return 'badge-gray';
   return 'badge-blue';
 }
@@ -2262,21 +2279,49 @@ function updateBrowserRows(items) {
   }).join("");
 }
 
-function updateRemoteRows(items) {
+function updateRemoteRows(items, pullEnabled=false) {
   const body = $("remote-body");
   if(!body) return;
   if(!items || !items.length) {
-    body.innerHTML = `<tr><td colspan="4" class="browser-empty">没有远程原盘候选</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" class="browser-empty">没有远程原盘候选</td></tr>`;
     return;
   }
   body.innerHTML = items.map(item => {
+    const path = item.path || "";
+    const action = pullEnabled
+      ? `<button class="browser-btn" type="button" data-remote-pull-path="${esc(path)}">拉取</button>`
+      : `<span class="browser-kind">未启用</span>`;
     return `<tr>
       <td><span class="browser-name">${esc(item.name || "-")}</span></td>
       <td><span class="browser-kind">${esc(item.disc_type || "-")}</span></td>
       <td><span class="target-text" title="${esc(item.path || "-")}">${esc(item.path || "-")}</span></td>
       <td><span class="target-text" title="${esc(item.root || "-")}">${esc(item.root || "-")}</span></td>
+      <td>${action}</td>
     </tr>`;
   }).join("");
+}
+
+async function pullRemoteCandidate(button) {
+  const path = button.dataset.remotePullPath || "";
+  if(!path) return;
+  if(!confirm("确认让 CD2 拉取这个远程原盘？")) return;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "提交中...";
+  try {
+    const data = new FormData();
+    data.set("path", path);
+    const payload = await fetchJson("/api/cd2/pull", { method: "POST", body: data });
+    showSettingsAlert(payload.message || "CD2 拉取任务已创建");
+    loadRemoteCandidates(true);
+    loadBrowser("watch", "/");
+    refresh();
+  } catch(e) {
+    showSettingsAlert(e.message || "CD2 拉取失败", true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
 }
 
 async function loadRemoteCandidates(force=false) {
@@ -2284,7 +2329,7 @@ async function loadRemoteCandidates(force=false) {
   if(status) status.textContent = force ? "正在强制刷新..." : "正在读取远程目录...";
   try {
     const payload = await fetchJson("/api/cd2/remote-candidates?force=" + (force ? "1" : "0") + "&_=" + Date.now());
-    updateRemoteRows(payload.candidates || []);
+    updateRemoteRows(payload.candidates || [], payload.manual_pull_enabled === true);
     const parts = [payload.message || "远程目录已读取"];
     if(payload.checked_at) parts.push(payload.checked_at);
     if(payload.errors && payload.errors.length) parts.push(String(payload.errors.length) + " 个目录读取失败");
@@ -2320,6 +2365,11 @@ async function loadBrowser(root = currentBrowseRoot, path = currentBrowsePath) {
 
 function setupBrowser() {
   document.addEventListener("click", (event) => {
+    const pullButton = event.target.closest("[data-remote-pull-path]");
+    if(pullButton) {
+      pullRemoteCandidate(pullButton);
+      return;
+    }
     const tab = event.target.closest("[data-browse-root]");
     if(tab) {
       loadBrowser(tab.dataset.browseRoot || "watch", "/");

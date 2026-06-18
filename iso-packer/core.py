@@ -35,6 +35,9 @@ DEFAULT_CONFIG = {
     "cd2_refresh_after_source_event": True,
     "cd2_refresh_after_transfer": True,
     "cd2_remote_source_dirs": [],
+    "cd2_manual_pull_enabled": False,
+    "cd2_local_pull_dir": "/watch",
+    "cd2_remote_pull_dest_dir": "",
     "cd2_path_aliases": [
         {"local": "/CloudNAS/CloudDrive", "remote": "/115"},
     ],
@@ -265,6 +268,7 @@ def status_label(status: str) -> str:
         "watching": "监控中",
         "receiving": "接收中",
         "waiting_cd2_confirm": "等待 CD2 确认",
+        "waiting_cd2_pull": "等待 CD2 拉取",
         "waiting_stable": "等待稳定",
         "waiting_partial": "等待下载完成",
         "ready": "准备打包",
@@ -286,7 +290,7 @@ def badge_class(status: str) -> str:
         return "badge-green"
     if status in {"failed", "verify_failed", "transfer_failed"}:
         return "badge-red"
-    if status in {"running", "transferring", "waiting_cd2_upload", "waiting_cd2_confirm"}:
+    if status in {"running", "transferring", "waiting_cd2_upload", "waiting_cd2_confirm", "waiting_cd2_pull"}:
         return "badge-yellow"
     if status in {"skipped", "removed"}:
         return "badge-gray"
