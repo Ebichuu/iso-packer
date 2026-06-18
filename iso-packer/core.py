@@ -12,6 +12,7 @@ DEFAULT_CONFIG = {
     "min_free_space_gb": 5,
     "enabled": True,
     "cd2_transfer_enabled": False,
+    "cd2_wait_upload_complete": False,
     "cd2_mount_root": "/CloudNAS",
     "cd2_target_dir": "/CloudNAS/CloudDrive/00-未整理/00-mkiso",
     "cd2_require_mount": True,
@@ -236,7 +237,8 @@ def status_label(status: str) -> str:
         "failed": "失败",
         "verify_failed": "验证失败",
         "transferring": "正在移动到 CD2",
-        "transfer_done": "已移动到 CD2",
+        "waiting_cd2_upload": "等待 CD2 上传完成",
+        "transfer_done": "已交给 CD2",
         "transfer_failed": "转移失败",
         "removed": "源已移除",
     }
@@ -248,7 +250,7 @@ def badge_class(status: str) -> str:
         return "badge-green"
     if status in {"failed", "verify_failed", "transfer_failed"}:
         return "badge-red"
-    if status in {"running", "transferring"}:
+    if status in {"running", "transferring", "waiting_cd2_upload"}:
         return "badge-yellow"
     if status in {"skipped", "removed"}:
         return "badge-gray"

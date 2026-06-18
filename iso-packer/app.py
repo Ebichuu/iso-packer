@@ -30,6 +30,7 @@ from core import (
     normalize_cd2_api_addr,
     normalize_path_text,
     now,
+    parse_time,
     parse_cd2_path_alias_lines,
     path_in_root,
     safe_filename,
@@ -76,6 +77,8 @@ last_log_prune = 0.0
 BDMV_REQUIRED_FILES = ("index.bdmv", "MovieObject.bdmv")
 BDMV_REQUIRED_DIRS = ("PLAYLIST", "STREAM", "CLIPINF")
 COPY_TASK_DONE_STATUSES = {"3", "completed", "complete", "done", "finish", "finished"}
+CD2_UPLOAD_QUEUE_GRACE_POLLS = 3
+CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS = 30
 DIRECTORY_PICKER_ROOT = "@roots"
 DIRECTORY_PICKER_SCOPES = {
     "watch_dir": ("watch_dir",),
@@ -788,6 +791,78 @@ def attach_cd2_uploads(cfg: Dict, items: Dict, active: Optional[Dict] = None):
     return enriched, active, cd2_status
 
 
+def cd2_upload_done(upload: Optional[Dict]) -> bool:
+    if not upload:
+        return True
+    status = str(upload.get("status") or "").strip().lower()
+    if status in COPY_TASK_DONE_STATUSES:
+        return True
+    total = int(upload.get("total") or 0)
+    current = int(upload.get("current") or upload.get("uploaded") or 0)
+    percent = float(upload.get("percent") or 0)
+    return (total > 0 and current >= total) or percent >= 100.0
+
+
+def cd2_upload_queue_grace_seconds(cfg: Dict) -> int:
+    poll_seconds = max(1, int(cfg.get("cd2_queue_poll_seconds", 10) or 10))
+    return max(CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS, poll_seconds * CD2_UPLOAD_QUEUE_GRACE_POLLS)
+
+
+def cd2_status_is_fresh_for_wait(cd2_status: Optional[Dict], wait_started_at: str) -> bool:
+    checked_at = (cd2_status or {}).get("checked_at")
+    checked_dt = parse_time(checked_at)
+    started_dt = parse_time(wait_started_at)
+    return bool(checked_dt and started_dt and checked_dt > started_dt)
+
+
+def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[Dict]) -> None:
+    if not cfg.get("cd2_wait_upload_complete"):
+        return
+    now_value = now()
+    connected = bool((cd2_status or {}).get("connected"))
+    wait_error = (cd2_status or {}).get("human") or (cd2_status or {}).get("last_error") or "等待 CD2 API 连接"
+    grace_seconds = cd2_upload_queue_grace_seconds(cfg)
+    with lock:
+        items = state.get("items", {})
+        for key, item in items.items():
+            if item.get("status") != "waiting_cd2_upload":
+                continue
+            wait_started_at = item.get("cd2_upload_wait_started_at") or item.get("transfer_finished_at") or now_value
+            item["cd2_upload_wait_started_at"] = wait_started_at
+            if not connected:
+                item["error"] = f"等待 CD2 上传完成：{wait_error}"
+                continue
+            if not cd2_status_is_fresh_for_wait(cd2_status, wait_started_at):
+                item["error"] = "等待 CD2 上传队列刷新"
+                continue
+            upload = find_upload_for_path(upload_map, item.get("target") or "", cfg)
+            if upload:
+                item["cd2_upload"] = upload
+                item["cd2_upload_seen_at"] = item.get("cd2_upload_seen_at") or now_value
+                if not cd2_upload_done(upload):
+                    item["error"] = f"等待 CD2 上传完成：{upload.get('human') or upload.get('summary') or upload.get('status') or '上传中'}"
+                    continue
+            elif not item.get("cd2_upload_seen_at") and seconds_between(wait_started_at) < grace_seconds:
+                item["error"] = f"等待 CD2 上传队列出现：{seconds_between(wait_started_at)}s / {grace_seconds}s"
+                continue
+            elif not item.get("cd2_upload_seen_at"):
+                item["error"] = "未在 CD2 上传队列找到匹配任务，请检查路径别名或 CD2 上传状态"
+                continue
+            item["status"] = "transfer_done"
+            item["finished_at"] = now_value
+            item["done_at"] = now_value
+            item["cd2_upload"] = upload or item.get("cd2_upload") or {}
+            item["cd2_upload_done_at"] = now_value
+            item.pop("error", None)
+            if upload:
+                log_message = f"CD2 上传完成: {item.get('target') or key}"
+            else:
+                log_message = f"CD2 上传队列已清理: {item.get('target') or key}"
+            state.setdefault("events", []).append(f"[{now_value}] {log_message}")
+            state["events"] = state["events"][-200:]
+        save_state_locked()
+
+
 def size_of(path: Path) -> int:
     if path.is_file():
         return path.stat().st_size
@@ -1090,7 +1165,8 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
 def process_item(source: Path, cfg: Dict) -> None:
     output_dir = Path(cfg["output_dir"]).expanduser().resolve()
     source_size = size_of(source)
-    _, cd2_status = fetch_cd2_uploads(cfg)
+    upload_map, cd2_status = fetch_cd2_uploads(cfg)
+    check_waiting_cd2_uploads(cfg, upload_map, cd2_status)
     wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status, cfg)
     if wait_status:
         mark_source_waiting(source, wait_status, wait_reason, source_size, pending_task)
@@ -1244,20 +1320,32 @@ def process_item(source: Path, cfg: Dict) -> None:
             item = state["items"].setdefault(str(source), {})
             if cfg.get("cd2_transfer_enabled"):
                 status = "transfer_done"
+                if cfg.get("cd2_wait_upload_complete"):
+                    status = "waiting_cd2_upload"
             else:
                 status = "done"
             finished_at = now()
-            item.update({
+            update = {
                 "status": status,
                 "target": str(final_target),
-                "done_at": finished_at,
-                "finished_at": finished_at,
                 "pack_finished_at": item.get("pack_finished_at") or finished_at,
                 "transfer_started_at": transfer_started_at,
                 "transfer_finished_at": transfer_finished_at,
                 "size": source_size,
-            })
-            item.pop("error", None)
+            }
+            if status == "waiting_cd2_upload":
+                update["cd2_upload_wait_started_at"] = finished_at
+                item.pop("cd2_upload_seen_at", None)
+                item.pop("cd2_upload_done_at", None)
+                item.pop("cd2_upload_queue_missing_at", None)
+                update["error"] = "等待 CD2 上传完成"
+                item.pop("done_at", None)
+                item.pop("finished_at", None)
+            else:
+                update["done_at"] = finished_at
+                update["finished_at"] = finished_at
+                item.pop("error", None)
+            item.update(update)
             state["active"] = None
             save_state_locked()
     except Exception as exc:
@@ -1304,7 +1392,8 @@ def scan_once(cfg: Dict) -> None:
     if active:
         return
 
-    _, cd2_status = fetch_cd2_uploads(cfg)
+    upload_map, cd2_status = fetch_cd2_uploads(cfg)
+    check_waiting_cd2_uploads(cfg, upload_map, cd2_status)
     for candidate in get_candidates(watch_dir, output_dir):
         key = str(candidate.resolve())
         pack_iso, pack_reason = should_pack_iso(candidate)
@@ -1321,7 +1410,7 @@ def scan_once(cfg: Dict) -> None:
             item = state["items"].setdefault(key, {"first_seen": now(), "status": "watching"})
             item["pack_iso"] = True
             active_statuses = {"running", "transferring"}
-            if item.get("status") in TERMINAL_STATUSES | active_statuses:
+            if item.get("status") in TERMINAL_STATUSES | active_statuses | {"waiting_cd2_upload"}:
                 item.setdefault("last_size", size)
                 item["partial_files"] = partial
                 save_state_locked()
@@ -1383,7 +1472,7 @@ def scan_once(cfg: Dict) -> None:
 
     with lock:
         for key, item in list(state.get("items", {}).items()):
-            if key not in current and item.get("status") not in {"done", "transfer_done", "failed", "verify_failed", "transfer_failed"}:
+            if key not in current and item.get("status") not in {"done", "transfer_done", "waiting_cd2_upload", "failed", "verify_failed", "transfer_failed"}:
                 item["status"] = "removed"
         save_state_locked()
 
@@ -1560,6 +1649,7 @@ def settings():
     cfg["enabled"] = "enabled" in request.form
     cfg["delete_source_after_success"] = "delete_source_after_success" in request.form
     cfg["cd2_transfer_enabled"] = "cd2_transfer_enabled" in request.form
+    cfg["cd2_wait_upload_complete"] = "cd2_wait_upload_complete" in request.form
     cfg["cd2_require_mount"] = "cd2_require_mount" in request.form
     cfg["cd2_mount_root"] = request.form.get("cd2_mount_root", cfg.get("cd2_mount_root", "/CloudNAS")).strip()
     cfg["cd2_target_dir"] = request.form.get("cd2_target_dir", cfg.get("cd2_target_dir", "/CloudNAS/CloudDrive/00-未整理/00-mkiso")).strip()

@@ -1277,8 +1277,13 @@ tr:hover td { background: #fff8f7; }
             <input name="cd2_transfer_enabled" type="checkbox" {% if cfg.cd2_transfer_enabled %}checked{% endif %}>
             <span>启用 CD2 转移</span>
           </label>
+          <label class="checkbox-group">
+            <input name="cd2_wait_upload_complete" type="checkbox" {% if cfg.cd2_wait_upload_complete %}checked{% endif %}>
+            <span>转移后等待 CD2 云端上传完成</span>
+          </label>
           <input name="cd2_require_mount" type="hidden" value="1">
         </div>
+        <div class="settings-help">等待上传完成需要同时启用 CD2 转移和 CD2 API，并确保 Token 可读取上传队列、路径别名能匹配目标目录。</div>
         
         <div class="button-stack">
           <button class="btn btn-primary" type="submit" data-saving-text="保存中...">保存设置</button>
@@ -1497,7 +1502,7 @@ tr:hover td { background: #fff8f7; }
 
 <script>
 (function(){
-const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiting_stable:"\u7b49\u5f85\u7a33\u5b9a",waiting_partial:"\u7b49\u5f85\u4e0b\u8f7d\u5b8c\u6210",ready:"\u51c6\u5907\u6253\u5305",running:"\u6b63\u5728\u5c01\u88c5",done:"\u5df2\u5b8c\u6210",failed:"\u5931\u8d25",verify_failed:"\u9a8c\u8bc1\u5931\u8d25",transferring:"\u6b63\u5728\u79fb\u52a8\u5230 CD2",transfer_done:"\u5df2\u79fb\u52a8\u5230 CD2",transfer_failed:"\u79fb\u52a8\u5931\u8d25",removed:"\u6e90\u5df2\u79fb\u9664"};
+const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiting_stable:"\u7b49\u5f85\u7a33\u5b9a",waiting_partial:"\u7b49\u5f85\u4e0b\u8f7d\u5b8c\u6210",ready:"\u51c6\u5907\u6253\u5305",running:"\u6b63\u5728\u5c01\u88c5",done:"\u5df2\u5b8c\u6210",failed:"\u5931\u8d25",verify_failed:"\u9a8c\u8bc1\u5931\u8d25",transferring:"\u6b63\u5728\u79fb\u52a8\u5230 CD2",waiting_cd2_upload:"\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210",transfer_done:"\u5df2\u4ea4\u7ed9 CD2",transfer_failed:"\u79fb\u52a8\u5931\u8d25",removed:"\u6e90\u5df2\u79fb\u9664"};
 const $=id=>document.getElementById(id);
 let alertTimer;
 const seenLogEvents = new Set();
@@ -1631,7 +1636,7 @@ function setupSettingsForm(){
 function getBadgeClass(status) {
   if (['done', 'transfer_done'].includes(status)) return 'badge-green';
   if (['failed', 'verify_failed', 'transfer_failed'].includes(status)) return 'badge-red';
-  if (['running', 'transferring'].includes(status)) return 'badge-yellow';
+  if (['running', 'transferring', 'waiting_cd2_upload'].includes(status)) return 'badge-yellow';
   if (['skipped', 'removed'].includes(status)) return 'badge-gray';
   return 'badge-blue';
 }
@@ -1801,7 +1806,8 @@ function formatCd2Status(status) {
 function statusBadgeText(status, item={}) {
   if (status === "running") return "\u6b63\u5728\u5c01\u88c5";
   if (status === "transferring") return "\u6b63\u5728\u79fb\u52a8\u5230 CD2";
-  if (status === "transfer_done") return "\u5df2\u79fb\u52a8\u5230 CD2";
+  if (status === "waiting_cd2_upload") return "\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210";
+  if (status === "transfer_done") return "\u5df2\u4ea4\u7ed9 CD2";
   if (status === "done") return item.pack_iso === false ? "\u8df3\u8fc7\u5c01\u88c5" : "\u5df2\u5c01\u88c5 ISO";
   if (status === "skipped") return "\u8df3\u8fc7\u5c01\u88c5";
   return label(status);
@@ -1813,6 +1819,7 @@ function phaseStatusText(active) {
   const status = active && active.status;
   if (phase === "packing" || status === "running") return "\u6b63\u5728\u5c01\u88c5";
   if (phase === "transfer" || status === "transferring") return "\u6b63\u5728\u79fb\u52a8\u5230 CD2";
+  if (status === "waiting_cd2_upload") return "\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210";
   return statusBadgeText(status, active || {});
 }
 
@@ -1825,6 +1832,14 @@ function formatSize(value){
 
 function getTaskProgress(item, active, key) {
   const activeProgress = active && active.source === key ? (active.progress || {}) : {};
+  if ((item || {}).status === "waiting_cd2_upload") {
+    const up = (item && item.cd2_upload) || {};
+    const current = Number(up.current ?? up.uploaded ?? 0);
+    const total = Number(up.total ?? up.size ?? 0);
+    let percent = up.percent != null ? Number(up.percent) : (total > 0 ? (current / total) * 100 : 0);
+    if (!Number.isFinite(percent)) percent = 0;
+    return { current, total, percent: Math.max(0, Math.min(100, percent)) };
+  }
   const doneStatuses = ['done', 'transfer_done'];
   const current = Number(
     activeProgress.current ?? activeProgress.uploaded ?? item.currentSize ?? item.current ?? item.last_size ?? item.size ?? 0
@@ -1977,7 +1992,7 @@ function renderTaskSummary(state) {
   $("total-percent-text").textContent = progress.percent.toFixed(1) + "%";
   $("total-progress-bar").style.width = progress.percent.toFixed(1) + "%";
   $("phase-label").textContent = statusText;
-  $("phase-progress-text").textContent = formatSize(progress.current) + " / " + formatSize(progress.total);
+  $("phase-progress-text").textContent = item.status === "waiting_cd2_upload" ? pickCd2Upload(item) : formatSize(progress.current) + " / " + formatSize(progress.total);
   $("phase-progress-bar").style.width = progress.percent.toFixed(1) + "%";
 }
 
@@ -2197,7 +2212,7 @@ async function refresh(){
     updateItems(state.items, state.active);
     renderHistory(state.items, state.active);
     appendNewEvents(state.events || []);
-    if(state.cd2_status && !state.active && $("active-cd2-upload")) {
+    if(state.cd2_status && !state.active && !firstItem && $("active-cd2-upload")) {
       $("active-cd2-upload").textContent = state.cd2_status.human || state.cd2_status.status || "--";
     }
     if($("cd2-status-detail")) {

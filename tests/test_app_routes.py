@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -219,6 +220,7 @@ class AppRouteTests(unittest.TestCase):
             "enabled": "on",
             "delete_source_after_success": "on",
             "cd2_transfer_enabled": "on",
+            "cd2_wait_upload_complete": "on",
             "cd2_require_mount": "1",
         })
 
@@ -227,6 +229,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(cfg["cd2_auth_mode"], "password")
         self.assertEqual(cfg["cd2_api_addr"], "127.0.0.1:19798")
         self.assertEqual(cfg["cd2_path_aliases"][0]["remote"], "/115")
+        self.assertTrue(cfg["cd2_wait_upload_complete"])
 
     def test_has_partial_files_detects_cd2_temp_files(self):
         source = self.watch / "Disc"
@@ -482,6 +485,130 @@ class AppRouteTests(unittest.TestCase):
 
         self.assertIsNone(active)
         self.assertEqual(enriched[source_key]["cd2_upload"], upload)
+
+    def test_waiting_cd2_upload_stays_until_upload_done(self):
+        key = str(self.watch / "UploadWait")
+        target = self.cd2 / "UploadWait.iso"
+        app_module.state["items"][key] = {
+            "status": "waiting_cd2_upload",
+            "target": str(target),
+            "pack_iso": True,
+            "cd2_upload_wait_started_at": "2000-01-01 00:00:00",
+        }
+        cfg = self.scan_config(
+            cd2_wait_upload_complete=True,
+            cd2_path_aliases=[
+                {"local": str(self.data_dir / "CloudNAS" / "CloudDrive"), "remote": "/115"}
+            ],
+        )
+        upload = {
+            "path": "/115/00-未整理/00-mkiso/UploadWait.iso",
+            "current": 10,
+            "total": 100,
+            "percent": 10.0,
+            "human": "10.0%",
+        }
+        upload_map = {app_module.normalize_upload_path(upload["path"]): upload}
+
+        app_module.check_waiting_cd2_uploads(cfg, upload_map, {"connected": True, "checked_at": app_module.now()})
+        self.assertEqual(app_module.state["items"][key]["status"], "waiting_cd2_upload")
+        self.assertIn("等待 CD2 上传完成", app_module.state["items"][key]["error"])
+        self.assertIn("cd2_upload_seen_at", app_module.state["items"][key])
+
+        upload["current"] = 100
+        upload["percent"] = 100.0
+        app_module.check_waiting_cd2_uploads(cfg, upload_map, {"connected": True, "checked_at": app_module.now()})
+        self.assertEqual(app_module.state["items"][key]["status"], "transfer_done")
+        self.assertIn("finished_at", app_module.state["items"][key])
+        self.assertIn("cd2_upload_done_at", app_module.state["items"][key])
+
+    def test_waiting_cd2_upload_waits_for_queue_to_appear(self):
+        key = str(self.watch / "UploadPendingQueue")
+        target = self.cd2 / "UploadPendingQueue.iso"
+        app_module.state["items"][key] = {
+            "status": "waiting_cd2_upload",
+            "target": str(target),
+            "pack_iso": True,
+            "cd2_upload_wait_started_at": (datetime.now() - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        cfg = self.scan_config(cd2_wait_upload_complete=True, cd2_queue_poll_seconds=10)
+
+        app_module.check_waiting_cd2_uploads(cfg, {}, {"connected": True, "checked_at": app_module.now()})
+
+        item = app_module.state["items"][key]
+        self.assertEqual(item["status"], "waiting_cd2_upload")
+        self.assertIn("等待 CD2 上传队列出现", item["error"])
+        self.assertNotIn("finished_at", item)
+
+    def test_waiting_cd2_upload_finishes_when_seen_queue_disappears(self):
+        key = str(self.watch / "UploadQueueCleared")
+        target = self.cd2 / "UploadQueueCleared.iso"
+        app_module.state["items"][key] = {
+            "status": "waiting_cd2_upload",
+            "target": str(target),
+            "pack_iso": True,
+            "cd2_upload_seen_at": "2000-01-01 00:00:00",
+            "cd2_upload_wait_started_at": "2000-01-01 00:00:00",
+        }
+        cfg = self.scan_config(cd2_wait_upload_complete=True)
+
+        app_module.check_waiting_cd2_uploads(cfg, {}, {"connected": True, "checked_at": app_module.now()})
+
+        item = app_module.state["items"][key]
+        self.assertEqual(item["status"], "transfer_done")
+        self.assertIn("cd2_upload_done_at", item)
+
+    def test_waiting_cd2_upload_does_not_complete_without_matching_queue(self):
+        key = str(self.watch / "UploadNoMatch")
+        target = self.cd2 / "UploadNoMatch.iso"
+        app_module.state["items"][key] = {
+            "status": "waiting_cd2_upload",
+            "target": str(target),
+            "pack_iso": True,
+            "cd2_upload_wait_started_at": "2000-01-01 00:00:00",
+        }
+        cfg = self.scan_config(cd2_wait_upload_complete=True)
+
+        app_module.check_waiting_cd2_uploads(cfg, {}, {"connected": True, "checked_at": app_module.now()})
+
+        item = app_module.state["items"][key]
+        self.assertEqual(item["status"], "waiting_cd2_upload")
+        self.assertIn("未在 CD2 上传队列找到匹配任务", item["error"])
+        self.assertNotIn("finished_at", item)
+
+    def test_waiting_cd2_upload_ignores_stale_cd2_snapshot(self):
+        key = str(self.watch / "UploadStaleSnapshot")
+        target = self.cd2 / "UploadStaleSnapshot.iso"
+        app_module.state["items"][key] = {
+            "status": "waiting_cd2_upload",
+            "target": str(target),
+            "pack_iso": True,
+            "cd2_upload_wait_started_at": "2099-01-01 00:00:00",
+        }
+        cfg = self.scan_config(cd2_wait_upload_complete=True)
+
+        app_module.check_waiting_cd2_uploads(cfg, {}, {"connected": True, "checked_at": "2000-01-01 00:00:00"})
+
+        item = app_module.state["items"][key]
+        self.assertEqual(item["status"], "waiting_cd2_upload")
+        self.assertEqual(item["error"], "等待 CD2 上传队列刷新")
+        self.assertNotIn("finished_at", item)
+
+    def test_waiting_cd2_upload_does_not_complete_when_cd2_disconnected(self):
+        key = str(self.watch / "UploadDisconnected")
+        target = self.cd2 / "UploadDisconnected.iso"
+        app_module.state["items"][key] = {
+            "status": "waiting_cd2_upload",
+            "target": str(target),
+            "pack_iso": True,
+        }
+        cfg = self.scan_config(cd2_wait_upload_complete=True)
+
+        app_module.check_waiting_cd2_uploads(cfg, {}, {"connected": False, "human": "CD2 API 未连接"})
+
+        item = app_module.state["items"][key]
+        self.assertEqual(item["status"], "waiting_cd2_upload")
+        self.assertIn("CD2 API 未连接", item["error"])
 
 
 if __name__ == "__main__":
