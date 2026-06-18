@@ -16,6 +16,7 @@ RUN apt-get update && \
 
 COPY iso-packer/app.py /app/
 COPY iso-packer/page.py /app/
+COPY iso-packer/core.py /app/
 
 RUN pip install --no-cache-dir \
     flask==3.0.0 \

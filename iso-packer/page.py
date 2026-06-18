@@ -1313,6 +1313,10 @@ tr:hover td { background: #fff8f7; }
           <div class="task-meta-label">阶段</div>
           <div class="task-meta-value" id="active-phase-label">--</div>
         </div>
+        <div class="task-meta">
+          <div class="task-meta-label">CD2 状态</div>
+          <div class="task-meta-value" id="cd2-status-detail">--</div>
+        </div>
       </div>
       
       <div class="progress-container" id="total-progress-container">
@@ -1349,6 +1353,7 @@ tr:hover td { background: #fff8f7; }
               <th>文件大小</th>
               <th>耗时</th>
               <th>CD2 上传</th>
+              <th>原因</th>
               <th>输出目标</th>
             </tr>
           </thead>
@@ -1362,6 +1367,7 @@ tr:hover td { background: #fff8f7; }
               <td style="color: var(--text-muted);">{{format_size(item.last_size or item.size or 0)}}</td>
               <td class="small-muted">{{item.timings.human if item.timings and item.timings.human else (item.timings.duration if item.timings and item.timings.duration else '-')}}</td>
               <td class="small-muted">{{item.cd2_upload.human if item.cd2_upload and item.cd2_upload.human else '-'}}</td>
+              <td class="small-muted">{{item.error or '-'}}</td>
               <td><span class="target-text" title="{{item.target or '-'}}">{{item.target or '-'}}</span></td>
             </tr>
             {% endfor %}
@@ -1383,6 +1389,7 @@ tr:hover td { background: #fff8f7; }
               <th>&#25991;&#20214;&#22823;&#23567;</th>
               <th>耗时</th>
               <th>CD2 上传</th>
+              <th>原因</th>
               <th>&#36755;&#20986;&#30446;&#26631;</th>
               <th>&#25805;&#20316;</th>
             </tr>
@@ -1398,8 +1405,9 @@ tr:hover td { background: #fff8f7; }
               <td style="color: var(--text-muted);">{{format_size(item.last_size or item.size or 0)}}</td>
               <td class="small-muted">{{item.timings.human if item.timings and item.timings.human else (item.timings.duration if item.timings and item.timings.duration else '-')}}</td>
               <td class="small-muted">{{item.cd2_upload.human if item.cd2_upload and item.cd2_upload.human else '-'}}</td>
+              <td class="small-muted">{{item.error or '-'}}</td>
               <td><span class="target-text" title="{{item.target or '-'}}">{{item.target or '-'}}</span></td>
-              <td><button class="rerun-btn" type="button" data-rerun-source="{{key}}">&#37325;&#26032;&#23553;&#35013;</button></td>
+              <td><button class="rerun-btn" type="button" data-rerun-source="{{key}}" {% if state.active %}disabled{% endif %}>{% if state.active %}任务运行中{% else %}重新封装{% endif %}</button></td>
             </tr>
             {% endfor %}
           </tbody>
@@ -1701,6 +1709,21 @@ function pickCd2Upload(item) {
   return "--";
 }
 
+function pickErrorReason(item) {
+  const value = (item && (item.error || item.reason || item.last_error)) || "";
+  return value ? String(value) : "-";
+}
+
+function formatCd2Status(status) {
+  if(!status) return "--";
+  const parts = [];
+  if(status.human) parts.push(status.human);
+  if(status.last_success_at) parts.push("最后成功 " + status.last_success_at);
+  if(status.last_error) parts.push("错误 " + status.last_error);
+  if(!parts.length && status.checked_at) parts.push("最后检查 " + status.checked_at);
+  return parts.join(" / ") || "--";
+}
+
 function statusBadgeText(status, item={}) {
   if (status === "running") return "\u6b63\u5728\u5c01\u88c5";
   if (status === "transferring") return "\u6b63\u5728\u79fb\u52a8\u5230 CD2";
@@ -1951,8 +1974,9 @@ function renderHistory(items, active) {
       <td style="color: var(--text-muted);">${esc(formatSize((item || {}).last_size || (item || {}).size || 0))}</td>
       <td class="small-muted">${esc(pickTiming(item || {}))}</td>
       <td class="small-muted">${esc(pickCd2Upload(item || {}))}</td>
+      <td class="small-muted">${esc(pickErrorReason(item || {}))}</td>
       <td><span class="target-text" title="${esc((item || {}).target || "-")}">${esc((item || {}).target || "-")}</span></td>
-      <td><button class="rerun-btn" type="button" data-rerun-source="${esc(key)}">&#37325;&#26032;&#23553;&#35013;</button></td>
+      <td><button class="rerun-btn" type="button" data-rerun-source="${esc(key)}"${active ? " disabled" : ""}>${active ? "任务运行中" : "重新封装"}</button></td>
     </tr>`;
   }).join("");
 }
@@ -1972,6 +1996,7 @@ function renderItems(items, active){
       <td style="color: var(--text-muted);">${esc(formatSize(item.last_size||item.size||0))}</td>
       <td class="small-muted">${esc(pickTiming(item || {}))}</td>
       <td class="small-muted">${esc(pickCd2Upload(item || {}))}</td>
+      <td class="small-muted">${esc(pickErrorReason(item || {}))}</td>
       <td><span class="target-text" title="${esc(item.target||"-")}">${esc(item.target||"-")}</span></td>
     </tr>`
   }).join("");
@@ -1986,6 +2011,13 @@ function updateTaskRow(row, item, active, key) {
   const cells = row.querySelectorAll("td");
   if(cells[3]) cells[3].textContent = pickTiming(item || {});
   if(cells[4]) cells[4].textContent = pickCd2Upload(item || {});
+  if(cells[5]) cells[5].textContent = pickErrorReason(item || {});
+  const targetText = cells[6] ? cells[6].querySelector(".target-text") : null;
+  if(targetText) {
+    const target = (item || {}).target || "-";
+    targetText.textContent = target;
+    targetText.title = target;
+  }
 }
 
 function updateItems(items, active) {
@@ -2090,6 +2122,9 @@ async function refresh(){
     appendNewEvents(state.events || []);
     if(state.cd2_status && !state.active && $("active-cd2-upload")) {
       $("active-cd2-upload").textContent = state.cd2_status.human || state.cd2_status.status || "--";
+    }
+    if($("cd2-status-detail")) {
+      $("cd2-status-detail").textContent = formatCd2Status(state.cd2_status || data.cd2_status);
     }
     if(!state.active && firstItem && $("active-duration")) {
       $("active-duration").textContent = pickTiming(firstItem);

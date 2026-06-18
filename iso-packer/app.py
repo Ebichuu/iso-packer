@@ -14,6 +14,27 @@ from typing import Dict, Optional
 from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from core import (
+    DEFAULT_CONFIG,
+    DISC_STRUCTURE_DIRS,
+    PARTIAL_EXTENSIONS,
+    TERMINAL_STATUSES,
+    VIDEO_EXTENSIONS,
+    apply_task_timings,
+    badge_class,
+    cd2_client_key_from_cfg,
+    format_size,
+    normalize_cd2_api_addr,
+    now,
+    path_in_root,
+    safe_filename,
+    safe_next_path,
+    safe_volume_id,
+    sanitize_config,
+    seconds_between,
+    status_label,
+)
+
 try:
     from clouddrive2_client import CloudDriveClient
 except Exception:
@@ -24,45 +45,25 @@ APP_DIR = Path(os.getenv("DATA_DIR", "/data"))
 CONFIG_PATH = APP_DIR / "config.json"
 STATE_PATH = APP_DIR / "state.json"
 LOG_PATH = APP_DIR / "iso-packer.log"
+LOG_LINE_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
 
 
 def ensure_app_dir() -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_CONFIG = {
-    "watch_dir": "/watch",
-    "output_dir": "/output",
-    "delete_source_after_success": True,
-    "scan_interval_seconds": 20,
-    "stable_seconds": 180,
-    "min_free_space_gb": 5,
-    "enabled": True,
-    "cd2_transfer_enabled": False,
-    "cd2_mount_root": "/CloudNAS",
-    "cd2_target_dir": "/CloudNAS/CloudDrive/00-未整理/00-mkiso",
-    "cd2_require_mount": True,
-    "web_password_hash": "",
-    "web_secret_key": "",
-    "cd2_api_enabled": False,
-    "cd2_api_addr": "host.docker.internal:19798",
-    "cd2_api_username": "",
-    "cd2_api_password": "",
-    "cd2_queue_poll_seconds": 10,
-}
-
-PARTIAL_EXTENSIONS = {".part", ".tmp", ".download", ".crdownload", ".aria2", ".!qb"}
-VIDEO_EXTENSIONS = {
-    ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v",
-    ".mpg", ".mpeg", ".ts", ".m2ts", ".mts", ".vob", ".rmvb", ".3gp",
-}
-DISC_STRUCTURE_DIRS = {"bdmv", "video_ts"}
-TERMINAL_STATUSES = {"done", "transfer_done", "failed", "verify_failed", "transfer_failed"}
-
 app = Flask(__name__)
 lock = threading.RLock()
 cd2_lock = threading.RLock()
 worker_lock = threading.Lock()
-cd2_client_cache = {"key": None, "client": None, "last_error": None, "checked_at": None, "upload_map": {}, "upload_status": None}
+cd2_client_cache = {
+    "key": None,
+    "client": None,
+    "last_error": None,
+    "checked_at": None,
+    "last_success_at": None,
+    "upload_map": {},
+    "upload_status": None,
+}
 state = {"items": {}, "last_scan": None, "active": None, "events": [], "cd2": {}}
 worker_started = False
 last_log_prune = 0.0
@@ -73,46 +74,6 @@ DIRECTORY_PICKER_SCOPES = {
     "cd2_mount_root": ("cd2_mount_root",),
     "cd2_target_dir": ("cd2_mount_root", "cd2_target_dir"),
 }
-
-
-def now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def parse_time(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return None
-
-
-def seconds_between(start: Optional[str], end: Optional[str] = None) -> int:
-    start_dt = parse_time(start)
-    if not start_dt:
-        return 0
-    end_dt = parse_time(end) if end else datetime.now()
-    if not end_dt:
-        return 0
-    return max(0, int((end_dt - start_dt).total_seconds()))
-
-
-def format_duration(seconds: Optional[int]) -> str:
-    total = max(0, int(seconds or 0))
-    hours, remainder = divmod(total, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"
-
-
-def duration_summary(timings: Dict) -> str:
-    return (
-        f"总 {format_duration(timings.get('total', 0))} / "
-        f"封装 {format_duration(timings.get('pack', 0))} / "
-        f"转移 {format_duration(timings.get('transfer', 0))}"
-    )
 
 
 def prune_log_file() -> None:
@@ -126,7 +87,7 @@ def prune_log_file() -> None:
     cutoff = datetime.now() - timedelta(days=7)
     kept = []
     for line in LOG_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
-        match = re.match(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", line)
+        match = LOG_LINE_RE.match(line)
         if not match:
             kept.append(line)
             continue
@@ -179,13 +140,6 @@ def save_config(cfg: Dict) -> None:
     tmp.replace(CONFIG_PATH)
 
 
-def sanitize_config(cfg: Dict) -> Dict:
-    safe = dict(cfg or {})
-    safe.pop("web_password_hash", None)
-    safe.pop("web_secret_key", None)
-    return safe
-
-
 def auth_enabled(cfg: Dict) -> bool:
     return True
 
@@ -230,13 +184,6 @@ def wants_json_response() -> bool:
     return request.path.startswith("/api/") or request.path in {"/rerun", "/settings"}
 
 
-def safe_next_path(value: Optional[str]) -> str:
-    path = str(value or "").strip()
-    if not path.startswith("/") or path.startswith("//"):
-        return "/"
-    return path
-
-
 def unauthorized_response(message: str = "请先登录"):
     if wants_json_response():
         return jsonify({"ok": False, "message": message}), 401
@@ -254,33 +201,6 @@ def update_password(cfg: Dict, password: str) -> None:
         cfg["web_secret_key"] = secrets.token_urlsafe(32)
     save_config(cfg)
     set_app_secret(cfg)
-
-
-def path_in_root(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def normalize_cd2_api_addr(value: str) -> str:
-    addr = str(value or "").strip()
-    if not addr:
-        return ""
-    addr = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", addr)
-    addr = addr.split("/", 1)[0].rstrip("/")
-    return addr
-
-
-def cd2_client_key_from_cfg(cfg: Dict):
-    cfg = cfg or {}
-    return (
-        bool(cfg.get("cd2_api_enabled")),
-        normalize_cd2_api_addr(cfg.get("cd2_api_addr")),
-        str(cfg.get("cd2_api_username") or "").strip(),
-        str(cfg.get("cd2_api_password") or ""),
-    )
 
 
 def resolve_absolute_path(value: str) -> Path:
@@ -347,105 +267,6 @@ def parse_int_form(name: str, fallback, minimum: Optional[int] = None) -> int:
     return value
 
 
-def safe_filename(name: str) -> str:
-    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", name).strip(" .")
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned or "disc"
-
-
-def safe_volume_id(name: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
-    return cleaned or "DISC"
-
-
-def status_label(status: str) -> str:
-    labels = {
-        "watching": "监控中",
-        "receiving": "接收中",
-        "waiting_stable": "等待稳定",
-        "waiting_partial": "等待下载完成",
-        "ready": "准备打包",
-        "running": "\u6b63\u5728\u5c01\u88c5",
-        "done": "已完成",
-        "failed": "失败",
-        "verify_failed": "验证失败",
-        "transferring": "\u6b63\u5728\u79fb\u52a8\u5230 CD2",
-        "transfer_done": "\u5df2\u79fb\u52a8\u5230 CD2",
-        "transfer_failed": "转移失败",
-        "removed": "源已移除",
-    }
-    return labels.get(status or "", status or "未知")
-
-
-
-
-def badge_class(status: str) -> str:
-    if status in {"done", "transfer_done"}:
-        return "badge-green"
-    if status in {"failed", "verify_failed", "transfer_failed"}:
-        return "badge-red"
-    if status in {"running", "transferring"}:
-        return "badge-yellow"
-    if status in {"skipped", "removed"}:
-        return "badge-gray"
-    return "badge-blue"
-
-
-def format_size(value) -> str:
-    try:
-        size = float(value or 0)
-    except (TypeError, ValueError):
-        size = 0
-    gb = size / 1024**3
-    if gb >= 0.01:
-        return f"{gb:.2f} GB"
-    mb = size / 1024**2
-    if mb >= 0.01:
-        return f"{mb:.2f} MB"
-    kb = size / 1024
-    if kb >= 0.01:
-        return f"{kb:.2f} KB"
-    return f"{int(size)} B"
-
-
-def apply_task_timings(item: Dict, active: Optional[Dict] = None) -> Dict:
-    source = dict(item or {})
-    active = active or {}
-    progress = active.get("progress") or {}
-    phase = progress.get("phase")
-    task_started_at = source.get("task_started_at") or active.get("task_started_at") or source.get("pack_started_at") or active.get("pack_started_at") or source.get("started_at") or active.get("started_at")
-    task_finished_at = source.get("finished_at") or active.get("finished_at") or source.get("done_at") or active.get("done_at")
-    pack_started_at = source.get("pack_started_at") or active.get("pack_started_at") or task_started_at
-    pack_finished_at = source.get("pack_finished_at") or active.get("pack_finished_at")
-    transfer_started_at = source.get("transfer_started_at") or active.get("transfer_started_at")
-    transfer_finished_at = source.get("transfer_finished_at") or active.get("transfer_finished_at")
-    pack_end = pack_finished_at or (now() if active and phase == "packing" else None)
-    transfer_end = transfer_finished_at or (now() if active and phase == "transfer" else None)
-    total_end = task_finished_at or (now() if active else None)
-    durations = {
-        "total": seconds_between(task_started_at, total_end),
-        "pack": seconds_between(pack_started_at, pack_end),
-        "transfer": seconds_between(transfer_started_at, transfer_end),
-    }
-    source["timings"] = {
-        "started_at": task_started_at,
-        "pack_started_at": pack_started_at,
-        "pack_finished_at": pack_finished_at,
-        "transfer_started_at": transfer_started_at,
-        "transfer_finished_at": transfer_finished_at,
-        "finished_at": task_finished_at,
-        "duration": durations["total"],
-        "seconds": durations["total"],
-        "elapsed": durations["total"],
-        "total_seconds": durations["total"],
-        "human": duration_summary(durations),
-        "duration_human": duration_summary(durations),
-        "durations": durations,
-        "summary": duration_summary(durations),
-    }
-    return source
-
-
 def normalize_upload_path(path: str) -> str:
     return str(Path(str(path or "")).expanduser()).replace("\\", "/").rstrip("/")
 
@@ -495,7 +316,15 @@ def close_cd2_client() -> None:
                 client.close()
             except Exception:
                 pass
-        cd2_client_cache.update({"key": None, "client": None, "last_error": None, "checked_at": None, "upload_map": {}, "upload_status": None})
+        cd2_client_cache.update({
+            "key": None,
+            "client": None,
+            "last_error": None,
+            "checked_at": None,
+            "last_success_at": None,
+            "upload_map": {},
+            "upload_status": None,
+        })
 
 
 def extract_upload_status(upload) -> str:
@@ -521,6 +350,7 @@ def fetch_cd2_uploads(cfg: Dict):
         "available": CloudDriveClient is not None,
         "connected": False,
         "checked_at": cd2_client_cache.get("checked_at"),
+        "last_success_at": cd2_client_cache.get("last_success_at"),
         "last_error": cd2_client_cache.get("last_error"),
         "uploads": [],
     }
@@ -535,6 +365,7 @@ def fetch_cd2_uploads(cfg: Dict):
     client = get_cd2_client(cfg)
     if client is None:
         status["checked_at"] = cd2_client_cache.get("checked_at")
+        status["last_success_at"] = cd2_client_cache.get("last_success_at")
         status["last_error"] = cd2_client_cache.get("last_error") or "CD2 API 未连接"
         status["human"] = status["last_error"]
         return {}, status
@@ -547,14 +378,17 @@ def fetch_cd2_uploads(cfg: Dict):
             cd2_client_cache["upload_map"] = {}
             cd2_client_cache["upload_status"] = None
         status["checked_at"] = cd2_client_cache.get("checked_at")
+        status["last_success_at"] = cd2_client_cache.get("last_success_at")
         status["last_error"] = str(exc)
         status["human"] = str(exc)
         return {}, status
 
+    checked_at = now()
     upload_map = {}
     status.update({
         "connected": True,
-        "checked_at": now(),
+        "checked_at": checked_at,
+        "last_success_at": checked_at,
         "last_error": None,
         "upload_count": int(getattr(result, "totalCount", 0) or 0),
         "global_bytes_per_second": float(getattr(result, "globalBytesPerSecond", 0) or 0),
@@ -581,6 +415,7 @@ def fetch_cd2_uploads(cfg: Dict):
     status["human"] = f"{status['upload_count']} 项上传任务" if status["upload_count"] else "未发现上传任务"
     with cd2_lock:
         cd2_client_cache["checked_at"] = status["checked_at"]
+        cd2_client_cache["last_success_at"] = status["last_success_at"]
         cd2_client_cache["last_error"] = None
         cd2_client_cache["upload_map"] = dict(upload_map)
         cd2_client_cache["upload_status"] = dict(status)
@@ -899,7 +734,8 @@ def process_item(source: Path, cfg: Dict) -> None:
             partial.unlink()
         result = run_iso(source, partial, source_size)
         if result.returncode != 0:
-            log(f"生成失败 {source}: {result.stderr.strip()[-1000:]}")
+            error = result.stderr.strip()[-1000:] or "genisoimage 返回非 0"
+            log(f"生成失败 {source}: {error}")
             try:
                 partial.unlink()
             except FileNotFoundError:
@@ -908,6 +744,7 @@ def process_item(source: Path, cfg: Dict) -> None:
                 state["active"] = None
                 item = state["items"].setdefault(str(source), {})
                 item["status"] = "failed"
+                item["error"] = error
                 item["pack_finished_at"] = now()
                 item["finished_at"] = now()
                 item["last_changed"] = now()
@@ -921,6 +758,7 @@ def process_item(source: Path, cfg: Dict) -> None:
                 state["active"] = None
                 item = state["items"].setdefault(str(source), {})
                 item["status"] = "verify_failed"
+                item["error"] = "xorriso 校验失败"
                 item["pack_finished_at"] = now()
                 item["finished_at"] = now()
                 item["last_changed"] = now()
@@ -956,6 +794,7 @@ def process_item(source: Path, cfg: Dict) -> None:
                     item.update({
                         "status": "transfer_failed",
                         "target": str(target),
+                        "error": "移动到 CD2 挂载目录失败",
                         "done_at": transfer_finished_at,
                         "finished_at": transfer_finished_at,
                         "pack_finished_at": item.get("pack_finished_at") or transfer_finished_at,
@@ -998,6 +837,7 @@ def process_item(source: Path, cfg: Dict) -> None:
                 "transfer_finished_at": transfer_finished_at,
                 "size": source_size,
             })
+            item.pop("error", None)
             state["active"] = None
             save_state_locked()
     except Exception as exc:
@@ -1013,6 +853,7 @@ def process_item(source: Path, cfg: Dict) -> None:
             if item.get("status") not in TERMINAL_STATUSES:
                 failed_at = now()
                 item["status"] = "failed"
+                item["error"] = str(exc)
                 item["pack_finished_at"] = item.get("pack_finished_at") or failed_at
                 item["finished_at"] = failed_at
                 item["last_changed"] = failed_at
