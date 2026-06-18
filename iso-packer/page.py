@@ -1492,9 +1492,9 @@ const seenLogEvents = new Set();
 let currentBrowseRoot = "watch";
 let currentBrowsePath = "/";
 function browseRootPath(root) {
-  if(root === "watch") return $("watch_dir")?.value || "/";
-  if(root === "output") return $("output_dir")?.value || "/";
-  return $("cd2_target_dir")?.value || "/";
+  if(root === "watch") return document.querySelector('[name="watch_dir"]')?.value || "/";
+  if(root === "output") return document.querySelector('[name="output_dir"]')?.value || "/";
+  return document.querySelector('[name="cd2_target_dir"]')?.value || "/";
 }
 function normalizeBrowsePath(path) {
   return String(path || "/").replace(/\\/+$/, "") || "/";

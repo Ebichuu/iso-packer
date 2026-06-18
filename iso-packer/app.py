@@ -275,6 +275,59 @@ def normalize_upload_path(path: str) -> str:
     return str(Path(str(path or "")).expanduser()).replace("\\", "/").rstrip("/")
 
 
+def upload_lookup_keys(path: str, cfg: Optional[Dict] = None):
+    normalized = normalize_upload_path(path)
+    keys = []
+    if normalized:
+        keys.append(normalized)
+    cfg = cfg or {}
+    for root_name in ("cd2_mount_root", "cd2_target_dir"):
+        root_value = cfg.get(root_name)
+        if not root_value:
+            continue
+        try:
+            root = Path(str(root_value)).expanduser().resolve()
+            target = Path(str(path)).expanduser().resolve()
+            relative = target.relative_to(root)
+        except Exception:
+            continue
+        parts = relative.parts
+        for index in range(len(parts)):
+            suffix = "/".join(parts[index:])
+            if suffix:
+                keys.append(suffix)
+                keys.append("/" + suffix)
+    seen = set()
+    result = []
+    for key in keys:
+        key = normalize_upload_path(key)
+        lowered = key.lower()
+        if lowered and lowered not in seen:
+            seen.add(lowered)
+            result.append(key)
+    return result
+
+
+def find_upload_for_path(upload_map: Dict, path: str, cfg: Optional[Dict] = None):
+    if not upload_map:
+        return None
+    direct = {normalize_upload_path(key): value for key, value in upload_map.items()}
+    for key in upload_lookup_keys(path, cfg):
+        upload = direct.get(key)
+        if upload:
+            return upload
+    candidates = [(normalize_upload_path(key).lower(), value) for key, value in direct.items()]
+    for key in upload_lookup_keys(path, cfg):
+        lowered = key.lower().strip("/")
+        if not lowered:
+            continue
+        for candidate, upload in candidates:
+            candidate = candidate.strip("/")
+            if candidate == lowered or candidate.endswith("/" + lowered) or lowered.endswith("/" + candidate):
+                return upload
+    return None
+
+
 def normalize_match_path(path: str) -> str:
     return normalize_upload_path(path).lower()
 
@@ -699,12 +752,12 @@ def attach_cd2_uploads(cfg: Dict, items: Dict, active: Optional[Dict] = None):
     enriched = {}
     for key, item in (items or {}).items():
         copy = dict(item or {})
-        upload = upload_map.get(normalize_upload_path(copy.get("target") or ""))
+        upload = find_upload_for_path(upload_map, copy.get("target") or "", cfg)
         if upload:
             copy["cd2_upload"] = upload
         enriched[key] = copy
     if active:
-        upload = upload_map.get(normalize_upload_path(active.get("target") or ""))
+        upload = find_upload_for_path(upload_map, active.get("target") or "", cfg)
         if upload:
             active = dict(active)
             active["cd2_upload"] = upload
@@ -1663,6 +1716,8 @@ def api_browse():
     if not root:
         return jsonify({"ok": False, "message": "无效的根目录"}), 400
     raw_path = (request.args.get("path") or str(root)).strip() or str(root)
+    if raw_path == "/":
+        raw_path = str(root)
     try:
         path = Path(raw_path).expanduser().resolve()
         root = root.resolve()

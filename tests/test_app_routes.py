@@ -100,9 +100,19 @@ class AppRouteTests(unittest.TestCase):
         response = self.client.get(f"/api/directories?scope=watch_dir&path={self.data_dir.parent}")
         self.assertEqual(response.status_code, 403)
 
-    def test_browse_blocks_root_escape(self):
+    def test_browse_slash_uses_selected_root(self):
+        marker = self.watch / "BrowseRootMarker"
+        marker.mkdir()
         self.login()
         response = self.client.get("/api/browse?root=watch&path=/")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(Path(payload["path"]).resolve(), self.watch.resolve())
+        self.assertIn("BrowseRootMarker", {entry["name"] for entry in payload["entries"]})
+
+    def test_browse_blocks_root_escape(self):
+        self.login()
+        response = self.client.get(f"/api/browse?root=watch&path={self.data_dir.parent}")
         self.assertEqual(response.status_code, 403)
 
     def test_login_next_rejects_external_url(self):
@@ -433,6 +443,33 @@ class AppRouteTests(unittest.TestCase):
         self.assertTrue(status["connected"])
         self.assertIn("下载任务读取失败", status["last_error"])
         self.assertEqual([], status["downloads"])
+
+    def test_cd2_upload_matches_cloudnas_target_by_relative_suffix(self):
+        source_key = str(self.watch / "Movie")
+        target = self.cd2 / "Movie.iso"
+        upload = {
+            "path": "/115/00-未整理/00-mkiso/Movie.iso",
+            "human": "42.0%",
+        }
+        cfg = self.scan_config(
+            cd2_mount_root=str(self.data_dir / "CloudNAS" / "CloudDrive"),
+            cd2_target_dir=str(self.cd2),
+        )
+        items = {
+            source_key: {
+                "target": str(target),
+                "pack_iso": True,
+            }
+        }
+
+        with mock.patch.object(app_module, "fetch_cd2_uploads", return_value=(
+            {app_module.normalize_upload_path(upload["path"]): upload},
+            {"uploads": [upload]},
+        )):
+            enriched, active, _ = app_module.attach_cd2_uploads(cfg, items, None)
+
+        self.assertIsNone(active)
+        self.assertEqual(enriched[source_key]["cd2_upload"], upload)
 
 
 if __name__ == "__main__":
