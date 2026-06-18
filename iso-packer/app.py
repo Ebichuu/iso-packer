@@ -488,7 +488,17 @@ def extract_task_status(task) -> str:
 
 def is_copy_task_done(info: Dict) -> bool:
     status = str(info.get("status") or "").strip().lower()
-    return status in COPY_TASK_DONE_STATUSES
+    if status in COPY_TASK_DONE_STATUSES:
+        return True
+    failed_files = int(info.get("failed_files") or 0)
+    total_files = int(info.get("total_files") or 0)
+    done_files = int(info.get("done_files") or 0)
+    total = int(info.get("total") or 0)
+    current = int(info.get("current") or 0)
+    percent = float(info.get("percent") or 0)
+    files_done = total_files > 0 and done_files >= total_files
+    bytes_done = total > 0 and current >= total
+    return failed_files <= 0 and (files_done or bytes_done or percent >= 100.0)
 
 
 def is_download_done(info: Dict) -> bool:
@@ -550,7 +560,7 @@ def cd2_pending_reason(task: Dict) -> str:
     return task.get("human") or "CD2 任务未完成"
 
 
-def source_readiness_blocker(source: Path, source_size: int, cd2_status: Optional[Dict] = None, cfg: Optional[Dict] = None):
+def source_readiness_blocker(source: Path, source_size: int, cd2_status: Optional[Dict] = None, cfg: Optional[Dict] = None, ignore_cd2_tasks: bool = False):
     if source_size < 0:
         return "receiving", "源目录仍在变化，文件暂不可读", None
     if source_size <= 0:
@@ -560,9 +570,10 @@ def source_readiness_blocker(source: Path, source_size: int, cd2_status: Optiona
     structure_ready, structure_reason = disc_structure_ready(source)
     if not structure_ready:
         return "waiting_partial", structure_reason, None
-    pending_task = cd2_pending_source_task(source, cd2_status, cfg)
-    if pending_task:
-        return "waiting_partial", cd2_pending_reason(pending_task), pending_task
+    if not ignore_cd2_tasks:
+        pending_task = cd2_pending_source_task(source, cd2_status, cfg)
+        if pending_task:
+            return "waiting_partial", cd2_pending_reason(pending_task), pending_task
     return None, None, None
 
 
@@ -1162,12 +1173,12 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
         return None
 
 
-def process_item(source: Path, cfg: Dict) -> None:
+def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> None:
     output_dir = Path(cfg["output_dir"]).expanduser().resolve()
     source_size = size_of(source)
     upload_map, cd2_status = fetch_cd2_uploads(cfg)
     check_waiting_cd2_uploads(cfg, upload_map, cd2_status)
-    wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status, cfg)
+    wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status, cfg, ignore_cd2_tasks=ignore_cd2_tasks)
     if wait_status:
         mark_source_waiting(source, wait_status, wait_reason, source_size, pending_task)
         log(f"等待源目录完成 {source}: {wait_reason}")
@@ -1714,6 +1725,7 @@ def api_cd2_test():
 def rerun_item():
     cfg = load_config()
     source_text = (request.form.get("source") or "").strip()
+    force_cd2 = (request.form.get("force_cd2") or "").strip().lower() in {"1", "true", "yes", "on"}
     if not source_text:
         return jsonify({"ok": False, "message": "\u7f3a\u5c11\u6e90\u8def\u5f84"}), 400
     try:
@@ -1730,7 +1742,7 @@ def rerun_item():
         return jsonify({"ok": False, "message": f"\u8be5\u8def\u5f84\u4e0d\u9700\u8981\u5c01\u88c5: {pack_reason}"}), 400
     source_size = size_of(source)
     _, cd2_status = fetch_cd2_uploads(cfg)
-    wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status, cfg)
+    wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status, cfg, ignore_cd2_tasks=force_cd2)
     if wait_status:
         mark_source_waiting(source, wait_status, wait_reason, source_size, pending_task)
         return jsonify({"ok": False, "message": wait_reason}), 409
@@ -1745,12 +1757,20 @@ def rerun_item():
             "last_changed": now(),
             "partial_files": False,
             "manual_requested_at": now(),
+            "manual_force_cd2": force_cd2,
         })
+        if force_cd2:
+            item["manual_force_reason"] = "忽略 CD2 下载/复制队列门禁"
+        else:
+            item.pop("manual_force_reason", None)
         item.pop("done_at", None)
         item.pop("target", None)
         save_state_locked()
-    log(f"\u624b\u52a8\u91cd\u65b0\u5c01\u88c5: {source}")
-    threading.Thread(target=process_item, args=(source, cfg), daemon=True).start()
+    if force_cd2:
+        log(f"手动强制封装（忽略 CD2 队列门禁）: {source}")
+    else:
+        log(f"\u624b\u52a8\u91cd\u65b0\u5c01\u88c5: {source}")
+    threading.Thread(target=process_item, args=(source, cfg, force_cd2), daemon=True).start()
     return jsonify({"ok": True, "message": "\u5df2\u5f00\u59cb\u624b\u52a8\u5c01\u88c5", "source": str(source)})
 
 

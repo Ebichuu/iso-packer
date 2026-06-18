@@ -401,6 +401,80 @@ class AppRouteTests(unittest.TestCase):
 
         self.assertIsNone(pending)
 
+    def test_full_cd2_copy_progress_does_not_block_candidate(self):
+        source = self.make_bdmv("CompletedCopy", complete=True)
+        task = {
+            "kind": "copy",
+            "source": str(source),
+            "target": str(source),
+            "status": "running",
+            "current": 77_560_000_000,
+            "total": 77_560_000_000,
+            "done_files": 621,
+            "total_files": 621,
+            "failed_files": 0,
+            "percent": 100.0,
+            "done": True,
+            "human": "CD2 复制完成 100.0%",
+        }
+
+        pending = app_module.cd2_pending_source_task(source, {
+            "connected": True,
+            "downloads": [],
+            "copy_tasks": [task],
+        })
+
+        self.assertIsNone(pending)
+
+    def test_rerun_can_force_past_cd2_pending_task(self):
+        self.login()
+        source = self.make_bdmv("ForcePastCd2", complete=True)
+        pending_task = {
+            "kind": "download",
+            "path": str(source),
+            "key": str(source),
+            "status": "running",
+            "current": 99,
+            "total": 100,
+            "done": False,
+            "human": "CD2 下载中 99.0%",
+        }
+        cfg = self.scan_config()
+
+        with mock.patch.object(app_module, "load_config", return_value=cfg), \
+             mock.patch.object(app_module, "fetch_cd2_uploads", return_value=({}, {"connected": True, "downloads": [pending_task], "copy_tasks": []})), \
+             mock.patch.object(app_module.threading, "Thread") as thread_cls:
+            response = self.client.post("/rerun", data={"source": str(source), "force_cd2": "1"})
+
+        self.assertEqual(response.status_code, 200)
+        key = str(source.resolve())
+        self.assertTrue(app_module.state["items"][key]["manual_force_cd2"])
+        thread_cls.assert_called_once()
+
+    def test_rerun_without_force_still_blocks_cd2_pending_task(self):
+        self.login()
+        source = self.make_bdmv("BlockPendingCd2", complete=True)
+        pending_task = {
+            "kind": "download",
+            "path": str(source),
+            "key": str(source),
+            "status": "running",
+            "current": 99,
+            "total": 100,
+            "done": False,
+            "human": "CD2 下载中 99.0%",
+        }
+        cfg = self.scan_config()
+
+        with mock.patch.object(app_module, "load_config", return_value=cfg), \
+             mock.patch.object(app_module, "fetch_cd2_uploads", return_value=({}, {"connected": True, "downloads": [pending_task], "copy_tasks": []})), \
+             mock.patch.object(app_module.threading, "Thread") as thread_cls:
+            response = self.client.post("/rerun", data={"source": str(source)})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("CD2", response.get_json()["message"])
+        thread_cls.assert_not_called()
+
     def test_cd2_download_queue_failure_keeps_upload_status_connected(self):
         class UploadResult:
             totalCount = 0

@@ -1560,9 +1560,17 @@ function setupTaskActions(){
     try {
       const data = new FormData();
       data.set("source", source);
-      const res = await fetch("/rerun", { method: "POST", body: data });
-      const payload = await res.json().catch(() => ({}));
+      let res = await fetch("/rerun", { method: "POST", body: data });
+      let payload = await res.json().catch(() => ({}));
       if(isAuthFailure(res, payload)) return goLogin();
+      if(res.status === 409 && /CD2/.test(payload.message || "") && confirm((payload.message || "CD2 队列仍显示未完成") + "\n\n文件已手动补齐的话，可以忽略 CD2 队列门禁强制封装。继续？")) {
+        const forceData = new FormData();
+        forceData.set("source", source);
+        forceData.set("force_cd2", "1");
+        res = await fetch("/rerun", { method: "POST", body: forceData });
+        payload = await res.json().catch(() => ({}));
+        if(isAuthFailure(res, payload)) return goLogin();
+      }
       if(!res.ok || payload.ok === false) throw new Error(payload.message || ("HTTP " + res.status));
       showSettingsAlert(payload.message || "\u5df2\u5f00\u59cb\u624b\u52a8\u5c01\u88c5");
       refresh();
