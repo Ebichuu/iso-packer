@@ -45,6 +45,18 @@ class CoreUtilityTests(unittest.TestCase):
         self.assertEqual(result["timings"]["durations"]["total"], 900)
         self.assertEqual(result["timings"]["durations"]["pack"], 600)
 
+    def test_sanitize_config_removes_secrets(self):
+        result = core.sanitize_config({
+            "web_password_hash": "hash",
+            "web_secret_key": "secret",
+            "cd2_api_password": "cd2-secret",
+            "cd2_api_username": "user",
+        })
+        self.assertNotIn("web_password_hash", result)
+        self.assertNotIn("web_secret_key", result)
+        self.assertNotIn("cd2_api_password", result)
+        self.assertEqual(result["cd2_api_username"], "user")
+
 
 if __name__ == "__main__":
     unittest.main()

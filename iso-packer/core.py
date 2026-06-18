@@ -77,6 +77,7 @@ def sanitize_config(cfg: Dict) -> Dict:
     safe = dict(cfg or {})
     safe.pop("web_password_hash", None)
     safe.pop("web_secret_key", None)
+    safe.pop("cd2_api_password", None)
     return safe
 
 
