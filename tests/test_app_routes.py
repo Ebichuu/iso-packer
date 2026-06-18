@@ -130,6 +130,15 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn('\\n\\n文件已手动补齐', script)
         self.assertNotIn(' + "\n\n文件已手动补齐', script)
 
+    def test_dashboard_rows_render_task_progress(self):
+        match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        self.assertIn("<th>进度</th>", page_module.PAGE)
+        self.assertIn("progress: active.progress", script)
+        self.assertIn("function renderTableProgress", script)
+        self.assertIn("cells[3].innerHTML = renderTableProgress", script)
+
     def test_cd2_api_token_auth_uses_bearer_token(self):
         class FakeUploadResult:
             totalCount = 0

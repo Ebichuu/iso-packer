@@ -1378,6 +1378,7 @@ tr:hover td { background: #fff8f7; }
               <th>源路径</th>
               <th>状态</th>
               <th>文件大小</th>
+              <th>进度</th>
               <th>耗时</th>
               <th>CD2 上传</th>
               <th>原因</th>
@@ -1392,6 +1393,7 @@ tr:hover td { background: #fff8f7; }
                 <span class="badge {{badge_class(item.status)}}">{{status_label(item.status)}}</span>
               </td>
               <td style="color: var(--text-muted);">{{format_size(item.last_size or item.size or 0)}}</td>
+              <td class="small-muted">-</td>
               <td class="small-muted">{{item.timings.human if item.timings and item.timings.human else (item.timings.duration if item.timings and item.timings.duration else '-')}}</td>
               <td class="small-muted">{{item.cd2_upload.human if item.cd2_upload and item.cd2_upload.human else '-'}}</td>
               <td class="small-muted">{{item.error or '-'}}</td>
@@ -1414,6 +1416,7 @@ tr:hover td { background: #fff8f7; }
               <th>&#28304;&#36335;&#24452;</th>
               <th>&#29366;&#24577;</th>
               <th>&#25991;&#20214;&#22823;&#23567;</th>
+              <th>进度</th>
               <th>耗时</th>
               <th>CD2 上传</th>
               <th>原因</th>
@@ -1430,6 +1433,7 @@ tr:hover td { background: #fff8f7; }
               </td>
               <td><span class="badge {{badge_class(item.status)}}">{{status_label(item.status)}}</span></td>
               <td style="color: var(--text-muted);">{{format_size(item.last_size or item.size or 0)}}</td>
+              <td class="small-muted">-</td>
               <td class="small-muted">{{item.timings.human if item.timings and item.timings.human else (item.timings.duration if item.timings and item.timings.duration else '-')}}</td>
               <td class="small-muted">{{item.cd2_upload.human if item.cd2_upload and item.cd2_upload.human else '-'}}</td>
               <td class="small-muted">{{item.error or '-'}}</td>
@@ -1785,6 +1789,7 @@ function rowItem(item, active, key) {
       ...(item || {}),
       status: active.status,
       target: active.target || (item || {}).target,
+      progress: active.progress || (item || {}).progress || {},
       timings: active.timings || (item || {}).timings || {},
       cd2_upload: active.cd2_upload || (item || {}).cd2_upload || {},
       error: active.error || "",
@@ -1839,7 +1844,7 @@ function formatSize(value){
 }
 
 function getTaskProgress(item, active, key) {
-  const activeProgress = active && active.source === key ? (active.progress || {}) : {};
+  const activeProgress = active && active.source === key ? (active.progress || {}) : ((item || {}).progress || {});
   if ((item || {}).status === "waiting_cd2_upload") {
     const up = (item && item.cd2_upload) || {};
     const current = Number(up.current ?? up.uploaded ?? 0);
@@ -1859,6 +1864,26 @@ function getTaskProgress(item, active, key) {
   if (doneStatuses.includes(item.status)) percent = 100;
   percent = Math.max(0, Math.min(100, percent));
   return { current, total, percent };
+}
+
+function renderTableProgress(item, active, key) {
+  item = rowItem(item, active, key);
+  const status = (item || {}).status;
+  const visibleStatuses = ["running", "transferring", "waiting_cd2_upload", "done", "transfer_done"];
+  if(!visibleStatuses.includes(status)) return `<span class="small-muted">--</span>`;
+  const progress = getTaskProgress(item, active, key);
+  const percent = Math.max(0, Math.min(100, Number(progress.percent || 0)));
+  const hasTotal = Number(progress.total || 0) > 0;
+  const meta = item.status === "waiting_cd2_upload"
+    ? pickCd2Upload(item)
+    : (hasTotal ? `${formatSize(progress.current)} / ${formatSize(progress.total)}` : "--");
+  return `<div class="table-progress" data-task-progress>
+    <div class="table-progress-track"><div class="table-progress-fill" style="width: ${percent.toFixed(1)}%"></div></div>
+    <div class="table-progress-meta">
+      <span>${esc(meta)}</span>
+      <span class="table-progress-percent">${percent.toFixed(1)}%</span>
+    </div>
+  </div>`;
 }
 
 function taskStatusText(item, active, key) {
@@ -2070,6 +2095,7 @@ function renderHistory(items, active) {
       </td>
       <td><span class="badge ${getBadgeClass(status)}">${esc(taskStatusText(item, active, key))}</span></td>
       <td style="color: var(--text-muted);">${esc(formatSize(item.last_size || item.size || 0))}</td>
+      <td>${renderTableProgress(item, active, key)}</td>
       <td class="small-muted">${esc(pickTiming(item))}</td>
       <td class="small-muted">${esc(pickCd2Upload(item))}</td>
       <td class="small-muted">${esc(pickErrorReason(item))}</td>
@@ -2093,6 +2119,7 @@ function renderItems(items, active){
       </td>
       <td>${renderTaskStatus(item, active, key)}</td>
       <td style="color: var(--text-muted);">${esc(formatSize(item.last_size||item.size||0))}</td>
+      <td>${renderTableProgress(item, active, key)}</td>
       <td class="small-muted">${esc(pickTiming(item || {}))}</td>
       <td class="small-muted">${esc(pickCd2Upload(item || {}))}</td>
       <td class="small-muted">${esc(pickErrorReason(item || {}))}</td>
@@ -2109,10 +2136,11 @@ function updateTaskRow(row, item, active, key) {
   badge.className = "badge " + getBadgeClass(status);
   badge.textContent = taskStatusText(item, active, key);
   const cells = row.querySelectorAll("td");
-  if(cells[3]) cells[3].textContent = pickTiming(item);
-  if(cells[4]) cells[4].textContent = pickCd2Upload(item);
-  if(cells[5]) cells[5].textContent = pickErrorReason(item);
-  const targetText = cells[6] ? cells[6].querySelector(".target-text") : null;
+  if(cells[3]) cells[3].innerHTML = renderTableProgress(item, active, key);
+  if(cells[4]) cells[4].textContent = pickTiming(item);
+  if(cells[5]) cells[5].textContent = pickCd2Upload(item);
+  if(cells[6]) cells[6].textContent = pickErrorReason(item);
+  const targetText = cells[7] ? cells[7].querySelector(".target-text") : null;
   if(targetText) {
     const target = (item || {}).target || "-";
     targetText.textContent = target;
