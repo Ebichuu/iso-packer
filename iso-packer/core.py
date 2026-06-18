@@ -25,7 +25,17 @@ DEFAULT_CONFIG = {
     "cd2_queue_poll_seconds": 10,
 }
 
-PARTIAL_EXTENSIONS = {".part", ".tmp", ".download", ".crdownload", ".aria2", ".!qb"}
+PARTIAL_EXTENSIONS = {
+    ".part",
+    ".tmp",
+    ".download",
+    ".crdownload",
+    ".aria2",
+    ".!qb",
+    ".cifstmp",
+    ".clfstmp",
+    ".progress",
+}
 VIDEO_EXTENSIONS = {
     ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v",
     ".mpg", ".mpeg", ".ts", ".m2ts", ".mts", ".vob", ".rmvb", ".3gp",

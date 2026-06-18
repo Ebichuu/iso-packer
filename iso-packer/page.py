@@ -1760,7 +1760,11 @@ function formatCd2Status(status) {
   const parts = [];
   if(status.auth_mode) parts.push(status.auth_mode === "password" ? "用户名密码" : "API Token");
   if(status.human) parts.push(status.human);
-  if(status.upload_count != null) parts.push(String(status.upload_count) + " 项");
+  if(!status.human) {
+    if(status.upload_count != null) parts.push(String(status.upload_count) + " 项上传");
+    if(status.download_count != null) parts.push(String(status.download_count) + " 项下载");
+    if(status.copy_task_count != null) parts.push(String(status.copy_task_count) + " 项复制");
+  }
   if(status.last_success_at) parts.push("最后成功 " + status.last_success_at);
   if(status.last_error) parts.push("错误 " + status.last_error);
   if(!parts.length && status.checked_at) parts.push("最后检查 " + status.checked_at);

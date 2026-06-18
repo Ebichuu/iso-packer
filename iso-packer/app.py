@@ -68,6 +68,9 @@ cd2_client_cache = {
 state = {"items": {}, "last_scan": None, "active": None, "events": [], "cd2": {}}
 worker_started = False
 last_log_prune = 0.0
+BDMV_REQUIRED_FILES = ("index.bdmv", "MovieObject.bdmv")
+BDMV_REQUIRED_DIRS = ("PLAYLIST", "STREAM", "CLIPINF")
+COPY_TASK_DONE_STATUSES = {"3", "completed", "complete", "done", "finish", "finished"}
 DIRECTORY_PICKER_ROOT = "@roots"
 DIRECTORY_PICKER_SCOPES = {
     "watch_dir": ("watch_dir",),
@@ -272,6 +275,30 @@ def normalize_upload_path(path: str) -> str:
     return str(Path(str(path or "")).expanduser()).replace("\\", "/").rstrip("/")
 
 
+def normalize_match_path(path: str) -> str:
+    return normalize_upload_path(path).lower()
+
+
+def int_attr(obj, name: str, default: int = 0) -> int:
+    try:
+        return int(getattr(obj, name, default) or default)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def float_attr(obj, name: str, default: float = 0.0) -> float:
+    try:
+        return float(getattr(obj, name, default) or default)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def progress_percent(current: int, total: int) -> float:
+    if total <= 0:
+        return 0.0
+    return min(100.0, max(0.0, current * 100 / total))
+
+
 def cd2_auth_mode_from_cfg(cfg: Dict) -> str:
     mode = str((cfg or {}).get("cd2_auth_mode") or "api_token").strip().lower()
     if mode not in {"api_token", "password"}:
@@ -381,6 +408,160 @@ def extract_upload_status(upload) -> str:
     return "unknown"
 
 
+def extract_task_status(task) -> str:
+    status = getattr(task, "status", None)
+    if status not in (None, ""):
+        return str(status)
+    return "unknown"
+
+
+def is_copy_task_done(info: Dict) -> bool:
+    status = str(info.get("status") or "").strip().lower()
+    return status in COPY_TASK_DONE_STATUSES
+
+
+def cd2_path_matches_candidate(path: str, candidate: Path) -> bool:
+    value = normalize_match_path(path)
+    if not value:
+        return False
+    candidate_path = normalize_match_path(str(candidate))
+    if value == candidate_path or value.startswith(candidate_path + "/"):
+        return True
+    name = candidate.name.strip().lower()
+    if not name:
+        return False
+    return value.endswith("/" + name) or ("/" + name + "/") in value
+
+
+def cd2_pending_source_task(candidate: Path, cd2_status: Optional[Dict]) -> Optional[Dict]:
+    if not cd2_status or not cd2_status.get("connected"):
+        return None
+    for task in cd2_status.get("copy_tasks", []) or []:
+        if task.get("done"):
+            continue
+        fields = (task.get("source"), task.get("target"), task.get("key"))
+        if any(cd2_path_matches_candidate(value, candidate) for value in fields):
+            return task
+    for task in cd2_status.get("downloads", []) or []:
+        fields = (task.get("path"), task.get("key"))
+        if any(cd2_path_matches_candidate(value, candidate) for value in fields):
+            return task
+    return None
+
+
+def cd2_pending_reason(task: Dict) -> str:
+    kind = task.get("kind")
+    if kind == "copy":
+        return task.get("human") or "CD2 复制任务未完成"
+    if kind == "download":
+        return task.get("human") or "CD2 下载任务未完成"
+    return task.get("human") or "CD2 任务未完成"
+
+
+def source_readiness_blocker(source: Path, source_size: int, cd2_status: Optional[Dict] = None):
+    if source_size < 0:
+        return "receiving", "源目录仍在变化，文件暂不可读", None
+    if source_size <= 0:
+        return "receiving", "源目录为空或仍在接收中", None
+    if has_partial_files(source):
+        return "waiting_partial", "检测到未完成临时文件", None
+    structure_ready, structure_reason = disc_structure_ready(source)
+    if not structure_ready:
+        return "waiting_partial", structure_reason, None
+    pending_task = cd2_pending_source_task(source, cd2_status)
+    if pending_task:
+        return "waiting_partial", cd2_pending_reason(pending_task), pending_task
+    return None, None, None
+
+
+def mark_source_waiting(source: Path, status: str, reason: str, source_size: int = 0, pending_task: Optional[Dict] = None) -> None:
+    changed_at = now()
+    with lock:
+        item = state.setdefault("items", {}).setdefault(str(source), {"first_seen": changed_at})
+        item.update({
+            "status": status,
+            "pack_iso": True,
+            "last_size": max(0, int(source_size or 0)),
+            "last_changed": changed_at,
+            "partial_files": status == "waiting_partial",
+            "error": reason,
+        })
+        if pending_task:
+            item["cd2_source_task"] = pending_task
+        else:
+            item.pop("cd2_source_task", None)
+        state["active"] = None
+        save_state_locked()
+
+
+def fetch_cd2_downloads(client):
+    if not hasattr(client, "get_download_file_list"):
+        return []
+    result = client.get_download_file_list()
+    downloads = []
+    for download in getattr(result, "downloadFiles", []) or []:
+        total = int_attr(download, "fileLength")
+        current = int_attr(download, "totalBufferUsed")
+        percent = progress_percent(current, total)
+        path = getattr(download, "filePath", "") or ""
+        info = {
+            "kind": "download",
+            "key": path,
+            "path": path,
+            "status": "downloading",
+            "current": current,
+            "total": total,
+            "percent": percent,
+            "bytes_per_second": float_attr(download, "bytesPerSecond"),
+            "detail": getattr(download, "detailDownloadInfo", "") or "",
+            "error": getattr(download, "lastDownloadError", "") or "",
+            "summary": f"{format_size(current)} / {format_size(total)}",
+            "human": f"CD2 下载中 {percent:.1f}% ({format_size(current)} / {format_size(total)})" if total > 0 else "CD2 下载中",
+        }
+        downloads.append(info)
+    return downloads
+
+
+def fetch_cd2_copy_tasks(client):
+    if not hasattr(client, "get_copy_tasks"):
+        return []
+    result = client.get_copy_tasks()
+    tasks = []
+    for task in getattr(result, "copyTasks", []) or []:
+        total_bytes = int_attr(task, "totalBytes")
+        current_bytes = int_attr(task, "uploadedBytes")
+        total_files = int_attr(task, "totalFiles")
+        done_files = int_attr(task, "uploadedFiles")
+        percent = progress_percent(current_bytes, total_bytes)
+        if total_bytes <= 0 and total_files > 0:
+            percent = progress_percent(done_files, total_files)
+        source = getattr(task, "sourcePath", "") or ""
+        target = getattr(task, "destPath", "") or ""
+        info = {
+            "kind": "copy",
+            "key": f"{source}->{target}",
+            "source": source,
+            "target": target,
+            "status": extract_task_status(task),
+            "current": current_bytes,
+            "total": total_bytes,
+            "done_files": done_files,
+            "total_files": total_files,
+            "failed_files": int_attr(task, "failedFiles"),
+            "percent": percent,
+            "paused": bool(getattr(task, "paused", False)),
+            "summary": f"{done_files}/{total_files} 文件, {format_size(current_bytes)} / {format_size(total_bytes)}",
+            "errors": [getattr(error, "message", "") for error in getattr(task, "errors", []) or [] if getattr(error, "message", "")],
+        }
+        info["done"] = is_copy_task_done(info)
+        info["human"] = (
+            f"CD2 复制{'完成' if info['done'] else '中'} {percent:.1f}% "
+            f"({done_files}/{total_files} 文件, {format_size(current_bytes)} / {format_size(total_bytes)})"
+        )
+        tasks.append(info)
+    return tasks
+
+
 def fetch_cd2_uploads(cfg: Dict):
     poll_seconds = max(1, int(cfg.get("cd2_queue_poll_seconds", 10) or 10))
     with cd2_lock:
@@ -398,6 +579,8 @@ def fetch_cd2_uploads(cfg: Dict):
         "last_success_at": cd2_client_cache.get("last_success_at"),
         "last_error": cd2_client_cache.get("last_error"),
         "uploads": [],
+        "downloads": [],
+        "copy_tasks": [],
     }
     if not status["enabled"]:
         status["last_error"] = "CD2 API 未启用"
@@ -417,6 +600,8 @@ def fetch_cd2_uploads(cfg: Dict):
         return {}, status
     try:
         result = client.get_upload_file_list(get_all=True)
+        downloads = fetch_cd2_downloads(client)
+        copy_tasks = fetch_cd2_copy_tasks(client)
     except Exception as exc:
         message = cd2_error_message(exc)
         with cd2_lock:
@@ -443,6 +628,10 @@ def fetch_cd2_uploads(cfg: Dict):
         "global_bytes_per_second": float(getattr(result, "globalBytesPerSecond", 0) or 0),
         "total_bytes": int(getattr(result, "totalBytes", 0) or 0),
         "finished_bytes": int(getattr(result, "finishedBytes", 0) or 0),
+        "download_count": len(downloads),
+        "copy_task_count": len(copy_tasks),
+        "downloads": downloads,
+        "copy_tasks": copy_tasks,
     })
     for upload in getattr(result, "uploadFiles", []) or []:
         current = int(getattr(upload, "transferedBytes", 0) or 0)
@@ -461,7 +650,14 @@ def fetch_cd2_uploads(cfg: Dict):
         }
         upload_map[normalize_upload_path(info["path"])] = info
         status["uploads"].append(info)
-    status["human"] = f"{status['upload_count']} 项上传任务" if status["upload_count"] else "未发现上传任务"
+    parts = []
+    if status["upload_count"]:
+        parts.append(f"{status['upload_count']} 项上传")
+    if status["download_count"]:
+        parts.append(f"{status['download_count']} 项下载")
+    if status["copy_task_count"]:
+        parts.append(f"{status['copy_task_count']} 项复制")
+    status["human"] = " / ".join(parts) if parts else "未发现传输任务"
     with cd2_lock:
         cd2_client_cache["checked_at"] = status["checked_at"]
         cd2_client_cache["last_success_at"] = status["last_success_at"]
@@ -503,6 +699,33 @@ def size_of(path: Path) -> int:
     return total
 
 
+def tree_signature(path: Path) -> Optional[Dict]:
+    if path.is_file():
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        return {"file_count": 1, "dir_count": 0, "latest_mtime": stat.st_mtime_ns}
+    file_count = 0
+    dir_count = 0
+    latest_mtime = 0
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if d not in {"@eaDir", ".Trash", ".DS_Store"}]
+        dir_count += len(dirs)
+        try:
+            latest_mtime = max(latest_mtime, Path(root).stat().st_mtime_ns)
+        except FileNotFoundError:
+            return None
+        for filename in files:
+            fp = Path(root) / filename
+            try:
+                latest_mtime = max(latest_mtime, fp.stat().st_mtime_ns)
+            except FileNotFoundError:
+                return None
+            file_count += 1
+    return {"file_count": file_count, "dir_count": dir_count, "latest_mtime": latest_mtime}
+
+
 def has_partial_files(path: Path) -> bool:
     if path.is_file():
         return path.suffix.lower() in PARTIAL_EXTENSIONS
@@ -513,24 +736,61 @@ def has_partial_files(path: Path) -> bool:
     return False
 
 
-def has_disc_structure(path: Path) -> bool:
+def find_disc_dir(path: Path) -> Optional[Path]:
     if not path.is_dir():
-        return False
+        return None
     try:
         children = list(path.iterdir())
     except FileNotFoundError:
-        return False
-    if any(child.is_dir() and child.name.lower() in DISC_STRUCTURE_DIRS for child in children):
-        return True
+        return None
+    for child in children:
+        if child.is_dir() and child.name.lower() in DISC_STRUCTURE_DIRS:
+            return child
     for child in children:
         if not child.is_dir():
             continue
         try:
-            if any(grandchild.is_dir() and grandchild.name.lower() in DISC_STRUCTURE_DIRS for grandchild in child.iterdir()):
-                return True
+            for grandchild in child.iterdir():
+                if grandchild.is_dir() and grandchild.name.lower() in DISC_STRUCTURE_DIRS:
+                    return grandchild
         except FileNotFoundError:
             continue
-    return False
+    return None
+
+
+def has_disc_structure(path: Path) -> bool:
+    return find_disc_dir(path) is not None
+
+
+def disc_structure_ready(path: Path) -> tuple[bool, str]:
+    disc_dir = find_disc_dir(path)
+    if not disc_dir:
+        return False, "未检测到 BDMV/VIDEO_TS 原盘结构"
+    name = disc_dir.name.lower()
+    if name == "bdmv":
+        missing = []
+        lower_children = {}
+        try:
+            for child in disc_dir.iterdir():
+                lower_children[child.name.lower()] = child
+        except FileNotFoundError:
+            return False, "BDMV 目录仍在创建中"
+        for filename in BDMV_REQUIRED_FILES:
+            child = lower_children.get(filename.lower())
+            if child is None or not child.is_file():
+                missing.append(filename)
+        for dirname in BDMV_REQUIRED_DIRS:
+            child = lower_children.get(dirname.lower())
+            if child is None or not child.is_dir():
+                missing.append(dirname)
+        if missing:
+            return False, f"BDMV 结构未完整，缺少 {', '.join(missing[:5])}"
+        return True, "BDMV 结构完整"
+    if name == "video_ts":
+        if not (disc_dir / "VIDEO_TS.IFO").is_file():
+            return False, "VIDEO_TS 结构未完整，缺少 VIDEO_TS.IFO"
+        return True, "VIDEO_TS 结构完整"
+    return False, "未知原盘结构"
 
 
 def should_pack_iso(source: Path) -> tuple[bool, str]:
@@ -726,8 +986,11 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
 def process_item(source: Path, cfg: Dict) -> None:
     output_dir = Path(cfg["output_dir"]).expanduser().resolve()
     source_size = size_of(source)
-    if source_size <= 0:
-        log(f"跳过 {source}: 无法读取大小或为空")
+    _, cd2_status = fetch_cd2_uploads(cfg)
+    wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status)
+    if wait_status:
+        mark_source_waiting(source, wait_status, wait_reason, source_size, pending_task)
+        log(f"等待源目录完成 {source}: {wait_reason}")
         return
 
     pack_iso, pack_reason = should_pack_iso(source)
@@ -933,6 +1196,7 @@ def scan_once(cfg: Dict) -> None:
     if active:
         return
 
+    _, cd2_status = fetch_cd2_uploads(cfg)
     for candidate in get_candidates(watch_dir, output_dir):
         key = str(candidate.resolve())
         pack_iso, pack_reason = should_pack_iso(candidate)
@@ -943,8 +1207,7 @@ def scan_once(cfg: Dict) -> None:
             continue
         current.add(key)
         size = size_of(candidate)
-        if size < 0:
-            continue
+        signature = tree_signature(candidate)
         partial = has_partial_files(candidate)
         with lock:
             item = state["items"].setdefault(key, {"first_seen": now(), "status": "watching"})
@@ -956,23 +1219,52 @@ def scan_once(cfg: Dict) -> None:
                 save_state_locked()
                 continue
             last_size = item.get("last_size")
+            last_signature = item.get("tree_signature")
             last_changed = item.get("last_changed", now())
-            if last_size != size:
-                item["last_size"] = size
+            wait_status, wait_reason, pending_task = source_readiness_blocker(candidate, size, cd2_status)
+            if wait_status:
+                item["last_size"] = max(0, size)
+                item["tree_signature"] = signature
+                item["last_changed"] = now()
+                item["status"] = wait_status
+                item["partial_files"] = partial or wait_status == "waiting_partial"
+                item["error"] = wait_reason
+                if pending_task:
+                    item["cd2_source_task"] = pending_task
+                else:
+                    item.pop("cd2_source_task", None)
+                save_state_locked()
+                continue
+            if signature is None:
+                item["last_size"] = max(0, size)
                 item["last_changed"] = now()
                 item["status"] = "receiving"
+                item["error"] = "源目录仍在变化，文件暂不可读"
+                save_state_locked()
+                continue
+            if last_size != size or last_signature != signature:
+                item["last_size"] = size
+                item["tree_signature"] = signature
+                item["last_changed"] = now()
+                item["status"] = "receiving"
+                item["error"] = "源目录内容仍在变化"
                 save_state_locked()
                 continue
             item["last_size"] = size
+            item["tree_signature"] = signature
             item["partial_files"] = partial
+            item.pop("cd2_source_task", None)
             elapsed = seconds_between(last_changed)
             if partial:
                 item["status"] = "waiting_partial"
+                item["error"] = "检测到未完成临时文件"
             elif elapsed >= stable_seconds:
                 item["status"] = "ready"
+                item.pop("error", None)
                 save_state_locked()
             else:
                 item["status"] = "waiting_stable"
+                item["error"] = f"等待源目录稳定 {stable_seconds} 秒"
             save_state_locked()
 
         with lock:
@@ -1235,8 +1527,11 @@ def rerun_item():
     if not pack_iso:
         return jsonify({"ok": False, "message": f"\u8be5\u8def\u5f84\u4e0d\u9700\u8981\u5c01\u88c5: {pack_reason}"}), 400
     source_size = size_of(source)
-    if source_size <= 0:
-        return jsonify({"ok": False, "message": "\u65e0\u6cd5\u8bfb\u53d6\u6e90\u5927\u5c0f\u6216\u6e90\u4e3a\u7a7a"}), 400
+    _, cd2_status = fetch_cd2_uploads(cfg)
+    wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status)
+    if wait_status:
+        mark_source_waiting(source, wait_status, wait_reason, source_size, pending_task)
+        return jsonify({"ok": False, "message": wait_reason}), 409
     with lock:
         if state.get("active") is not None:
             return jsonify({"ok": False, "message": "\u5f53\u524d\u6709\u4efb\u52a1\u6b63\u5728\u6267\u884c\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5"}), 409
