@@ -78,7 +78,7 @@
 
 ### CD2 按 SA/Symedia 模型继续收口（未实现）
 
-当前已实现的 CD2 API 能力包含只读观察、测试连接、封装前门禁、路径别名匹配、上传完成门禁、Webhook 基础事件入口、`waiting_cd2_confirm` 延迟确认和目录刷新；远程目录扫描、手动 / 自动拉取都仍是后续规划。
+当前已实现的 CD2 API 能力包含只读观察、测试连接、封装前门禁、路径别名匹配、上传完成门禁、Webhook 基础事件入口、`waiting_cd2_confirm` 延迟确认、目录刷新和远程目录只读扫描；手动 / 自动拉取仍是后续规划。
 
 ### SA/Symedia 式 CD2 监控与门禁
 
@@ -132,8 +132,8 @@ CD2 控制边界：
 3. 已完成：增加 `waiting_cd2_confirm`：事件触发后延迟确认，结合文件树稳定、临时文件识别、原盘结构检查、CD2 下载 / 复制任务状态。
 4. 已完成：上传完成门禁，`cd2_wait_upload_complete` 开启时，`transfer_done` 之前进入 `waiting_cd2_upload`，等待匹配到的 CD2 上传任务完成；未匹配到队列时保持等待并提示检查路径别名或 CD2 上传状态。
 5. 已完成：CD2 目录刷新基础能力，Webhook 后刷新源目录，转移后刷新目标目录，并记录刷新结果。
-6. 下一步：增加远程目录只读扫描，Web 里能看到指定 CD2 云端源目录下的 BDMV / VIDEO_TS 候选。
-7. 增加手动拉取：用户点选候选后，由 iso-packer 调用 CD2 创建下载 / 复制任务。
+6. 已完成：增加远程目录只读扫描，Web 里能看到指定 CD2 云端源目录下的 BDMV / VIDEO_TS 候选；当前只读展示，不创建 CD2 下载 / 复制任务。
+7. 下一步：增加手动拉取，用户点选候选后，由 iso-packer 调用 CD2 创建下载 / 复制任务。
 8. 增加全自动拉取：独立开关开启时，自动发现、自动拉取、自动封装、自动转移。
 
 计划新增配置：
@@ -145,7 +145,7 @@ CD2 控制边界：
 - `cd2_path_aliases`，例如 `{ "local": "/CloudNAS/CloudDrive", "remote": "/115" }`
 - `cd2_upload_match_mode`，优先别名匹配，再决定是否允许后缀兜底
 - `cd2_wait_upload_complete`，用于区分“本地已转移”和“云端已上传”
-- `cd2_remote_source_dirs`，用于配置网盘原盘来源目录
+- 已新增：`cd2_remote_source_dirs`，用于配置网盘原盘来源目录，只读扫描远程 BDMV / VIDEO_TS 候选
 - `cd2_auto_pull_enabled`、`cd2_manual_pull_enabled`
 - `cd2_local_pull_dir`，默认 `/watch`
 

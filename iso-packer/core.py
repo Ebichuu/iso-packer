@@ -34,6 +34,7 @@ DEFAULT_CONFIG = {
     "cd2_refresh_enabled": False,
     "cd2_refresh_after_source_event": True,
     "cd2_refresh_after_transfer": True,
+    "cd2_remote_source_dirs": [],
     "cd2_path_aliases": [
         {"local": "/CloudNAS/CloudDrive", "remote": "/115"},
     ],
@@ -188,6 +189,29 @@ def cd2_path_aliases_to_text(cfg: Dict) -> str:
         f"{alias['local']}={alias['remote']}"
         for alias in cd2_path_aliases_from_cfg(cfg)
     )
+
+
+def parse_cd2_remote_source_dirs(value) -> List[str]:
+    if isinstance(value, (list, tuple)):
+        raw_values = value
+    else:
+        raw_values = str(value or "").splitlines()
+    result = []
+    seen = set()
+    for raw in raw_values:
+        path = normalize_path_text(raw)
+        if not path or path.startswith("#"):
+            continue
+        key = path.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+
+def cd2_remote_source_dirs_to_text(cfg: Dict) -> str:
+    return "\n".join(parse_cd2_remote_source_dirs((cfg or {}).get("cd2_remote_source_dirs")))
 
 
 def alias_variants_for_path(path: str, aliases: Iterable[Dict[str, str]]) -> List[str]:

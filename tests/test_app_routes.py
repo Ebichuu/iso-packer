@@ -307,6 +307,64 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(FakeCloudDriveClient.calls, [("/115/00-未整理", True)])
         self.assertTrue(app_module.state["cd2"]["refresh"]["last_result"]["ok"])
 
+    def test_cd2_remote_candidates_lists_disc_folders(self):
+        class FakeFile:
+            def __init__(self, name, full_path, is_dir=True, size=0):
+                self.name = name
+                self.fullPathName = full_path
+                self.isDirectory = is_dir
+                self.size = size
+                self.writeTime = "2026-06-19 10:00:00"
+
+        class FakeCloudDriveClient:
+            calls = []
+
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                self.calls.append((path, force_refresh))
+                data = {
+                    "/115/03-PT": [
+                        FakeFile("MovieBD", "/115/03-PT/MovieBD"),
+                        FakeFile("MovieDVD", "/115/03-PT/MovieDVD"),
+                        FakeFile("NotDisc", "/115/03-PT/NotDisc"),
+                    ],
+                    "/115/03-PT/MovieBD": [FakeFile("BDMV", "/115/03-PT/MovieBD/BDMV")],
+                    "/115/03-PT/MovieDVD": [FakeFile("VIDEO_TS", "/115/03-PT/MovieDVD/VIDEO_TS")],
+                    "/115/03-PT/NotDisc": [FakeFile("Extras", "/115/03-PT/NotDisc/Extras")],
+                }
+                return data.get(path, [])
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_remote_source_dirs=["/115/03-PT"],
+        )
+
+        payload = app_module.scan_cd2_remote_candidates(cfg, force_refresh=True)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["candidate_count"], 2)
+        self.assertEqual({item["disc_type"] for item in payload["candidates"]}, {"BDMV", "VIDEO_TS"})
+        self.assertIn(("/115/03-PT", True), FakeCloudDriveClient.calls)
+
+    def test_cd2_remote_candidates_endpoint_without_dirs_is_empty(self):
+        self.login()
+        response = self.client.get("/api/cd2/remote-candidates")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["candidates"], [])
+
     def test_cd2_webhook_refreshes_source_before_scan(self):
         class FakeCloudDriveClient:
             calls = []
@@ -413,6 +471,7 @@ class AppRouteTests(unittest.TestCase):
             "cd2_refresh_after_source_event": "on",
             "cd2_refresh_after_transfer": "on",
             "cd2_path_aliases_text": f"{self.data_dir / 'CloudNAS' / 'CloudDrive'}=/115",
+            "cd2_remote_source_dirs_text": "/115/03-PT\n/115/04-BDMV",
             "cd2_webhook_enabled": "on",
             "cd2_webhook_secret": "webhook-secret",
             "cd2_event_source": "symedia",
@@ -439,6 +498,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertTrue(cfg["cd2_refresh_enabled"])
         self.assertTrue(cfg["cd2_refresh_after_source_event"])
         self.assertTrue(cfg["cd2_refresh_after_transfer"])
+        self.assertEqual(cfg["cd2_remote_source_dirs"], ["/115/03-PT", "/115/04-BDMV"])
 
     def test_has_partial_files_detects_cd2_temp_files(self):
         source = self.watch / "Disc"

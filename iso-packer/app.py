@@ -27,12 +27,14 @@ from core import (
     cd2_client_key_from_cfg,
     cd2_path_aliases_from_cfg,
     cd2_path_aliases_to_text,
+    cd2_remote_source_dirs_to_text,
     format_size,
     normalize_cd2_api_addr,
     normalize_path_text,
     now,
     parse_time,
     parse_cd2_path_alias_lines,
+    parse_cd2_remote_source_dirs,
     path_in_root,
     safe_filename,
     safe_next_path,
@@ -132,6 +134,7 @@ def load_config() -> Dict:
     if not CONFIG_PATH.exists():
         cfg = DEFAULT_CONFIG.copy()
         cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
+        cfg["cd2_remote_source_dirs_text"] = cd2_remote_source_dirs_to_text(cfg)
         if not cfg.get("web_secret_key"):
             cfg["web_secret_key"] = secrets.token_urlsafe(32)
         save_config(cfg)
@@ -144,6 +147,8 @@ def load_config() -> Dict:
     cfg.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
     cfg["cd2_path_aliases"] = cd2_path_aliases_from_cfg(cfg)
     cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
+    cfg["cd2_remote_source_dirs"] = parse_cd2_remote_source_dirs(cfg.get("cd2_remote_source_dirs"))
+    cfg["cd2_remote_source_dirs_text"] = cd2_remote_source_dirs_to_text(cfg)
     if not cfg.get("web_secret_key"):
         cfg["web_secret_key"] = secrets.token_urlsafe(32)
         save_config(cfg)
@@ -443,6 +448,102 @@ def refresh_cd2_directory(cfg: Dict, path: str, reason: str = "") -> Dict:
     message = "CD2 目录刷新完成"
     record_cd2_refresh_result(remote_path, True, message, reason)
     return {"ok": True, "path": remote_path, "message": message, "reason": reason}
+
+
+def cd2_file_name(file_obj) -> str:
+    return str(getattr(file_obj, "name", "") or getattr(file_obj, "fileName", "") or "")
+
+
+def cd2_file_path(file_obj, parent_path: str = "") -> str:
+    path = str(getattr(file_obj, "fullPathName", "") or getattr(file_obj, "path", "") or "")
+    if path:
+        return normalize_path_text(path)
+    name = cd2_file_name(file_obj)
+    return normalize_path_text(f"{normalize_path_text(parent_path)}/{name}") if name else normalize_path_text(parent_path)
+
+
+def cd2_file_is_dir(file_obj) -> bool:
+    if hasattr(file_obj, "isDirectory"):
+        return bool(getattr(file_obj, "isDirectory"))
+    file_type = str(getattr(file_obj, "fileType", "") or "").lower()
+    return file_type in {"dir", "directory", "folder"}
+
+
+def cd2_file_size(file_obj) -> int:
+    try:
+        return int(getattr(file_obj, "size", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def cd2_file_mtime(file_obj) -> str:
+    value = getattr(file_obj, "writeTime", None) or getattr(file_obj, "modifyTime", None) or ""
+    return str(value or "")
+
+
+def list_cd2_sub_files(client, path: str, force_refresh: bool = False):
+    return list(client.get_sub_files(path, force_refresh=force_refresh))
+
+
+def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
+    roots = parse_cd2_remote_source_dirs(cfg.get("cd2_remote_source_dirs"))
+    payload = {
+        "ok": True,
+        "checked_at": now(),
+        "roots": roots,
+        "candidates": [],
+        "errors": [],
+    }
+    if not roots:
+        payload["message"] = "未配置 CD2 远程源目录"
+        return payload
+    if not cfg.get("cd2_api_enabled"):
+        payload["ok"] = False
+        payload["message"] = "CD2 API 未启用"
+        return payload
+    client = get_cd2_client(cfg)
+    if client is None:
+        payload["ok"] = False
+        payload["message"] = cd2_client_cache.get("last_error") or "CD2 API 未连接"
+        return payload
+    if not hasattr(client, "get_sub_files"):
+        payload["ok"] = False
+        payload["message"] = "当前 clouddrive2-client 不支持远程目录扫描"
+        return payload
+    for root in roots:
+        remote_root = cd2_remote_path_for_refresh(root, cfg)
+        try:
+            children = list_cd2_sub_files(client, remote_root, force_refresh=force_refresh)
+        except Exception as exc:
+            payload["errors"].append({"root": remote_root, "message": cd2_error_message(exc)})
+            continue
+        for child in children:
+            if not cd2_file_is_dir(child):
+                continue
+            child_path = cd2_file_path(child, remote_root)
+            try:
+                sub_files = list_cd2_sub_files(client, child_path, force_refresh=False)
+            except Exception as exc:
+                payload["errors"].append({"root": child_path, "message": cd2_error_message(exc)})
+                continue
+            names = {cd2_file_name(item).lower() for item in sub_files if cd2_file_is_dir(item)}
+            disc_type = "BDMV" if "bdmv" in names else ("VIDEO_TS" if "video_ts" in names else "")
+            if not disc_type:
+                continue
+            payload["candidates"].append({
+                "name": cd2_file_name(child) or child_path.rsplit("/", 1)[-1],
+                "path": child_path,
+                "root": remote_root,
+                "disc_type": disc_type,
+                "size": cd2_file_size(child),
+                "modified": cd2_file_mtime(child),
+            })
+    payload["candidate_count"] = len(payload["candidates"])
+    payload["message"] = f"发现 {payload['candidate_count']} 个远程原盘候选"
+    if payload["errors"] and not payload["candidates"]:
+        payload["ok"] = False
+        payload["message"] = "CD2 远程目录扫描失败"
+    return payload
 
 
 def update_cd2_confirm_state(item: Dict, candidate: Path, cfg: Dict, webhook_event: Dict, size: int, signature: Optional[Dict], partial: bool) -> bool:
@@ -1861,6 +1962,7 @@ def index():
         history_items = ordered_items
     safe_cfg = sanitize_config(cfg)
     safe_cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
+    safe_cfg["cd2_remote_source_dirs_text"] = cd2_remote_source_dirs_to_text(cfg)
     return render_template_string(PAGE, cfg=safe_cfg, state=snapshot, items=items, history_items=history_items, events=events, status_label=status_label, badge_class=badge_class, format_size=format_size)
 
 
@@ -1891,6 +1993,8 @@ def settings():
     aliases = parse_cd2_path_alias_lines(request.form.get("cd2_path_aliases_text", cfg.get("cd2_path_aliases_text", "")))
     cfg["cd2_path_aliases"] = aliases or cd2_path_aliases_from_cfg(DEFAULT_CONFIG)
     cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
+    cfg["cd2_remote_source_dirs"] = parse_cd2_remote_source_dirs(request.form.get("cd2_remote_source_dirs_text", cfg.get("cd2_remote_source_dirs_text", "")))
+    cfg["cd2_remote_source_dirs_text"] = cd2_remote_source_dirs_to_text(cfg)
     cfg["cd2_api_enabled"] = "cd2_api_enabled" in request.form
     cfg["cd2_auth_mode"] = cd2_auth_mode_from_cfg({"cd2_auth_mode": request.form.get("cd2_auth_mode", cfg.get("cd2_auth_mode", "api_token"))})
     cfg["cd2_api_addr"] = normalize_cd2_api_addr(request.form.get("cd2_api_addr", cfg.get("cd2_api_addr", "host.docker.internal:19798")))
@@ -1980,6 +2084,13 @@ def api_cd2_webhook():
     })
 
 
+@app.route("/api/cd2/remote-candidates")
+def api_cd2_remote_candidates():
+    cfg = load_config()
+    force_refresh = (request.args.get("force") or "").strip().lower() in {"1", "true", "yes", "on"}
+    return jsonify(scan_cd2_remote_candidates(cfg, force_refresh=force_refresh))
+
+
 
 @app.route("/rerun", methods=["POST"])
 def rerun_item():
@@ -2047,6 +2158,7 @@ def api_status():
     snapshot["cd2_status"] = cd2_status
     safe_cfg = sanitize_config(cfg)
     safe_cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
+    safe_cfg["cd2_remote_source_dirs_text"] = cd2_remote_source_dirs_to_text(cfg)
     return jsonify({"config": safe_cfg, "state": snapshot, "cd2_status": cd2_status})
 
 

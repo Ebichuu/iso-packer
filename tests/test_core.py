@@ -77,6 +77,15 @@ class CoreUtilityTests(unittest.TestCase):
             core.alias_variants_for_path("/115/00-未整理/Movie.iso", aliases),
         )
 
+    def test_cd2_remote_source_dirs_helpers(self):
+        dirs = core.parse_cd2_remote_source_dirs("""
+        /115/03-PT
+        /115/03-PT
+        /115/04-BDMV
+        """)
+        self.assertEqual(dirs, ["/115/03-PT", "/115/04-BDMV"])
+        self.assertEqual(core.cd2_remote_source_dirs_to_text({"cd2_remote_source_dirs": dirs}), "/115/03-PT\n/115/04-BDMV")
+
 
 if __name__ == "__main__":
     unittest.main()

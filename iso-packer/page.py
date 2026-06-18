@@ -1263,6 +1263,11 @@ tr:hover td { background: #fff8f7; }
           <textarea name="cd2_path_aliases_text" spellcheck="false" placeholder="/CloudNAS/CloudDrive=/115">{{cfg.cd2_path_aliases_text}}</textarea>
           <div class="settings-help">每行一组：本地挂载路径=CD2 网盘路径。用于匹配上传进度和任务门禁。</div>
         </div>
+        <div class="form-group">
+          <label>CD2 远程源目录</label>
+          <textarea name="cd2_remote_source_dirs_text" spellcheck="false" placeholder="/115/03-PT">{{cfg.cd2_remote_source_dirs_text}}</textarea>
+          <div class="settings-help">每行一个 CD2 网盘目录，仅用于只读观察原盘候选。</div>
+        </div>
         <div class="settings-section-title">CD2 事件</div>
         <label class="checkbox-group" style="margin-top: 0;">
           <input name="cd2_webhook_enabled" type="checkbox" {% if cfg.cd2_webhook_enabled %}checked{% endif %}>
@@ -1499,6 +1504,31 @@ tr:hover td { background: #fff8f7; }
         {% for event in events %}
         <div class="log-line">{{event}}</div>
         {% endfor %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>CD2 远程候选</h2>
+        <div class="browser-toolbar">
+          <button class="browser-btn" type="button" id="remote-refresh">刷新远程</button>
+        </div>
+      </div>
+      <div class="browser-path" id="remote-status">未加载</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>类型</th>
+              <th>远程路径</th>
+              <th>来源目录</th>
+            </tr>
+          </thead>
+          <tbody id="remote-body">
+            <tr><td colspan="4" class="browser-empty">正在加载...</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
@@ -2232,6 +2262,39 @@ function updateBrowserRows(items) {
   }).join("");
 }
 
+function updateRemoteRows(items) {
+  const body = $("remote-body");
+  if(!body) return;
+  if(!items || !items.length) {
+    body.innerHTML = `<tr><td colspan="4" class="browser-empty">没有远程原盘候选</td></tr>`;
+    return;
+  }
+  body.innerHTML = items.map(item => {
+    return `<tr>
+      <td><span class="browser-name">${esc(item.name || "-")}</span></td>
+      <td><span class="browser-kind">${esc(item.disc_type || "-")}</span></td>
+      <td><span class="target-text" title="${esc(item.path || "-")}">${esc(item.path || "-")}</span></td>
+      <td><span class="target-text" title="${esc(item.root || "-")}">${esc(item.root || "-")}</span></td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadRemoteCandidates(force=false) {
+  const status = $("remote-status");
+  if(status) status.textContent = force ? "正在强制刷新..." : "正在读取远程目录...";
+  try {
+    const payload = await fetchJson("/api/cd2/remote-candidates?force=" + (force ? "1" : "0") + "&_=" + Date.now());
+    updateRemoteRows(payload.candidates || []);
+    const parts = [payload.message || "远程目录已读取"];
+    if(payload.checked_at) parts.push(payload.checked_at);
+    if(payload.errors && payload.errors.length) parts.push(String(payload.errors.length) + " 个目录读取失败");
+    if(status) status.textContent = parts.join(" / ");
+  } catch(e) {
+    updateRemoteRows([]);
+    if(status) status.textContent = e.message || "读取远程目录失败";
+  }
+}
+
 async function loadBrowser(root = currentBrowseRoot, path = currentBrowsePath) {
   currentBrowseRoot = root || "watch";
   if(!path || path === "/") {
@@ -2269,6 +2332,7 @@ function setupBrowser() {
   });
   const up = $("browser-up");
   const refreshButton = $("browser-refresh");
+  const remoteRefreshButton = $("remote-refresh");
   if(up) up.addEventListener("click", () => {
     const current = normalizeBrowsePath(currentBrowsePath);
     const rootPath = normalizeBrowsePath(browseRootPath(currentBrowseRoot));
@@ -2277,6 +2341,7 @@ function setupBrowser() {
     loadBrowser(currentBrowseRoot, index <= 0 ? "/" : current.slice(0, index));
   });
   if(refreshButton) refreshButton.addEventListener("click", () => loadBrowser(currentBrowseRoot, currentBrowsePath));
+  if(remoteRefreshButton) remoteRefreshButton.addEventListener("click", () => loadRemoteCandidates(true));
 }
 
 async function refresh(){
@@ -2317,6 +2382,7 @@ const initialLogText = $("events") ? $("events").textContent : "";
 if(initialLogText.trim()) renderEvents(initialLogText);
 setInterval(refresh, 2000);
 loadBrowser();
+loadRemoteCandidates();
 refresh();
 })();
 </script>
