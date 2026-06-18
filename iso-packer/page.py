@@ -1563,7 +1563,7 @@ function setupTaskActions(){
       let res = await fetch("/rerun", { method: "POST", body: data });
       let payload = await res.json().catch(() => ({}));
       if(isAuthFailure(res, payload)) return goLogin();
-      if(res.status === 409 && /CD2/.test(payload.message || "") && confirm((payload.message || "CD2 队列仍显示未完成") + "\n\n文件已手动补齐的话，可以忽略 CD2 队列门禁强制封装。继续？")) {
+      if(res.status === 409 && /CD2/.test(payload.message || "") && confirm((payload.message || "CD2 队列仍显示未完成") + "\\n\\n文件已手动补齐的话，可以忽略 CD2 队列门禁强制封装。继续？")) {
         const forceData = new FormData();
         forceData.set("source", source);
         forceData.set("force_cd2", "1");

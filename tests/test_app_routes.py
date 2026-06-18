@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "iso-packer"))
 
 import app as app_module
+import page as page_module
 
 
 class AppRouteTests(unittest.TestCase):
@@ -120,6 +122,13 @@ class AppRouteTests(unittest.TestCase):
         response = self.client.get("/login?next=https://example.com")
         self.assertEqual(response.status_code, 200)
         self.assertIn('value="/"', response.get_data(as_text=True))
+
+    def test_dashboard_script_has_no_literal_newline_in_confirm_string(self):
+        match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        self.assertIn('\\n\\n文件已手动补齐', script)
+        self.assertNotIn(' + "\n\n文件已手动补齐', script)
 
     def test_cd2_api_token_auth_uses_bearer_token(self):
         class FakeUploadResult:
