@@ -50,12 +50,14 @@ class CoreUtilityTests(unittest.TestCase):
             "web_password_hash": "hash",
             "web_secret_key": "secret",
             "cd2_api_password": "cd2-secret",
+            "cd2_webhook_secret": "webhook-secret",
             "cd2_auth_mode": "api_token",
             "cd2_api_username": "user",
         })
         self.assertNotIn("web_password_hash", result)
         self.assertNotIn("web_secret_key", result)
         self.assertNotIn("cd2_api_password", result)
+        self.assertNotIn("cd2_webhook_secret", result)
         self.assertEqual(result["cd2_auth_mode"], "api_token")
         self.assertEqual(result["cd2_api_username"], "user")
 

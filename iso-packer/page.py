@@ -1263,6 +1263,31 @@ tr:hover td { background: #fff8f7; }
           <textarea name="cd2_path_aliases_text" spellcheck="false" placeholder="/CloudNAS/CloudDrive=/115">{{cfg.cd2_path_aliases_text}}</textarea>
           <div class="settings-help">每行一组：本地挂载路径=CD2 网盘路径。用于匹配上传进度和任务门禁。</div>
         </div>
+        <div class="settings-section-title">CD2 事件</div>
+        <label class="checkbox-group" style="margin-top: 0;">
+          <input name="cd2_webhook_enabled" type="checkbox" {% if cfg.cd2_webhook_enabled %}checked{% endif %}>
+          <span>启用 CD2 Webhook</span>
+        </label>
+        <div class="form-group">
+          <label>Webhook 共享密钥</label>
+          <input name="cd2_webhook_secret" type="password" value="" autocomplete="new-password" placeholder="留空不修改">
+        </div>
+        <div class="form-group">
+          <label>事件来源</label>
+          <select name="cd2_event_source">
+            <option value="cd2" {% if cfg.cd2_event_source != 'symedia' %}selected{% endif %}>CD2</option>
+            <option value="symedia" {% if cfg.cd2_event_source == 'symedia' %}selected{% endif %}>SA/Symedia</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>事件防抖 (秒)</label>
+          <input name="cd2_event_debounce_seconds" type="number" min="0" value="{{cfg.cd2_event_debounce_seconds}}">
+        </div>
+        <div class="form-group">
+          <label>事件去重 TTL (秒)</label>
+          <input name="cd2_event_dedupe_ttl_seconds" type="number" min="0" value="{{cfg.cd2_event_dedupe_ttl_seconds}}">
+        </div>
+        <div class="settings-help">Webhook 只触发重新检查，不能直接证明文件已经下载完成。</div>
         
         <div class="settings-options">
           <label class="checkbox-group">

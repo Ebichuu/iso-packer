@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
 import re
@@ -79,6 +80,7 @@ BDMV_REQUIRED_DIRS = ("PLAYLIST", "STREAM", "CLIPINF")
 COPY_TASK_DONE_STATUSES = {"3", "completed", "complete", "done", "finish", "finished"}
 CD2_UPLOAD_QUEUE_GRACE_POLLS = 3
 CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS = 30
+CD2_WEBHOOK_EVENT_LIMIT = 50
 DIRECTORY_PICKER_ROOT = "@roots"
 DIRECTORY_PICKER_SCOPES = {
     "watch_dir": ("watch_dir",),
@@ -281,6 +283,87 @@ def parse_int_form(name: str, fallback, minimum: Optional[int] = None) -> int:
     if minimum is not None and value < minimum:
         raise ValueError(f"{name} 不能小于 {minimum}")
     return value
+
+
+def int_config(cfg: Dict, key: str, fallback: int, minimum: Optional[int] = None) -> int:
+    try:
+        value = int(float((cfg or {}).get(key, fallback)))
+    except (TypeError, ValueError):
+        value = fallback
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def cd2_webhook_secret_matches(cfg: Dict) -> bool:
+    expected = str((cfg or {}).get("cd2_webhook_secret") or "").strip()
+    if not expected:
+        return False
+    provided = (
+        request.headers.get("X-ISO-Packer-Token")
+        or request.headers.get("X-CD2-Webhook-Token")
+        or request.args.get("token")
+        or request.form.get("token")
+        or ""
+    )
+    return secrets.compare_digest(str(provided or ""), expected)
+
+
+def cd2_webhook_payload() -> Dict:
+    payload = request.get_json(silent=True)
+    if isinstance(payload, dict):
+        return payload
+    return dict(request.form.items())
+
+
+def cd2_webhook_fingerprint(payload: Dict) -> str:
+    relevant = {
+        key: payload.get(key)
+        for key in sorted(payload or {})
+        if str(key).lower() not in {"token", "secret", "password", "authorization"}
+    }
+    body = json.dumps(relevant, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def record_cd2_webhook_event(cfg: Dict, payload: Dict) -> Dict:
+    now_value = now()
+    fingerprint = cd2_webhook_fingerprint(payload)
+    debounce_seconds = int_config(cfg, "cd2_event_debounce_seconds", 10, minimum=0)
+    dedupe_ttl = int_config(cfg, "cd2_event_dedupe_ttl_seconds", 600, minimum=0)
+    event = {
+        "received_at": now_value,
+        "source": str(cfg.get("cd2_event_source") or "cd2"),
+        "fingerprint": fingerprint,
+        "event": str(payload.get("event") or payload.get("type") or payload.get("action") or "unknown"),
+        "path": str(payload.get("path") or payload.get("file") or payload.get("name") or ""),
+    }
+    with lock:
+        cd2_state = state.setdefault("cd2", {})
+        webhook_state = cd2_state.setdefault("webhook", {})
+        recent = list(webhook_state.get("recent_events") or [])
+        recent = [
+            item for item in recent
+            if dedupe_ttl <= 0 or seconds_between(item.get("received_at")) <= dedupe_ttl
+        ]
+        duplicate = any(item.get("fingerprint") == fingerprint for item in recent)
+        last_triggered_at = webhook_state.get("last_triggered_at")
+        debounced = bool(last_triggered_at and seconds_between(last_triggered_at) < debounce_seconds)
+        webhook_state.update({
+            "last_event": event,
+            "last_received_at": now_value,
+            "duplicate_count": int(webhook_state.get("duplicate_count") or 0) + (1 if duplicate else 0),
+            "debounced_count": int(webhook_state.get("debounced_count") or 0) + (1 if debounced else 0),
+        })
+        if not duplicate:
+            recent.append(event)
+        webhook_state["recent_events"] = recent[-CD2_WEBHOOK_EVENT_LIMIT:]
+        should_scan = not duplicate and not debounced
+        if should_scan:
+            webhook_state["last_triggered_at"] = now_value
+            webhook_state["last_scan_reason"] = f"{event['event']} {event['path']}".strip()
+        save_state_locked()
+    return {"event": event, "duplicate": duplicate, "debounced": debounced, "should_scan": should_scan}
 
 
 def normalize_upload_path(path: str) -> str:
@@ -1563,7 +1646,7 @@ def before_request():
     cfg = load_config()
     if not auth_enabled(cfg):
         return None
-    if request.path in {"/login", "/healthz"}:
+    if request.path in {"/login", "/healthz", "/api/cd2/webhook"}:
         return None
     if not auth_password_set(cfg):
         return None if request.path == "/login" else unauthorized_response("请先设置登录密码")
@@ -1655,6 +1738,8 @@ def settings():
         cfg["stable_seconds"] = parse_int_form("stable_seconds", cfg["stable_seconds"], minimum=30)
         cfg["min_free_space_gb"] = parse_int_form("min_free_space_gb", cfg["min_free_space_gb"], minimum=0)
         cfg["cd2_queue_poll_seconds"] = parse_int_form("cd2_queue_poll_seconds", cfg.get("cd2_queue_poll_seconds", 10), minimum=1)
+        cfg["cd2_event_debounce_seconds"] = parse_int_form("cd2_event_debounce_seconds", cfg.get("cd2_event_debounce_seconds", 10), minimum=0)
+        cfg["cd2_event_dedupe_ttl_seconds"] = parse_int_form("cd2_event_dedupe_ttl_seconds", cfg.get("cd2_event_dedupe_ttl_seconds", 600), minimum=0)
     except ValueError as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
     cfg["enabled"] = "enabled" in request.form
@@ -1671,6 +1756,8 @@ def settings():
     cfg["cd2_auth_mode"] = cd2_auth_mode_from_cfg({"cd2_auth_mode": request.form.get("cd2_auth_mode", cfg.get("cd2_auth_mode", "api_token"))})
     cfg["cd2_api_addr"] = normalize_cd2_api_addr(request.form.get("cd2_api_addr", cfg.get("cd2_api_addr", "host.docker.internal:19798")))
     cfg["cd2_api_username"] = request.form.get("cd2_api_username", cfg.get("cd2_api_username", "")).strip()
+    cfg["cd2_webhook_enabled"] = "cd2_webhook_enabled" in request.form
+    cfg["cd2_event_source"] = request.form.get("cd2_event_source", cfg.get("cd2_event_source", "cd2")).strip() or "cd2"
     new_password = (request.form.get("web_password") or "").strip()
     new_password_confirm = (request.form.get("web_password_confirm") or "").strip()
     if new_password:
@@ -1682,6 +1769,9 @@ def settings():
     new_cd2_password = (request.form.get("cd2_api_password") or "").strip()
     if new_cd2_password:
         cfg["cd2_api_password"] = new_cd2_password
+    new_cd2_webhook_secret = (request.form.get("cd2_webhook_secret") or "").strip()
+    if new_cd2_webhook_secret:
+        cfg["cd2_webhook_secret"] = new_cd2_webhook_secret
     save_config(cfg)
     if old_cd2_key != cd2_client_key_from_cfg(cfg):
         close_cd2_client()
@@ -1718,6 +1808,27 @@ def api_cd2_test():
         "message": status.get("human") or status.get("last_error") or "CD2 连接失败",
         "status": status,
     }), 400
+
+
+@app.route("/api/cd2/webhook", methods=["POST"])
+def api_cd2_webhook():
+    cfg = load_config()
+    if not cfg.get("cd2_webhook_enabled"):
+        return jsonify({"ok": False, "message": "CD2 Webhook 未启用"}), 404
+    if not cd2_webhook_secret_matches(cfg):
+        return jsonify({"ok": False, "message": "CD2 Webhook 密钥无效"}), 401
+    payload = cd2_webhook_payload()
+    result = record_cd2_webhook_event(cfg, payload)
+    if result["should_scan"]:
+        threading.Thread(target=scan_once, args=(cfg,), daemon=True).start()
+        log(f"CD2 Webhook 已触发复查: {result['event'].get('event')} {result['event'].get('path')}".strip())
+    return jsonify({
+        "ok": True,
+        "message": "CD2 Webhook 已记录",
+        "scan_triggered": result["should_scan"],
+        "duplicate": result["duplicate"],
+        "debounced": result["debounced"],
+    })
 
 
 

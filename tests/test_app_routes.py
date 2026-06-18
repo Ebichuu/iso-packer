@@ -218,6 +218,60 @@ class AppRouteTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["status"]["auth_mode"], "api_token")
 
+    def test_cd2_webhook_is_disabled_by_default(self):
+        response = self.client.post("/api/cd2/webhook", json={"event": "created"})
+        self.assertEqual(response.status_code, 404)
+
+    def test_cd2_webhook_requires_secret(self):
+        cfg = app_module.load_config()
+        cfg.update({
+            "cd2_webhook_enabled": True,
+            "cd2_webhook_secret": "shared-secret",
+        })
+        app_module.save_config(cfg)
+
+        response = self.client.post("/api/cd2/webhook", json={"event": "created"})
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_cd2_webhook_records_event_and_triggers_scan_once(self):
+        cfg = app_module.load_config()
+        cfg.update({
+            "cd2_webhook_enabled": True,
+            "cd2_webhook_secret": "shared-secret",
+            "cd2_event_debounce_seconds": 0,
+            "cd2_event_dedupe_ttl_seconds": 600,
+        })
+        app_module.save_config(cfg)
+
+        with mock.patch.object(app_module.threading, "Thread") as thread_cls:
+            response = self.client.post(
+                "/api/cd2/webhook",
+                headers={"X-ISO-Packer-Token": "shared-secret"},
+                json={"event": "created", "path": "/115/Movie/BDMV"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["scan_triggered"])
+        thread_cls.assert_called_once()
+        cd2_state = app_module.state["cd2"]["webhook"]
+        self.assertEqual(cd2_state["last_event"]["path"], "/115/Movie/BDMV")
+
+        with mock.patch.object(app_module.threading, "Thread") as thread_cls:
+            response = self.client.post(
+                "/api/cd2/webhook",
+                headers={"X-ISO-Packer-Token": "shared-secret"},
+                json={"event": "created", "path": "/115/Movie/BDMV"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["duplicate"])
+        self.assertFalse(payload["scan_triggered"])
+        thread_cls.assert_not_called()
+
     def test_settings_saves_cd2_auth_mode(self):
         self.login()
         response = self.client.post("/settings", data={
@@ -234,7 +288,12 @@ class AppRouteTests(unittest.TestCase):
             "cd2_api_username": "user",
             "cd2_api_password": "secret",
             "cd2_queue_poll_seconds": "10",
+            "cd2_event_debounce_seconds": "5",
+            "cd2_event_dedupe_ttl_seconds": "60",
             "cd2_path_aliases_text": f"{self.data_dir / 'CloudNAS' / 'CloudDrive'}=/115",
+            "cd2_webhook_enabled": "on",
+            "cd2_webhook_secret": "webhook-secret",
+            "cd2_event_source": "symedia",
             "enabled": "on",
             "delete_source_after_success": "on",
             "cd2_transfer_enabled": "on",
@@ -248,6 +307,11 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(cfg["cd2_api_addr"], "127.0.0.1:19798")
         self.assertEqual(cfg["cd2_path_aliases"][0]["remote"], "/115")
         self.assertTrue(cfg["cd2_wait_upload_complete"])
+        self.assertTrue(cfg["cd2_webhook_enabled"])
+        self.assertEqual(cfg["cd2_webhook_secret"], "webhook-secret")
+        self.assertEqual(cfg["cd2_event_source"], "symedia")
+        self.assertEqual(cfg["cd2_event_debounce_seconds"], 5)
+        self.assertEqual(cfg["cd2_event_dedupe_ttl_seconds"], 60)
 
     def test_has_partial_files_detects_cd2_temp_files(self):
         source = self.watch / "Disc"

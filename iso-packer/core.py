@@ -24,6 +24,11 @@ DEFAULT_CONFIG = {
     "cd2_api_username": "",
     "cd2_api_password": "",
     "cd2_queue_poll_seconds": 10,
+    "cd2_webhook_enabled": False,
+    "cd2_webhook_secret": "",
+    "cd2_event_source": "cd2",
+    "cd2_event_debounce_seconds": 10,
+    "cd2_event_dedupe_ttl_seconds": 600,
     "cd2_path_aliases": [
         {"local": "/CloudNAS/CloudDrive", "remote": "/115"},
     ],
@@ -93,6 +98,7 @@ def sanitize_config(cfg: Dict) -> Dict:
     safe.pop("web_password_hash", None)
     safe.pop("web_secret_key", None)
     safe.pop("cd2_api_password", None)
+    safe.pop("cd2_webhook_secret", None)
     return safe
 
 
