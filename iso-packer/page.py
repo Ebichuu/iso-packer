@@ -1754,6 +1754,22 @@ function pickErrorReason(item) {
   return value ? String(value) : "-";
 }
 
+function rowItem(item, active, key) {
+  if(active && active.source === key) {
+    return {
+      ...(item || {}),
+      status: active.status,
+      target: active.target || (item || {}).target,
+      timings: active.timings || (item || {}).timings || {},
+      cd2_upload: active.cd2_upload || (item || {}).cd2_upload || {},
+      error: active.error || "",
+      reason: active.reason || "",
+      last_error: active.last_error || ""
+    };
+  }
+  return item || {};
+}
+
 function formatCd2Status(status) {
   if(!status) return "--";
   const parts = [];
@@ -1959,8 +1975,8 @@ function taskEntries(items, active) {
   if(!activeKey) return entries.slice(0, 5);
   const index = entries.findIndex(([key]) => key === activeKey);
   if(index >= 0) {
-    const activeEntry = entries.splice(index, 1)[0];
-    return [activeEntry, ...entries].slice(0, 5);
+    const [key, item] = entries.splice(index, 1)[0];
+    return [[key, rowItem(item, active, key)], ...entries].slice(0, 5);
   }
   const progress = (active.progress || {});
   const activeItem = {
@@ -1987,8 +2003,8 @@ function historyEntries(items, active) {
   if(!activeKey) return entries;
   const index = entries.findIndex(([key]) => key === activeKey);
   if(index >= 0) {
-    const activeEntry = entries.splice(index, 1)[0];
-    return [activeEntry, ...entries];
+    const [key, item] = entries.splice(index, 1)[0];
+    return [[key, rowItem(item, active, key)], ...entries];
   }
   const progress = (active.progress || {});
   const activeItem = {
@@ -2010,18 +2026,19 @@ function renderHistory(items, active) {
   const entries = historyEntries(items, active);
   body.innerHTML = entries.map(([key, item]) => {
     const name = key.split('/').pop();
-    const status = active && active.source === key ? active.status : (item || {}).status;
+    item = rowItem(item, active, key);
+    const status = item.status;
     return `<tr data-history-key="${esc(key)}">
       <td title="${esc(key)}">
         <div style="font-weight: 500;">${esc(name)}</div>
         <div style="font-size: 11px; color: #94a3b8;">${esc(key)}</div>
       </td>
-      <td><span class="badge ${getBadgeClass(status)}">${esc(taskStatusText(item || {}, active, key))}</span></td>
-      <td style="color: var(--text-muted);">${esc(formatSize((item || {}).last_size || (item || {}).size || 0))}</td>
-      <td class="small-muted">${esc(pickTiming(item || {}))}</td>
-      <td class="small-muted">${esc(pickCd2Upload(item || {}))}</td>
-      <td class="small-muted">${esc(pickErrorReason(item || {}))}</td>
-      <td><span class="target-text" title="${esc((item || {}).target || "-")}">${esc((item || {}).target || "-")}</span></td>
+      <td><span class="badge ${getBadgeClass(status)}">${esc(taskStatusText(item, active, key))}</span></td>
+      <td style="color: var(--text-muted);">${esc(formatSize(item.last_size || item.size || 0))}</td>
+      <td class="small-muted">${esc(pickTiming(item))}</td>
+      <td class="small-muted">${esc(pickCd2Upload(item))}</td>
+      <td class="small-muted">${esc(pickErrorReason(item))}</td>
+      <td><span class="target-text" title="${esc(item.target || "-")}">${esc(item.target || "-")}</span></td>
       <td><button class="rerun-btn" type="button" data-rerun-source="${esc(key)}"${active ? " disabled" : ""}>${active ? "任务运行中" : "重新封装"}</button></td>
     </tr>`;
   }).join("");
@@ -2032,6 +2049,7 @@ function renderItems(items, active){
   if(!body) return;
   const entries = taskEntries(items, active);
   body.innerHTML=entries.map(([key,item])=> {
+    item = rowItem(item, active, key);
     const name = key.split('/').pop();
     return `<tr data-task-key="${esc(key)}">
       <td title="${esc(key)}">
@@ -2049,15 +2067,16 @@ function renderItems(items, active){
 }
 
 function updateTaskRow(row, item, active, key) {
-  const status = active && active.source === key ? active.status : (item || {}).status;
+  item = rowItem(item, active, key);
+  const status = item.status;
   const badge = row.querySelector("[data-task-status]");
   if(!badge) return;
   badge.className = "badge " + getBadgeClass(status);
-  badge.textContent = taskStatusText(item || {}, active, key);
+  badge.textContent = taskStatusText(item, active, key);
   const cells = row.querySelectorAll("td");
-  if(cells[3]) cells[3].textContent = pickTiming(item || {});
-  if(cells[4]) cells[4].textContent = pickCd2Upload(item || {});
-  if(cells[5]) cells[5].textContent = pickErrorReason(item || {});
+  if(cells[3]) cells[3].textContent = pickTiming(item);
+  if(cells[4]) cells[4].textContent = pickCd2Upload(item);
+  if(cells[5]) cells[5].textContent = pickErrorReason(item);
   const targetText = cells[6] ? cells[6].querySelector(".target-text") : null;
   if(targetText) {
     const target = (item || {}).target || "-";

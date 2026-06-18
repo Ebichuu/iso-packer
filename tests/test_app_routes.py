@@ -252,6 +252,27 @@ class AppRouteTests(unittest.TestCase):
         process_item.assert_called_once()
         self.assertEqual(process_item.call_args.args[0].resolve(), source.resolve())
 
+    def test_process_item_clears_previous_error_when_started(self):
+        source = self.make_bdmv("RetryClearsError", complete=True)
+        key = str(source)
+        app_module.state["items"][key] = {
+            "status": "failed",
+            "error": "old genisoimage error",
+            "reason": "old reason",
+            "last_error": "old last error",
+            "cd2_source_task": {"kind": "download"},
+            "pack_iso": True,
+        }
+
+        with mock.patch.object(app_module, "run_iso", side_effect=RuntimeError("stop after start")):
+            app_module.process_item(source, self.scan_config())
+
+        item = app_module.state["items"][key]
+        self.assertNotIn("old genisoimage error", item.get("error", ""))
+        self.assertNotIn("reason", item)
+        self.assertNotIn("last_error", item)
+        self.assertNotIn("cd2_source_task", item)
+
     def test_scan_once_waits_when_cd2_copy_or_download_task_matches_candidate(self):
         source = self.make_bdmv("PendingFromCD2", complete=True)
         key = self.mark_candidate_stable(source)

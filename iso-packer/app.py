@@ -1054,6 +1054,10 @@ def process_item(source: Path, cfg: Dict) -> None:
                 "status": "running",
                 "target": str(target),
             })
+            item.pop("error", None)
+            item.pop("reason", None)
+            item.pop("last_error", None)
+            item.pop("cd2_source_task", None)
             state["active"] = {
                 "source": str(source),
                 "target": str(target),
