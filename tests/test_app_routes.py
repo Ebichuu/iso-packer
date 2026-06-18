@@ -290,6 +290,8 @@ class AppRouteTests(unittest.TestCase):
             "cd2_queue_poll_seconds": "10",
             "cd2_event_debounce_seconds": "5",
             "cd2_event_dedupe_ttl_seconds": "60",
+            "cd2_confirm_delay_seconds": "15",
+            "cd2_confirm_stable_checks": "2",
             "cd2_path_aliases_text": f"{self.data_dir / 'CloudNAS' / 'CloudDrive'}=/115",
             "cd2_webhook_enabled": "on",
             "cd2_webhook_secret": "webhook-secret",
@@ -312,6 +314,8 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(cfg["cd2_event_source"], "symedia")
         self.assertEqual(cfg["cd2_event_debounce_seconds"], 5)
         self.assertEqual(cfg["cd2_event_dedupe_ttl_seconds"], 60)
+        self.assertEqual(cfg["cd2_confirm_delay_seconds"], 15)
+        self.assertEqual(cfg["cd2_confirm_stable_checks"], 2)
 
     def test_has_partial_files_detects_cd2_temp_files(self):
         source = self.watch / "Disc"
@@ -348,6 +352,64 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(app_module.state["items"][key]["status"], "ready")
         process_item.assert_called_once()
         self.assertEqual(process_item.call_args.args[0].resolve(), source.resolve())
+
+    def test_cd2_webhook_candidate_waits_for_confirm_before_ready(self):
+        source = self.make_bdmv("WebhookConfirmBDMV", complete=True)
+        key = self.mark_candidate_stable(source)
+        cfg = self.scan_config(
+            cd2_confirm_delay_seconds=30,
+            cd2_confirm_stable_checks=1,
+            cd2_path_aliases=[
+                {"local": str(self.watch), "remote": "/115"},
+            ],
+        )
+        event = {
+            "event": "created",
+            "path": f"/115/{source.name}/BDMV",
+        }
+        app_module.record_cd2_webhook_event(cfg, event)
+
+        with mock.patch.object(app_module, "process_item") as process_item:
+            app_module.scan_once(cfg)
+
+        process_item.assert_not_called()
+        item = app_module.state["items"][key]
+        self.assertEqual(item["status"], "waiting_cd2_confirm")
+        self.assertIn("cd2_confirm_event_id", item)
+
+        item["cd2_confirm_started_at"] = "2000-01-01 00:00:00"
+        with mock.patch.object(app_module, "process_item") as process_item:
+            app_module.scan_once(cfg)
+
+        self.assertEqual(app_module.state["items"][key]["status"], "ready")
+        process_item.assert_called_once()
+
+    def test_cd2_webhook_confirm_still_respects_pending_download_gate(self):
+        source = self.make_bdmv("WebhookPendingBDMV", complete=True)
+        key = self.mark_candidate_stable(source)
+        cfg = self.scan_config(
+            cd2_confirm_delay_seconds=0,
+            cd2_confirm_stable_checks=1,
+            cd2_path_aliases=[
+                {"local": str(self.watch), "remote": "/115"},
+            ],
+        )
+        app_module.record_cd2_webhook_event(cfg, {"event": "created", "path": f"/115/{source.name}/BDMV"})
+        pending_task = {
+            "kind": "download",
+            "path": f"/115/{source.name}",
+            "done": False,
+            "human": "CD2 下载中 50.0%",
+        }
+
+        with mock.patch.object(app_module, "fetch_cd2_uploads", return_value=({}, {"connected": True, "downloads": [pending_task], "copy_tasks": []})), \
+             mock.patch.object(app_module, "process_item") as process_item:
+            app_module.scan_once(cfg)
+
+        process_item.assert_not_called()
+        item = app_module.state["items"][key]
+        self.assertEqual(item["status"], "waiting_partial")
+        self.assertIn("CD2 下载中", item["error"])
 
     def test_process_item_clears_previous_error_when_started(self):
         source = self.make_bdmv("RetryClearsError", complete=True)

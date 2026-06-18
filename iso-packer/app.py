@@ -366,6 +366,59 @@ def record_cd2_webhook_event(cfg: Dict, payload: Dict) -> Dict:
     return {"event": event, "duplicate": duplicate, "debounced": debounced, "should_scan": should_scan}
 
 
+def latest_cd2_webhook_event_for_candidate(candidate: Path, cfg: Dict) -> Optional[Dict]:
+    with lock:
+        event = ((state.get("cd2") or {}).get("webhook") or {}).get("last_event")
+    if not event:
+        return None
+    event_path = event.get("path") or ""
+    if not event_path or not cd2_path_matches_candidate(event_path, candidate, cfg):
+        return None
+    return dict(event)
+
+
+def update_cd2_confirm_state(item: Dict, candidate: Path, cfg: Dict, webhook_event: Dict, size: int, signature: Optional[Dict], partial: bool) -> bool:
+    delay_seconds = int_config(cfg, "cd2_confirm_delay_seconds", 30, minimum=0)
+    required_checks = int_config(cfg, "cd2_confirm_stable_checks", 1, minimum=1)
+    event_id = webhook_event.get("fingerprint") or ""
+    if item.get("cd2_confirm_event_id") == event_id and item.get("cd2_confirm_finished_at"):
+        return True
+    status = item.get("status")
+    if status != "waiting_cd2_confirm" or item.get("cd2_confirm_event_id") != event_id:
+        started_at = now()
+        item.update({
+            "status": "waiting_cd2_confirm",
+            "error": f"等待 CD2 确认 {delay_seconds} 秒",
+            "cd2_confirm_event_id": event_id,
+            "cd2_confirm_event_path": webhook_event.get("path") or "",
+            "cd2_confirm_started_at": started_at,
+            "cd2_confirm_checks": 0,
+            "last_size": max(0, int(size or 0)),
+            "tree_signature": signature,
+            "partial_files": partial,
+        })
+    else:
+        started_at = item.get("cd2_confirm_started_at") or now()
+    elapsed = seconds_between(started_at)
+    if elapsed < delay_seconds:
+        item["error"] = f"等待 CD2 确认 {elapsed}s / {delay_seconds}s"
+        item["last_size"] = max(0, int(size or 0))
+        item["tree_signature"] = signature
+        item["partial_files"] = partial
+        return False
+    checks = int(item.get("cd2_confirm_checks") or 0) + 1
+    item["cd2_confirm_checks"] = checks
+    if checks < required_checks:
+        item["error"] = f"等待 CD2 确认 {checks} / {required_checks}"
+        item["last_size"] = max(0, int(size or 0))
+        item["tree_signature"] = signature
+        item["partial_files"] = partial
+        return False
+    item["cd2_confirm_finished_at"] = now()
+    item.pop("error", None)
+    return True
+
+
 def normalize_upload_path(path: str) -> str:
     return normalize_path_text(str(Path(str(path or "")).expanduser()))
 
@@ -1509,6 +1562,10 @@ def scan_once(cfg: Dict) -> None:
                 item["partial_files"] = partial
                 save_state_locked()
                 continue
+            webhook_event = latest_cd2_webhook_event_for_candidate(candidate, cfg)
+            if webhook_event and not update_cd2_confirm_state(item, candidate, cfg, webhook_event, size, signature, partial):
+                save_state_locked()
+                continue
             last_size = item.get("last_size")
             last_signature = item.get("tree_signature")
             last_changed = item.get("last_changed", now())
@@ -1545,6 +1602,12 @@ def scan_once(cfg: Dict) -> None:
             item["tree_signature"] = signature
             item["partial_files"] = partial
             item.pop("cd2_source_task", None)
+            if item.get("status") != "waiting_cd2_confirm":
+                item.pop("cd2_confirm_event_id", None)
+                item.pop("cd2_confirm_event_path", None)
+                item.pop("cd2_confirm_started_at", None)
+                item.pop("cd2_confirm_checks", None)
+                item.pop("cd2_confirm_finished_at", None)
             elapsed = seconds_between(last_changed)
             if partial:
                 item["status"] = "waiting_partial"
@@ -1740,6 +1803,8 @@ def settings():
         cfg["cd2_queue_poll_seconds"] = parse_int_form("cd2_queue_poll_seconds", cfg.get("cd2_queue_poll_seconds", 10), minimum=1)
         cfg["cd2_event_debounce_seconds"] = parse_int_form("cd2_event_debounce_seconds", cfg.get("cd2_event_debounce_seconds", 10), minimum=0)
         cfg["cd2_event_dedupe_ttl_seconds"] = parse_int_form("cd2_event_dedupe_ttl_seconds", cfg.get("cd2_event_dedupe_ttl_seconds", 600), minimum=0)
+        cfg["cd2_confirm_delay_seconds"] = parse_int_form("cd2_confirm_delay_seconds", cfg.get("cd2_confirm_delay_seconds", 30), minimum=0)
+        cfg["cd2_confirm_stable_checks"] = parse_int_form("cd2_confirm_stable_checks", cfg.get("cd2_confirm_stable_checks", 1), minimum=1)
     except ValueError as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
     cfg["enabled"] = "enabled" in request.form

@@ -29,6 +29,8 @@ DEFAULT_CONFIG = {
     "cd2_event_source": "cd2",
     "cd2_event_debounce_seconds": 10,
     "cd2_event_dedupe_ttl_seconds": 600,
+    "cd2_confirm_delay_seconds": 30,
+    "cd2_confirm_stable_checks": 1,
     "cd2_path_aliases": [
         {"local": "/CloudNAS/CloudDrive", "remote": "/115"},
     ],
@@ -235,6 +237,7 @@ def status_label(status: str) -> str:
     labels = {
         "watching": "监控中",
         "receiving": "接收中",
+        "waiting_cd2_confirm": "等待 CD2 确认",
         "waiting_stable": "等待稳定",
         "waiting_partial": "等待下载完成",
         "ready": "准备打包",
@@ -256,7 +259,7 @@ def badge_class(status: str) -> str:
         return "badge-green"
     if status in {"failed", "verify_failed", "transfer_failed"}:
         return "badge-red"
-    if status in {"running", "transferring", "waiting_cd2_upload"}:
+    if status in {"running", "transferring", "waiting_cd2_upload", "waiting_cd2_confirm"}:
         return "badge-yellow"
     if status in {"skipped", "removed"}:
         return "badge-gray"

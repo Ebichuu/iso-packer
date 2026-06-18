@@ -1287,6 +1287,14 @@ tr:hover td { background: #fff8f7; }
           <label>事件去重 TTL (秒)</label>
           <input name="cd2_event_dedupe_ttl_seconds" type="number" min="0" value="{{cfg.cd2_event_dedupe_ttl_seconds}}">
         </div>
+        <div class="form-group">
+          <label>CD2 确认延迟 (秒)</label>
+          <input name="cd2_confirm_delay_seconds" type="number" min="0" value="{{cfg.cd2_confirm_delay_seconds}}">
+        </div>
+        <div class="form-group">
+          <label>CD2 确认次数</label>
+          <input name="cd2_confirm_stable_checks" type="number" min="1" value="{{cfg.cd2_confirm_stable_checks}}">
+        </div>
         <div class="settings-help">Webhook 只触发重新检查，不能直接证明文件已经下载完成。</div>
         
         <div class="settings-options">
@@ -1531,7 +1539,7 @@ tr:hover td { background: #fff8f7; }
 
 <script>
 (function(){
-const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiting_stable:"\u7b49\u5f85\u7a33\u5b9a",waiting_partial:"\u7b49\u5f85\u4e0b\u8f7d\u5b8c\u6210",ready:"\u51c6\u5907\u6253\u5305",running:"\u6b63\u5728\u5c01\u88c5",done:"\u5df2\u5b8c\u6210",failed:"\u5931\u8d25",verify_failed:"\u9a8c\u8bc1\u5931\u8d25",transferring:"\u6b63\u5728\u79fb\u52a8\u5230 CD2",waiting_cd2_upload:"\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210",transfer_done:"\u5df2\u4ea4\u7ed9 CD2",transfer_failed:"\u79fb\u52a8\u5931\u8d25",removed:"\u6e90\u5df2\u79fb\u9664"};
+const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiting_cd2_confirm:"\u7b49\u5f85 CD2 \u786e\u8ba4",waiting_stable:"\u7b49\u5f85\u7a33\u5b9a",waiting_partial:"\u7b49\u5f85\u4e0b\u8f7d\u5b8c\u6210",ready:"\u51c6\u5907\u6253\u5305",running:"\u6b63\u5728\u5c01\u88c5",done:"\u5df2\u5b8c\u6210",failed:"\u5931\u8d25",verify_failed:"\u9a8c\u8bc1\u5931\u8d25",transferring:"\u6b63\u5728\u79fb\u52a8\u5230 CD2",waiting_cd2_upload:"\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210",transfer_done:"\u5df2\u4ea4\u7ed9 CD2",transfer_failed:"\u79fb\u52a8\u5931\u8d25",removed:"\u6e90\u5df2\u79fb\u9664"};
 const $=id=>document.getElementById(id);
 let alertTimer;
 const seenLogEvents = new Set();
@@ -1673,7 +1681,7 @@ function setupSettingsForm(){
 function getBadgeClass(status) {
   if (['done', 'transfer_done'].includes(status)) return 'badge-green';
   if (['failed', 'verify_failed', 'transfer_failed'].includes(status)) return 'badge-red';
-  if (['running', 'transferring', 'waiting_cd2_upload'].includes(status)) return 'badge-yellow';
+  if (['running', 'transferring', 'waiting_cd2_upload', 'waiting_cd2_confirm'].includes(status)) return 'badge-yellow';
   if (['skipped', 'removed'].includes(status)) return 'badge-gray';
   return 'badge-blue';
 }
