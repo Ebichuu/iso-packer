@@ -97,17 +97,19 @@ CD2 挂载根目录: /CloudNAS
 CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso
 ```
 
-如果需要显示 CD2 上传进度，再打开 CD2 API：
+如果需要显示 CD2 上传 / 下载 / 复制状态，并让封装前门禁参考 CD2 任务，再打开 CD2 API：
 
 ```text
 启用 CD2 API: 开
+CD2 认证方式: API Token
 CD2 API 地址: host.docker.internal:19798
-CD2 API 用户名: 你的 CD2 用户名
-CD2 API 密码: 你的 CD2 密码
+CD2 API Token: 你的 CD2 API Token
 轮询秒数: 10
 ```
 
-注意：CD2 API 只用来读上传进度，不负责真正上传文件。
+如果你的 CD2 没有使用 Token，也可以切换成用户名密码模式。
+
+注意：CD2 API 只做只读观察和封装门禁，不负责通过 API 上传 ISO，也不会自动创建、删除、取消或接管 CD2 任务。
 
 ## 6. 现在可以看到什么
 
@@ -115,7 +117,7 @@ CD2 API 密码: 你的 CD2 密码
 
 - 当前任务状态
 - 任务总耗时、封装耗时、转移耗时
-- CD2 上传进度
+- CD2 上传 / 下载 / 复制状态
 - 目录观察：
   - `watch`
   - `output`
@@ -128,7 +130,7 @@ CD2 API 密码: 你的 CD2 密码
 3. 观察任务是否进入封装
 4. 查看 `/output` 是否出现 ISO
 5. 查看 `cd2` 目录观察里是否进入目标目录
-6. 如果启用了 CD2 API，查看上传进度是否变化
+6. 如果启用了 CD2 API，查看上传 / 下载 / 复制状态是否变化
 
 ## 8. 常用命令
 
@@ -176,12 +178,13 @@ docker exec -it iso-packer ls -la /CloudNAS/CloudDrive
 
 如果这里都看不到，优先检查挂载传播是不是用了 `:rslave`。
 
-### CD2 上传进度显示不了
+### CD2 状态显示不了
 
 先确认：
 
 - CD2 API 已启用
-- 地址、用户名、密码正确
+- 地址正确
+- 认证方式选对；Token 模式下填写 API Token，用户名密码模式下填写对应账号密码
 - compose 里加了 `host.docker.internal:host-gateway`
 
 ### 任务不启动
@@ -190,6 +193,7 @@ docker exec -it iso-packer ls -la /CloudNAS/CloudDrive
 
 - 监控目录里是否是完整 `BDMV` / `VIDEO_TS`
 - 文件是否还在持续写入
+- Web 状态里是否提示 CD2 下载 / 复制任务未完成
 - `/output` 空间是否足够
 
 ## 10. 这版主线

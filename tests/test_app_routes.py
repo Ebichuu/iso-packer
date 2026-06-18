@@ -344,6 +344,75 @@ class AppRouteTests(unittest.TestCase):
         process_item.assert_not_called()
         self.assertIn(app_module.state["items"][key]["status"], {"waiting_partial", "waiting_stable"})
 
+    def test_completed_cd2_download_does_not_block_candidate(self):
+        source = self.make_bdmv("CompletedDownload", complete=True)
+        task = {
+            "kind": "download",
+            "path": str(source),
+            "key": str(source),
+            "status": "Completed",
+            "current": 100,
+            "total": 100,
+            "done": True,
+            "human": "CD2 下载完成",
+        }
+
+        pending = app_module.cd2_pending_source_task(source, {
+            "connected": True,
+            "downloads": [task],
+            "copy_tasks": [],
+        })
+
+        self.assertIsNone(pending)
+
+    def test_cd2_download_queue_failure_keeps_upload_status_connected(self):
+        class UploadResult:
+            totalCount = 0
+            totalBytes = 0
+            finishedBytes = 0
+            globalBytesPerSecond = 0
+            uploadFiles = []
+
+        class FakeCloudDriveClient:
+            def __init__(self, addr):
+                self.addr = addr
+                self.jwt_token = None
+
+            def authenticate(self, username, password):
+                return True
+
+            def get_upload_file_list(self, get_all=True):
+                return UploadResult()
+
+            def get_download_file_list(self):
+                raise PermissionError("permission denied")
+
+            def get_copy_tasks(self):
+                class CopyResult:
+                    copyTasks = []
+                return CopyResult()
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_queue_poll_seconds=1,
+        )
+
+        upload_map, status = app_module.fetch_cd2_uploads(cfg)
+
+        self.assertEqual({}, upload_map)
+        self.assertTrue(status["connected"])
+        self.assertIn("下载任务读取失败", status["last_error"])
+        self.assertEqual([], status["downloads"])
+
 
 if __name__ == "__main__":
     unittest.main()

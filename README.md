@@ -6,7 +6,7 @@
 
 - 单实例 Docker 部署
 - 固定流程：`/watch -> /output -> /CloudNAS/CloudDrive/00-未整理/00-mkiso`
-- CloudDrive2 API 只用于观察上传进度和测试连接
+- CloudDrive2 API 用于只读观察、测试连接和封装前门禁
 - 只做封装、转移和观察
 
 ## 已有功能
@@ -17,7 +17,8 @@
 - 将 ISO 从 `/output` 移动到 CD2 目标目录
 - Web 密码登录保护
 - 任务耗时统计
-- 读取 CD2 API 上传队列并显示进度
+- 读取 CD2 API 上传 / 下载 / 复制任务并显示状态
+- CD2 下载或复制未完成时，自动等待，不抢跑封装
 - 目录观察：`watch` / `output` / `cd2`
 - `GET /healthz` 健康检查
 
@@ -108,15 +109,17 @@ services:
    CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso
    ```
 
-5. 如果你要看 CD2 上传进度，再额外填写：
+5. 如果你要看 CD2 上传 / 下载 / 复制状态，并让封装前门禁参考 CD2 任务，再额外填写：
 
    ```text
    启用 CD2 API: 勾选
+   CD2 认证方式: API Token
    CD2 API 地址: host.docker.internal:19798
-   CD2 API 用户名: 按你的 CD2 实际配置填写
-   CD2 API 密码: 按你的 CD2 实际配置填写
+   CD2 API Token: 按你的 CD2 实际配置填写
    轮询秒数: 10
    ```
+
+   如果你不用 Token，也可以切换成用户名密码模式；个人部署建议优先用 API Token。
 
 6. 保存设置后开始监控
 
@@ -124,7 +127,7 @@ services:
 
 - 当前任务状态
 - 封装耗时、转移耗时、总耗时
-- CD2 上传进度
+- CD2 上传 / 下载 / 复制状态
 - 最近日志
 - 目录观察：
   - `watch`
@@ -184,10 +187,13 @@ tar -czf iso-packer-data-$(date +%Y%m%d).tar.gz data/
 /output -> /CloudNAS/CloudDrive/00-未整理/00-mkiso
 ```
 
-CD2 API 只负责两件事：
+CD2 API 只做只读观察和封装门禁：
 
 - 测试连接
-- 读取上传队列并显示进度
+- 读取上传 / 下载 / 复制任务并显示状态
+- 判断 `/watch` 里的原盘是否仍在由 CD2 下载或复制，未完成时先等待
+
+它不会通过 API 直传 ISO，也不会自动创建、删除、取消或接管 CD2 任务。
 
 ### 2. 为什么必须挂载 `/CloudNAS`
 
@@ -195,7 +201,7 @@ CD2 API 只负责两件事：
 
 ### 3. 封装完成但网盘里暂时看不到
 
-通常是 CD2 还在后台上传。此时 Web 界面里的 CD2 上传进度区和目录观察区会比以前更方便。
+通常是 CD2 还在后台上传。此时 Web 界面里的 CD2 状态区和目录观察区会比以前更方便。
 
 ### 4. 双层杜比原盘有没有问题
 

@@ -312,7 +312,7 @@ def cd2_error_message(exc: Exception) -> str:
     if "unauthenticated" in lowered or "invalid login" in lowered:
         return "CD2 认证失败：请检查认证方式、API Token 或用户名密码"
     if "permission" in lowered or "denied" in lowered:
-        return "CD2 权限不足：请检查 API Token 是否具备读取上传任务权限"
+        return "CD2 权限不足：请检查 API Token 是否具备读取传输任务权限"
     if "unavailable" in lowered or "failed to connect" in lowered:
         return "CD2 API 地址不可达：请检查地址、端口和容器网络"
     return text
@@ -409,15 +409,25 @@ def extract_upload_status(upload) -> str:
 
 
 def extract_task_status(task) -> str:
-    status = getattr(task, "status", None)
-    if status not in (None, ""):
-        return str(status)
+    for name in ("status", "statusEnum", "state", "taskStatus"):
+        status = getattr(task, name, None)
+        if status not in (None, ""):
+            return str(status)
     return "unknown"
 
 
 def is_copy_task_done(info: Dict) -> bool:
     status = str(info.get("status") or "").strip().lower()
     return status in COPY_TASK_DONE_STATUSES
+
+
+def is_download_done(info: Dict) -> bool:
+    status = str(info.get("status") or "").strip().lower()
+    if status in COPY_TASK_DONE_STATUSES:
+        return True
+    total = int(info.get("total") or 0)
+    current = int(info.get("current") or 0)
+    return total > 0 and current >= total
 
 
 def cd2_path_matches_candidate(path: str, candidate: Path) -> bool:
@@ -443,6 +453,8 @@ def cd2_pending_source_task(candidate: Path, cd2_status: Optional[Dict]) -> Opti
         if any(cd2_path_matches_candidate(value, candidate) for value in fields):
             return task
     for task in cd2_status.get("downloads", []) or []:
+        if task.get("done"):
+            continue
         fields = (task.get("path"), task.get("key"))
         if any(cd2_path_matches_candidate(value, candidate) for value in fields):
             return task
@@ -508,7 +520,7 @@ def fetch_cd2_downloads(client):
             "kind": "download",
             "key": path,
             "path": path,
-            "status": "downloading",
+            "status": extract_task_status(download),
             "current": current,
             "total": total,
             "percent": percent,
@@ -516,8 +528,12 @@ def fetch_cd2_downloads(client):
             "detail": getattr(download, "detailDownloadInfo", "") or "",
             "error": getattr(download, "lastDownloadError", "") or "",
             "summary": f"{format_size(current)} / {format_size(total)}",
-            "human": f"CD2 下载中 {percent:.1f}% ({format_size(current)} / {format_size(total)})" if total > 0 else "CD2 下载中",
         }
+        info["done"] = is_download_done(info)
+        info["human"] = (
+            f"CD2 下载{'完成' if info['done'] else '中'} {percent:.1f}% "
+            f"({format_size(current)} / {format_size(total)})"
+        ) if total > 0 else f"CD2 下载{'完成' if info['done'] else '中'}"
         downloads.append(info)
     return downloads
 
@@ -598,10 +614,9 @@ def fetch_cd2_uploads(cfg: Dict):
         status["last_error"] = cd2_client_cache.get("last_error") or "CD2 API 未连接"
         status["human"] = status["last_error"]
         return {}, status
+    queue_errors = []
     try:
         result = client.get_upload_file_list(get_all=True)
-        downloads = fetch_cd2_downloads(client)
-        copy_tasks = fetch_cd2_copy_tasks(client)
     except Exception as exc:
         message = cd2_error_message(exc)
         with cd2_lock:
@@ -615,6 +630,16 @@ def fetch_cd2_uploads(cfg: Dict):
         status["last_error"] = message
         status["human"] = message
         return {}, status
+    try:
+        downloads = fetch_cd2_downloads(client)
+    except Exception as exc:
+        downloads = []
+        queue_errors.append(f"下载任务读取失败：{cd2_error_message(exc)}")
+    try:
+        copy_tasks = fetch_cd2_copy_tasks(client)
+    except Exception as exc:
+        copy_tasks = []
+        queue_errors.append(f"复制任务读取失败：{cd2_error_message(exc)}")
 
     checked_at = now()
     upload_map = {}
@@ -623,7 +648,7 @@ def fetch_cd2_uploads(cfg: Dict):
         "auth_mode": cd2_client_cache.get("auth_mode"),
         "checked_at": checked_at,
         "last_success_at": checked_at,
-        "last_error": None,
+        "last_error": "；".join(queue_errors) if queue_errors else None,
         "upload_count": int(getattr(result, "totalCount", 0) or 0),
         "global_bytes_per_second": float(getattr(result, "globalBytesPerSecond", 0) or 0),
         "total_bytes": int(getattr(result, "totalBytes", 0) or 0),
@@ -658,10 +683,12 @@ def fetch_cd2_uploads(cfg: Dict):
     if status["copy_task_count"]:
         parts.append(f"{status['copy_task_count']} 项复制")
     status["human"] = " / ".join(parts) if parts else "未发现传输任务"
+    if queue_errors:
+        status["human"] = f"{status['human']}，部分队列读取失败"
     with cd2_lock:
         cd2_client_cache["checked_at"] = status["checked_at"]
         cd2_client_cache["last_success_at"] = status["last_success_at"]
-        cd2_client_cache["last_error"] = None
+        cd2_client_cache["last_error"] = status["last_error"]
         cd2_client_cache["upload_map"] = dict(upload_map)
         cd2_client_cache["upload_status"] = dict(status)
     return upload_map, status

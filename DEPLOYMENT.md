@@ -15,7 +15,7 @@
 - 从监控目录识别原盘
 - 在本地临时目录封装 ISO
 - 再把 ISO 移动到 CD2 挂载目录
-- 如需查看网盘上传进度，再额外读取 CD2 API
+- 如需观察 CD2 上传 / 下载 / 复制状态，并避免半成品目录抢跑封装，再额外读取 CD2 API
 
 ## 1. VPS 前置条件
 
@@ -130,15 +130,17 @@ CD2 挂载根目录: /CloudNAS
 CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso
 ```
 
-如果你想在 Web 里直接看上传进度，再填写：
+如果你想在 Web 里直接看 CD2 上传 / 下载 / 复制状态，并让封装前门禁参考 CD2 任务，再填写：
 
 ```text
 启用 CD2 API: 开
+CD2 认证方式: API Token
 CD2 API 地址: host.docker.internal:19798
-CD2 API 用户名: 你的 CD2 用户名
-CD2 API 密码: 你的 CD2 密码
+CD2 API Token: 你的 CD2 API Token
 轮询秒数: 10
 ```
+
+如果你的 CD2 没有使用 Token，也可以切换为用户名密码模式。
 
 这里不需要额外加环境变量，除非你自己就是想用环境变量统一管理。
 
@@ -190,7 +192,7 @@ curl http://127.0.0.1:15865/healthz
 - 当前任务有没有开始
 - 当前任务耗时
 - 转移是否完成
-- CD2 上传进度有没有跑
+- CD2 上传 / 下载 / 复制状态是否正常刷新
 - `watch` / `output` / `cd2` 目录里各自有什么
 
 这意味着很多以前必须进 CD2 容器里确认的事情，现在可以先在 Web 里看。
@@ -219,6 +221,7 @@ docker exec -it iso-packer ls -la /CloudNAS/CloudDrive
 - CD2 Web/API 本身是否可访问
 - `extra_hosts` 是否已配置
 - 地址是否写成了 `host.docker.internal:19798`
+- 认证方式是否选对；Token 模式下填写 API Token，用户名密码模式下填写对应账号密码
 
 ### 任务一直不进入封装
 
@@ -226,6 +229,7 @@ docker exec -it iso-packer ls -la /CloudNAS/CloudDrive
 
 - 目录是不是完整原盘结构
 - 文件是不是还在写入
+- Web 状态里是否提示 CD2 下载 / 复制任务未完成
 - 监控是否已启用
 - 输出目录空间是否足够
 
