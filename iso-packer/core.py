@@ -31,6 +31,9 @@ DEFAULT_CONFIG = {
     "cd2_event_dedupe_ttl_seconds": 600,
     "cd2_confirm_delay_seconds": 30,
     "cd2_confirm_stable_checks": 1,
+    "cd2_refresh_enabled": False,
+    "cd2_refresh_after_source_event": True,
+    "cd2_refresh_after_transfer": True,
     "cd2_path_aliases": [
         {"local": "/CloudNAS/CloudDrive", "remote": "/115"},
     ],

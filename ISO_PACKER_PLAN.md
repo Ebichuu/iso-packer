@@ -55,6 +55,7 @@
 - 识别 `.cifstmp`、`.clfstmp`、`.clfstmp.progress` 等 CD2/FUSE 临时文件，避免 `genisoimage` 抢跑
 - 已增加 `/api/cd2/webhook` 事件入口：默认关闭，启用后必须带共享密钥；事件只记录、去重、防抖并触发复查，不直接判定文件完成
 - Webhook 事件命中本地候选目录后，会先进入 `waiting_cd2_confirm`，等待确认延迟 / 确认次数满足后，再继续走完整性、临时文件、CD2 下载 / 复制任务和稳定时间门禁
+- 已支持 CD2 目录刷新：启用后 Webhook 事件可刷新源目录，ISO 转移完成后可刷新目标目录；刷新通过 `get_sub_files(..., force_refresh=True)` 触发，并记录成功 / 失败状态
 
 这里的 SA/Symedia 仅指可参考的 CD2 接入 / 事件模型；当前 iso-packer 不依赖 SA/Symedia 部署，也不会默认接收 SA/Symedia 事件。
 
@@ -77,7 +78,7 @@
 
 ### CD2 按 SA/Symedia 模型继续收口（未实现）
 
-当前已实现的 CD2 API 能力包含只读观察、测试连接、封装前门禁、路径别名匹配、上传完成门禁、Webhook 基础事件入口和 `waiting_cd2_confirm` 延迟确认；目录刷新、远程目录扫描、手动 / 自动拉取都仍是后续规划。
+当前已实现的 CD2 API 能力包含只读观察、测试连接、封装前门禁、路径别名匹配、上传完成门禁、Webhook 基础事件入口、`waiting_cd2_confirm` 延迟确认和目录刷新；远程目录扫描、手动 / 自动拉取都仍是后续规划。
 
 ### SA/Symedia 式 CD2 监控与门禁
 
@@ -115,7 +116,7 @@ SA 式判定核心不是“看到目录就开工”，而是多路确认：
 
 CD2 控制边界：
 
-- 允许调用 CD2 刷新指定目录，用于事件后刷新源目录和 ISO 目标目录状态
+- 已允许调用 CD2 刷新指定目录，用于事件后刷新源目录和 ISO 目标目录状态
 - 允许在自动化开启后创建下载 / 复制任务，把指定网盘原盘拉取到 `/watch`
 - 只跟踪 iso-packer 自己创建的 CD2 任务，外部手动任务保持只读观察
 - 未来如启用受控自动化，CD2 API 写操作只允许服务于 iso-packer 自己发起的固定流水线，例如创建自己的下载 / 复制任务、刷新配置过的目录
@@ -130,16 +131,17 @@ CD2 控制边界：
 2. 已完成：增加 CD2 事件入口，Webhook 鉴权、事件记录、去重、防抖，只触发复查，不直接改 ready。
 3. 已完成：增加 `waiting_cd2_confirm`：事件触发后延迟确认，结合文件树稳定、临时文件识别、原盘结构检查、CD2 下载 / 复制任务状态。
 4. 已完成：上传完成门禁，`cd2_wait_upload_complete` 开启时，`transfer_done` 之前进入 `waiting_cd2_upload`，等待匹配到的 CD2 上传任务完成；未匹配到队列时保持等待并提示检查路径别名或 CD2 上传状态。
-5. 增加远程目录只读扫描：Web 里能看到指定 CD2 云端源目录下的 BDMV / VIDEO_TS 候选。
-6. 增加手动拉取：用户点选候选后，由 iso-packer 调用 CD2 创建下载 / 复制任务。
-7. 增加全自动拉取：独立开关开启时，自动发现、自动拉取、自动封装、自动转移。
+5. 已完成：CD2 目录刷新基础能力，Webhook 后刷新源目录，转移后刷新目标目录，并记录刷新结果。
+6. 下一步：增加远程目录只读扫描，Web 里能看到指定 CD2 云端源目录下的 BDMV / VIDEO_TS 候选。
+7. 增加手动拉取：用户点选候选后，由 iso-packer 调用 CD2 创建下载 / 复制任务。
+8. 增加全自动拉取：独立开关开启时，自动发现、自动拉取、自动封装、自动转移。
 
 计划新增配置：
 
 - 已新增：`cd2_webhook_enabled`、`cd2_webhook_secret`、`cd2_event_source`
 - 已新增：`cd2_event_debounce_seconds`、`cd2_event_dedupe_ttl_seconds`
 - 已新增：`cd2_confirm_delay_seconds`、`cd2_confirm_stable_checks`
-- `cd2_refresh_enabled`、`cd2_refresh_after_transfer`、`cd2_refresh_after_source_event`
+- 已新增：`cd2_refresh_enabled`、`cd2_refresh_after_transfer`、`cd2_refresh_after_source_event`
 - `cd2_path_aliases`，例如 `{ "local": "/CloudNAS/CloudDrive", "remote": "/115" }`
 - `cd2_upload_match_mode`，优先别名匹配，再决定是否允许后缀兜底
 - `cd2_wait_upload_complete`，用于区分“本地已转移”和“云端已上传”
@@ -150,9 +152,10 @@ CD2 控制边界：
 计划新增状态：
 
 - 已新增全局 CD2 Webhook 状态：最近 webhook 事件、重复事件数量、防抖数量、最近触发复查时间
-- 仍待新增全局 CD2 刷新状态：最近刷新结果、缓存失效时间
+- 已新增全局 CD2 刷新状态：最近刷新结果、最近 20 次刷新结果
+- 仍待新增全局 CD2 缓存状态：缓存失效时间
 - 已新增单任务 CD2 确认状态：事件指纹、事件路径、确认开始 / 完成时间、确认次数
-- 仍待新增单任务刷新 / 拉取状态：刷新结果、上传队列匹配路径、远程源路径、本地目标路径、CD2 任务 ID、创建时间、最后状态
+- 仍待新增单任务拉取状态：上传队列匹配路径、远程源路径、本地目标路径、CD2 任务 ID、创建时间、最后状态
 - 已新增中间状态：`waiting_cd2_confirm`
 - 仍待新增中间状态：`refreshing_cd2_dir`、`waiting_cd2_pull`
 
@@ -160,7 +163,7 @@ CD2 控制边界：
 
 - 已覆盖：Webhook secret 校验、重复事件去重、事件只触发复查
 - 已覆盖：确认延迟结束后仍需经过文件树稳定、临时文件检查和 CD2 任务状态门禁
-- CD2 刷新目录成功 / 失败状态记录
+- 已覆盖：CD2 刷新目录成功 / 失败状态记录、路径别名转换、Webhook 后刷新源目录、转移后刷新目标目录
 - 本地路径和 CD2 网盘路径别名匹配，避免同名文件误匹配
 - 上传完成门禁不会把“本地已转移”或“未匹配到上传队列”误显示成“云端已上传”
 - 自动拉取只跟踪自己创建的 CD2 任务，不接管外部手动任务
@@ -236,7 +239,7 @@ CD2 控制边界：
 
 - 当前核心链路仍按个人 VPS + Docker + CD2 挂载方案运行
 - 没有重新引入 TMDB、qB 深度集成、Agent 或分布式能力
-- 本轮计划中的基础项已经落地：基础结构拆分、独立自动化测试、CD2 状态增强、失败原因展示、重封装按钮状态增强、任务列表行内进度展示、CD2 Webhook 基础事件入口、`waiting_cd2_confirm` 延迟确认门禁
+- 本轮计划中的基础项已经落地：基础结构拆分、独立自动化测试、CD2 状态增强、失败原因展示、重封装按钮状态增强、任务列表行内进度展示、CD2 Webhook 基础事件入口、`waiting_cd2_confirm` 延迟确认门禁、CD2 目录刷新
 
 ## 验证命令
 

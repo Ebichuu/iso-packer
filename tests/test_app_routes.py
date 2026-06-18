@@ -272,6 +272,123 @@ class AppRouteTests(unittest.TestCase):
         self.assertFalse(payload["scan_triggered"])
         thread_cls.assert_not_called()
 
+    def test_cd2_refresh_uses_get_sub_files_force_refresh(self):
+        class FakeCloudDriveClient:
+            calls = []
+
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                self.calls.append((path, force_refresh))
+                return []
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_refresh_enabled=True,
+            cd2_path_aliases=[
+                {"local": str(self.data_dir / "CloudNAS" / "CloudDrive"), "remote": "/115"},
+            ],
+        )
+        local_path = str(self.data_dir / "CloudNAS" / "CloudDrive" / "00-未整理")
+
+        result = app_module.refresh_cd2_directory(cfg, local_path, "test")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["path"], "/115/00-未整理")
+        self.assertEqual(FakeCloudDriveClient.calls, [("/115/00-未整理", True)])
+        self.assertTrue(app_module.state["cd2"]["refresh"]["last_result"]["ok"])
+
+    def test_cd2_webhook_refreshes_source_before_scan(self):
+        class FakeCloudDriveClient:
+            calls = []
+
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                self.calls.append((path, force_refresh))
+                return []
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        cfg = app_module.load_config()
+        cfg.update({
+            "cd2_api_enabled": True,
+            "cd2_auth_mode": "api_token",
+            "cd2_api_addr": "127.0.0.1:19798",
+            "cd2_api_password": "dummy-token",
+            "cd2_webhook_enabled": True,
+            "cd2_webhook_secret": "shared-secret",
+            "cd2_refresh_enabled": True,
+            "cd2_refresh_after_source_event": True,
+            "cd2_path_aliases": [
+                {"local": str(self.data_dir / "CloudNAS" / "CloudDrive"), "remote": "/115"},
+            ],
+        })
+        app_module.save_config(cfg)
+
+        with mock.patch.object(app_module.threading, "Thread") as thread_cls:
+            response = self.client.post(
+                "/api/cd2/webhook",
+                headers={"X-ISO-Packer-Token": "shared-secret"},
+                json={"event": "created", "path": "/115/Movie/BDMV"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["scan_triggered"])
+        self.assertEqual(FakeCloudDriveClient.calls, [("/115/Movie/BDMV", True)])
+        thread_cls.assert_called_once()
+
+    def test_transfer_refreshes_cd2_target_directory(self):
+        class FakeCloudDriveClient:
+            calls = []
+
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                self.calls.append((path, force_refresh))
+                return []
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        source_iso = self.output / "RefreshAfterTransfer.iso"
+        source_iso.write_bytes(b"iso")
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_transfer_enabled=True,
+            cd2_require_mount=False,
+            cd2_refresh_enabled=True,
+            cd2_refresh_after_transfer=True,
+            cd2_path_aliases=[
+                {"local": str(self.data_dir / "CloudNAS" / "CloudDrive"), "remote": "/115"},
+            ],
+        )
+
+        result = app_module.transfer_iso_to_mount(source_iso, cfg)
+
+        self.assertIsNotNone(result)
+        self.assertFalse(source_iso.exists())
+        self.assertEqual(FakeCloudDriveClient.calls, [("/115/00-未整理/00-mkiso", True)])
+
     def test_settings_saves_cd2_auth_mode(self):
         self.login()
         response = self.client.post("/settings", data={
@@ -292,6 +409,9 @@ class AppRouteTests(unittest.TestCase):
             "cd2_event_dedupe_ttl_seconds": "60",
             "cd2_confirm_delay_seconds": "15",
             "cd2_confirm_stable_checks": "2",
+            "cd2_refresh_enabled": "on",
+            "cd2_refresh_after_source_event": "on",
+            "cd2_refresh_after_transfer": "on",
             "cd2_path_aliases_text": f"{self.data_dir / 'CloudNAS' / 'CloudDrive'}=/115",
             "cd2_webhook_enabled": "on",
             "cd2_webhook_secret": "webhook-secret",
@@ -316,6 +436,9 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(cfg["cd2_event_dedupe_ttl_seconds"], 60)
         self.assertEqual(cfg["cd2_confirm_delay_seconds"], 15)
         self.assertEqual(cfg["cd2_confirm_stable_checks"], 2)
+        self.assertTrue(cfg["cd2_refresh_enabled"])
+        self.assertTrue(cfg["cd2_refresh_after_source_event"])
+        self.assertTrue(cfg["cd2_refresh_after_transfer"])
 
     def test_has_partial_files_detects_cd2_temp_files(self):
         source = self.watch / "Disc"

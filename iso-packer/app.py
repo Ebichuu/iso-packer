@@ -377,6 +377,74 @@ def latest_cd2_webhook_event_for_candidate(candidate: Path, cfg: Dict) -> Option
     return dict(event)
 
 
+def cd2_remote_path_for_refresh(path: str, cfg: Dict) -> str:
+    aliases = cd2_path_aliases_from_cfg(cfg or {})
+    for value in alias_variants_for_path(path, aliases):
+        normalized = normalize_path_text(value)
+        for alias in aliases:
+            remote = normalize_path_text((alias or {}).get("remote"))
+            if remote and (normalized == remote or normalized.startswith(remote + "/")):
+                return normalized
+    return normalize_path_text(path)
+
+
+def record_cd2_refresh_result(path: str, ok: bool, message: str, reason: str = "") -> None:
+    result = {
+        "path": path,
+        "ok": bool(ok),
+        "message": message,
+        "reason": reason,
+        "checked_at": now(),
+    }
+    with lock:
+        cd2_state = state.setdefault("cd2", {})
+        refresh_state = cd2_state.setdefault("refresh", {})
+        refresh_state["last_result"] = result
+        recent = list(refresh_state.get("recent_results") or [])
+        recent.append(result)
+        refresh_state["recent_results"] = recent[-20:]
+        save_state_locked()
+
+
+def refresh_cd2_directory(cfg: Dict, path: str, reason: str = "") -> Dict:
+    remote_path = cd2_remote_path_for_refresh(path, cfg)
+    if not cfg.get("cd2_refresh_enabled"):
+        result = {"ok": False, "path": remote_path, "message": "CD2 目录刷新未启用", "reason": reason}
+        record_cd2_refresh_result(remote_path, False, result["message"], reason)
+        return result
+    if not remote_path:
+        result = {"ok": False, "path": remote_path, "message": "CD2 刷新路径为空", "reason": reason}
+        record_cd2_refresh_result(remote_path, False, result["message"], reason)
+        return result
+    client = get_cd2_client(cfg)
+    if client is None:
+        message = cd2_client_cache.get("last_error") or "CD2 API 未连接"
+        result = {"ok": False, "path": remote_path, "message": message, "reason": reason}
+        record_cd2_refresh_result(remote_path, False, message, reason)
+        return result
+    if not hasattr(client, "get_sub_files"):
+        message = "当前 clouddrive2-client 不支持目录刷新"
+        result = {"ok": False, "path": remote_path, "message": message, "reason": reason}
+        record_cd2_refresh_result(remote_path, False, message, reason)
+        return result
+    try:
+        list(client.get_sub_files(remote_path, force_refresh=True))
+    except TypeError:
+        try:
+            list(client.get_sub_files(remote_path, True))
+        except Exception as exc:
+            message = cd2_error_message(exc)
+            record_cd2_refresh_result(remote_path, False, message, reason)
+            return {"ok": False, "path": remote_path, "message": message, "reason": reason}
+    except Exception as exc:
+        message = cd2_error_message(exc)
+        record_cd2_refresh_result(remote_path, False, message, reason)
+        return {"ok": False, "path": remote_path, "message": message, "reason": reason}
+    message = "CD2 目录刷新完成"
+    record_cd2_refresh_result(remote_path, True, message, reason)
+    return {"ok": True, "path": remote_path, "message": message, "reason": reason}
+
+
 def update_cd2_confirm_state(item: Dict, candidate: Path, cfg: Dict, webhook_event: Dict, size: int, signature: Optional[Dict], partial: bool) -> bool:
     delay_seconds = int_config(cfg, "cd2_confirm_delay_seconds", 30, minimum=0)
     required_checks = int_config(cfg, "cd2_confirm_stable_checks", 1, minimum=1)
@@ -1298,6 +1366,12 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
         update_active_progress("transfer", final_path, {"percent": 100.0, "current": total, "total": total, "verified": True})
         target.unlink()
         log(f"CloudDrive2转移完成并校验通过，已删除本地ISO: {final_path}")
+        if cfg.get("cd2_refresh_enabled") and cfg.get("cd2_refresh_after_transfer"):
+            refresh = refresh_cd2_directory(cfg, str(final_path.parent), "transfer")
+            if refresh.get("ok"):
+                log(f"CD2 目标目录刷新完成: {refresh.get('path')}")
+            else:
+                log(f"CD2 目标目录刷新失败: {refresh.get('message')}")
         return final_path
     except Exception as exc:
         log(f"CloudDrive2转移失败: {exc}")
@@ -1823,6 +1897,9 @@ def settings():
     cfg["cd2_api_username"] = request.form.get("cd2_api_username", cfg.get("cd2_api_username", "")).strip()
     cfg["cd2_webhook_enabled"] = "cd2_webhook_enabled" in request.form
     cfg["cd2_event_source"] = request.form.get("cd2_event_source", cfg.get("cd2_event_source", "cd2")).strip() or "cd2"
+    cfg["cd2_refresh_enabled"] = "cd2_refresh_enabled" in request.form
+    cfg["cd2_refresh_after_source_event"] = "cd2_refresh_after_source_event" in request.form
+    cfg["cd2_refresh_after_transfer"] = "cd2_refresh_after_transfer" in request.form
     new_password = (request.form.get("web_password") or "").strip()
     new_password_confirm = (request.form.get("web_password_confirm") or "").strip()
     if new_password:
@@ -1885,6 +1962,13 @@ def api_cd2_webhook():
     payload = cd2_webhook_payload()
     result = record_cd2_webhook_event(cfg, payload)
     if result["should_scan"]:
+        event_path = result["event"].get("path") or ""
+        if cfg.get("cd2_refresh_enabled") and cfg.get("cd2_refresh_after_source_event") and event_path:
+            refresh = refresh_cd2_directory(cfg, event_path, "webhook")
+            if refresh.get("ok"):
+                log(f"CD2 Webhook 源目录刷新完成: {refresh.get('path')}")
+            else:
+                log(f"CD2 Webhook 源目录刷新失败: {refresh.get('message')}")
         threading.Thread(target=scan_once, args=(cfg,), daemon=True).start()
         log(f"CD2 Webhook 已触发复查: {result['event'].get('event')} {result['event'].get('path')}".strip())
     return jsonify({

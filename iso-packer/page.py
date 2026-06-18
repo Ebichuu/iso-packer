@@ -1295,6 +1295,18 @@ tr:hover td { background: #fff8f7; }
           <label>CD2 确认次数</label>
           <input name="cd2_confirm_stable_checks" type="number" min="1" value="{{cfg.cd2_confirm_stable_checks}}">
         </div>
+        <label class="checkbox-group">
+          <input name="cd2_refresh_enabled" type="checkbox" {% if cfg.cd2_refresh_enabled %}checked{% endif %}>
+          <span>启用 CD2 目录刷新</span>
+        </label>
+        <label class="checkbox-group">
+          <input name="cd2_refresh_after_source_event" type="checkbox" {% if cfg.cd2_refresh_after_source_event %}checked{% endif %}>
+          <span>Webhook 后刷新源目录</span>
+        </label>
+        <label class="checkbox-group">
+          <input name="cd2_refresh_after_transfer" type="checkbox" {% if cfg.cd2_refresh_after_transfer %}checked{% endif %}>
+          <span>转移后刷新目标目录</span>
+        </label>
         <div class="settings-help">Webhook 只触发重新检查，不能直接证明文件已经下载完成。</div>
         
         <div class="settings-options">
