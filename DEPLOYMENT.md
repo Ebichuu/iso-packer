@@ -125,9 +125,9 @@ http://<你的 VPS IP>:15865/
 监控目录: /watch
 输出目录: /output
 启用监控: 开
-启用 CD2 转移: 开
+启用 CD2 转移: 开（把 ISO 通过文件系统移动到 CD2 挂载目标目录）
 CD2 挂载根目录: /CloudNAS
-CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso
+CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso（本地挂载路径，不是 API 上传地址）
 ```
 
 如果你想在 Web 里直接看 CD2 上传 / 下载 / 复制状态，并让封装前门禁参考 CD2 任务，再填写：
@@ -139,6 +139,8 @@ CD2 API 地址: host.docker.internal:19798
 CD2 API Token: 你的 CD2 API Token
 轮询秒数: 10
 ```
+
+注意：CD2 API 当前只用于只读观察、测试连接和封装前门禁；ISO 仍通过文件系统移动到 CD2 挂载目录，不会通过 API 直传，也不会自动创建、删除、取消或接管 CD2 任务。
 
 如果你的 CD2 没有使用 Token，也可以切换为用户名密码模式。
 

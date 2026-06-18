@@ -14,7 +14,7 @@
 - 监控 `BDMV` / `VIDEO_TS` 原盘目录
 - 使用 `genisoimage` 封装 ISO
 - 使用 `xorriso` 做封装后校验
-- 将 ISO 从 `/output` 移动到 CD2 目标目录
+- 将 ISO 从 `/output` 通过文件系统移动到 CD2 挂载目标目录
 - Web 密码登录保护
 - 任务耗时统计
 - 读取 CD2 API 上传 / 下载 / 复制任务并显示状态
@@ -106,7 +106,8 @@ services:
    监控目录: /watch
    输出目录: /output
    CD2 挂载根目录: /CloudNAS
-   CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso
+   启用 CD2 转移: 开（把 ISO 通过文件系统移动到 CD2 挂载目标目录）
+   CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso（本地挂载路径，不是 API 上传地址）
    ```
 
 5. 如果你要看 CD2 上传 / 下载 / 复制状态，并让封装前门禁参考 CD2 任务，再额外填写：

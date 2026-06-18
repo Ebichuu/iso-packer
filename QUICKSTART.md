@@ -91,10 +91,10 @@ http://<你的 VPS IP>:15865/
 最小剩余空间: 按你的磁盘情况调整
 
 启用监控: 开
-启用 CD2 转移: 开
+启用 CD2 转移: 开（把 ISO 通过文件系统移动到 CD2 挂载目标目录）
 
 CD2 挂载根目录: /CloudNAS
-CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso
+CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso（本地挂载路径，不是 API 上传地址）
 ```
 
 如果需要显示 CD2 上传 / 下载 / 复制状态，并让封装前门禁参考 CD2 任务，再打开 CD2 API：
