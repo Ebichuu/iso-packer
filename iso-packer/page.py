@@ -1272,6 +1272,10 @@ tr:hover td { background: #fff8f7; }
           <input name="cd2_manual_pull_enabled" type="checkbox" {% if cfg.cd2_manual_pull_enabled %}checked{% endif %}>
           <span>启用 CD2 手动拉取</span>
         </label>
+        <label class="checkbox-group">
+          <input name="cd2_auto_pull_enabled" type="checkbox" {% if cfg.cd2_auto_pull_enabled %}checked{% endif %}>
+          <span>启用 CD2 自动拉取</span>
+        </label>
         <div class="form-group">
           <label>CD2 本地拉取目录</label>
           <div class="path-picker-row">
@@ -2331,6 +2335,7 @@ async function loadRemoteCandidates(force=false) {
     const payload = await fetchJson("/api/cd2/remote-candidates?force=" + (force ? "1" : "0") + "&_=" + Date.now());
     updateRemoteRows(payload.candidates || [], payload.manual_pull_enabled === true);
     const parts = [payload.message || "远程目录已读取"];
+    parts.push(payload.auto_pull_enabled === true ? "自动拉取已启用" : "自动拉取未启用");
     if(payload.checked_at) parts.push(payload.checked_at);
     if(payload.errors && payload.errors.length) parts.push(String(payload.errors.length) + " 个目录读取失败");
     if(status) status.textContent = parts.join(" / ");

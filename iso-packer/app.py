@@ -83,6 +83,7 @@ COPY_TASK_DONE_STATUSES = {"3", "completed", "complete", "done", "finish", "fini
 CD2_UPLOAD_QUEUE_GRACE_POLLS = 3
 CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS = 30
 CD2_WEBHOOK_EVENT_LIMIT = 50
+CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS = 600
 DIRECTORY_PICKER_ROOT = "@roots"
 DIRECTORY_PICKER_SCOPES = {
     "watch_dir": ("watch_dir",),
@@ -557,6 +558,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
         "roots": roots,
         "remote_roots": remote_roots,
         "manual_pull_enabled": bool(cfg.get("cd2_manual_pull_enabled")),
+        "auto_pull_enabled": bool(cfg.get("cd2_auto_pull_enabled")),
         "pull_dest_dir": cd2_pull_dest_dir_from_cfg(cfg),
         "candidates": [],
         "errors": [],
@@ -630,6 +632,214 @@ def record_cd2_pull_result(source_path: str, dest_dir: str, ok: bool, message: s
         recent.append(result)
         pull_state["recent_results"] = recent[-20:]
         save_state_locked()
+
+
+def cd2_local_pull_path_for_source(cfg: Dict, source_path: str) -> Path:
+    local_pull_dir = Path(cfg.get("cd2_local_pull_dir") or cfg.get("watch_dir") or DEFAULT_CONFIG["watch_dir"]).expanduser()
+    return (local_pull_dir / safe_filename(source_path.rsplit("/", 1)[-1])).resolve()
+
+
+def cd2_pull_recent_failure(source_path: str, cooldown_seconds: int = CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS) -> bool:
+    source_path = normalize_path_text(source_path)
+    with lock:
+        recent = list(state.get("cd2", {}).get("pull", {}).get("recent_results") or [])
+    for result in reversed(recent):
+        if normalize_path_text(result.get("source_path")) != source_path:
+            continue
+        if result.get("ok"):
+            return False
+        if seconds_between(result.get("created_at")) < cooldown_seconds:
+            return True
+        return False
+    return False
+
+
+def cd2_pull_already_tracked(source_path: str, local_source: Path, include_finished_source: bool = False) -> bool:
+    source_path = normalize_path_text(source_path)
+    local_key = str(local_source)
+    with lock:
+        items = dict(state.get("items", {}))
+    for key, item in items.items():
+        status = item.get("status")
+        if status == "removed":
+            continue
+        if key == local_key and status not in TERMINAL_STATUSES:
+            return True
+        if include_finished_source and normalize_path_text(item.get("cd2_pull_source")) == source_path:
+            return True
+        if normalize_path_text(item.get("cd2_pull_source")) == source_path and status not in TERMINAL_STATUSES:
+            return True
+    return False
+
+
+def cd2_remote_task_matches_pull(source_path: str, dest_dir: str, cd2_status: Optional[Dict]) -> bool:
+    if not cd2_status or not cd2_status.get("connected"):
+        return False
+    source_path = normalize_path_text(source_path)
+    dest_dir = normalize_path_text(dest_dir)
+    name = source_path.rsplit("/", 1)[-1]
+    for task in cd2_status.get("copy_tasks", []) or []:
+        if task.get("done"):
+            continue
+        task_source = normalize_path_text(task.get("source") or "")
+        task_target = normalize_path_text(task.get("target") or "")
+        if task_source and task_source == source_path:
+            return True
+        if name and dest_dir and task_target == normalize_path_text(dest_dir + "/" + name):
+            return True
+        if name and task_target.endswith("/" + name):
+            return True
+    for task in cd2_status.get("downloads", []) or []:
+        if task.get("done"):
+            continue
+        task_path = normalize_path_text(task.get("path") or task.get("key") or "")
+        if task_path and (task_path == source_path or (name and task_path.endswith("/" + name))):
+            return True
+    return False
+
+
+def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_status: Optional[Dict] = None) -> tuple[Dict, int]:
+    source_path = normalize_path_text(source_path)
+    if not source_path:
+        return {"ok": False, "message": "缺少远程源路径"}, 400
+    if not cd2_remote_source_allowed(source_path, cfg):
+        return {"ok": False, "message": "远程源路径不在已配置的 CD2 源目录内"}, 403
+    dest_dir = cd2_pull_dest_dir_from_cfg(cfg)
+    if not dest_dir:
+        return {"ok": False, "message": "请先配置 CD2 拉取目标目录，或在路径别名里配置本地拉取目录到网盘路径的映射"}, 400
+    if remote_path_under(dest_dir, source_path):
+        return {"ok": False, "message": "CD2 拉取目标不能位于源目录内部"}, 400
+
+    local_source = cd2_local_pull_path_for_source(cfg, source_path)
+    include_finished = mode == "auto"
+    if cd2_pull_already_tracked(source_path, local_source, include_finished_source=include_finished):
+        return {"ok": False, "message": "该远程候选已经在拉取或封装流程中"}, 409
+    if mode == "auto" and cd2_pull_recent_failure(source_path):
+        return {"ok": False, "message": "该远程候选最近自动拉取失败，暂时跳过"}, 409
+    if mode == "auto" and cd2_remote_task_matches_pull(source_path, dest_dir, cd2_status):
+        return {"ok": False, "message": "CD2 队列里已有对应拉取任务"}, 409
+
+    client = get_cd2_client(cfg)
+    if client is None:
+        return {"ok": False, "message": cd2_client_cache.get("last_error") or "CD2 API 未连接"}, 400
+    if not hasattr(client, "get_sub_files"):
+        return {"ok": False, "message": "当前 clouddrive2-client 不支持候选确认"}, 400
+    if not hasattr(client, "copy_file"):
+        return {"ok": False, "message": "当前 clouddrive2-client 不支持创建复制任务"}, 400
+    try:
+        disc_type = cd2_disc_type_for_remote_path(client, source_path)
+    except Exception as exc:
+        message = cd2_error_message(exc)
+        record_cd2_pull_result(source_path, dest_dir, False, message)
+        return {"ok": False, "message": message}, 400
+    if not disc_type:
+        message = "远程路径不是 BDMV / VIDEO_TS 原盘候选"
+        record_cd2_pull_result(source_path, dest_dir, False, message)
+        return {"ok": False, "message": message}, 400
+
+    try:
+        result = client.copy_file([source_path], dest_dir)
+        ok, message, result_paths = cd2_result_success(result)
+    except Exception as exc:
+        ok, message, result_paths = False, cd2_error_message(exc), []
+    record_cd2_pull_result(source_path, dest_dir, ok, message or "CD2 拉取任务已创建", disc_type, result_paths)
+    if not ok:
+        return {"ok": False, "message": message}, 400
+
+    created_at = now()
+    with lock:
+        item = state.setdefault("items", {}).setdefault(str(local_source), {"first_seen": created_at})
+        item.update({
+            "status": "waiting_cd2_pull",
+            "pack_iso": True,
+            "last_size": 0,
+            "last_changed": created_at,
+            "partial_files": True,
+            "error": "等待 CD2 拉取完成",
+            "cd2_pull_source": source_path,
+            "cd2_pull_dest": dest_dir,
+            "cd2_pull_disc_type": disc_type,
+            "cd2_pull_created_at": created_at,
+            "cd2_pull_mode": mode,
+            "cd2_pull_result_paths": result_paths,
+        })
+        item.pop("done_at", None)
+        item.pop("target", None)
+        item.pop("cd2_pull_finished_at", None)
+        save_state_locked()
+    message = "CD2 自动拉取任务已创建" if mode == "auto" else "CD2 拉取任务已创建"
+    return {
+        "ok": True,
+        "message": message,
+        "source_path": source_path,
+        "dest_dir": dest_dir,
+        "local_path": str(local_source),
+        "disc_type": disc_type,
+        "mode": mode,
+        "result_paths": result_paths,
+    }, 200
+
+
+def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Optional[Dict]:
+    if not cfg.get("cd2_auto_pull_enabled"):
+        return None
+    if not cfg.get("cd2_api_enabled"):
+        return None
+    if not parse_cd2_remote_source_dirs(cfg.get("cd2_remote_source_dirs")):
+        return None
+    if not cd2_pull_dest_dir_from_cfg(cfg):
+        with lock:
+            cd2_state = state.setdefault("cd2", {})
+            auto_state = cd2_state.setdefault("auto_pull", {})
+            auto_state["last_result"] = {
+                "ok": False,
+                "message": "未配置 CD2 拉取目标目录",
+                "checked_at": now(),
+            }
+            save_state_locked()
+        return None
+
+    payload = scan_cd2_remote_candidates(cfg, force_refresh=False)
+    result = {
+        "ok": bool(payload.get("ok")),
+        "checked_at": now(),
+        "candidate_count": len(payload.get("candidates") or []),
+        "message": payload.get("message") or "",
+        "created": False,
+        "skipped": [],
+    }
+    if not payload.get("ok"):
+        with lock:
+            cd2_state = state.setdefault("cd2", {})
+            cd2_state.setdefault("auto_pull", {})["last_result"] = result
+            save_state_locked()
+        return result
+
+    for candidate in payload.get("candidates") or []:
+        source_path = normalize_path_text(candidate.get("path"))
+        if not source_path:
+            continue
+        created, status_code = create_cd2_pull_task(cfg, source_path, mode="auto", cd2_status=cd2_status)
+        if created.get("ok"):
+            result.update(created)
+            result["created"] = True
+            result["status_code"] = status_code
+            log(f"CD2 自动拉取已创建: {source_path} -> {created.get('dest_dir')}")
+            break
+        result["skipped"].append({
+            "source_path": source_path,
+            "status_code": status_code,
+            "message": created.get("message") or "",
+        })
+
+    if not result["created"] and result["skipped"]:
+        result["message"] = result["skipped"][0].get("message") or result["message"]
+    with lock:
+        cd2_state = state.setdefault("cd2", {})
+        auto_state = cd2_state.setdefault("auto_pull", {})
+        auto_state["last_result"] = result
+        save_state_locked()
+    return result
 
 
 def cd2_recorded_pull_pending(item: Dict, cd2_status: Optional[Dict], finish_missing: bool = True) -> Optional[Dict]:
@@ -1835,6 +2045,7 @@ def scan_once(cfg: Dict) -> None:
 
     upload_map, cd2_status = fetch_cd2_uploads(cfg)
     check_waiting_cd2_uploads(cfg, upload_map, cd2_status)
+    maybe_auto_pull_cd2_candidate(cfg, cd2_status)
     for candidate in get_candidates(watch_dir, output_dir):
         key = str(candidate.resolve())
         pack_iso, pack_reason = should_pack_iso(candidate)
@@ -2125,6 +2336,7 @@ def settings():
     cfg["cd2_remote_source_dirs"] = parse_cd2_remote_source_dirs(request.form.get("cd2_remote_source_dirs_text", cfg.get("cd2_remote_source_dirs_text", "")))
     cfg["cd2_remote_source_dirs_text"] = cd2_remote_source_dirs_to_text(cfg)
     cfg["cd2_manual_pull_enabled"] = "cd2_manual_pull_enabled" in request.form
+    cfg["cd2_auto_pull_enabled"] = "cd2_auto_pull_enabled" in request.form
     cfg["cd2_local_pull_dir"] = request.form.get("cd2_local_pull_dir", cfg.get("cd2_local_pull_dir", cfg["watch_dir"])).strip() or cfg["watch_dir"]
     cfg["cd2_remote_pull_dest_dir"] = normalize_path_text(request.form.get("cd2_remote_pull_dest_dir", cfg.get("cd2_remote_pull_dest_dir", "")))
     cfg["cd2_api_enabled"] = "cd2_api_enabled" in request.form
@@ -2231,79 +2443,10 @@ def api_cd2_pull():
     source_path = normalize_path_text((payload or {}).get("path"))
     if not cfg.get("cd2_manual_pull_enabled"):
         return jsonify({"ok": False, "message": "CD2 手动拉取未启用"}), 400
-    if not source_path:
-        return jsonify({"ok": False, "message": "缺少远程源路径"}), 400
-    if not cd2_remote_source_allowed(source_path, cfg):
-        return jsonify({"ok": False, "message": "远程源路径不在已配置的 CD2 源目录内"}), 403
-    dest_dir = cd2_pull_dest_dir_from_cfg(cfg)
-    if not dest_dir:
-        return jsonify({"ok": False, "message": "请先配置 CD2 拉取目标目录，或在路径别名里配置本地拉取目录到网盘路径的映射"}), 400
-    if remote_path_under(dest_dir, source_path):
-        return jsonify({"ok": False, "message": "CD2 拉取目标不能位于源目录内部"}), 400
-    client = get_cd2_client(cfg)
-    if client is None:
-        return jsonify({"ok": False, "message": cd2_client_cache.get("last_error") or "CD2 API 未连接"}), 400
-    if not hasattr(client, "get_sub_files"):
-        return jsonify({"ok": False, "message": "当前 clouddrive2-client 不支持候选确认"}), 400
-    if not hasattr(client, "copy_file"):
-        return jsonify({"ok": False, "message": "当前 clouddrive2-client 不支持创建复制任务"}), 400
-    try:
-        disc_type = cd2_disc_type_for_remote_path(client, source_path)
-    except Exception as exc:
-        message = cd2_error_message(exc)
-        record_cd2_pull_result(source_path, dest_dir, False, message)
-        return jsonify({"ok": False, "message": message}), 400
-    if not disc_type:
-        message = "远程路径不是 BDMV / VIDEO_TS 原盘候选"
-        record_cd2_pull_result(source_path, dest_dir, False, message)
-        return jsonify({"ok": False, "message": message}), 400
-
-    local_pull_dir = Path(cfg.get("cd2_local_pull_dir") or cfg.get("watch_dir") or DEFAULT_CONFIG["watch_dir"]).expanduser()
-    local_source = (local_pull_dir / safe_filename(source_path.rsplit("/", 1)[-1])).resolve()
-    with lock:
-        existing = state.setdefault("items", {}).get(str(local_source))
-        if existing and existing.get("status") not in TERMINAL_STATUSES | {"removed"}:
-            return jsonify({"ok": False, "message": "该远程候选已经在拉取或封装流程中"}), 409
-
-    try:
-        result = client.copy_file([source_path], dest_dir)
-        ok, message, result_paths = cd2_result_success(result)
-    except Exception as exc:
-        ok, message, result_paths = False, cd2_error_message(exc), []
-    record_cd2_pull_result(source_path, dest_dir, ok, message or "CD2 拉取任务已创建", disc_type, result_paths)
-    if not ok:
-        return jsonify({"ok": False, "message": message}), 400
-
-    created_at = now()
-    with lock:
-        item = state.setdefault("items", {}).setdefault(str(local_source), {"first_seen": created_at})
-        item.update({
-            "status": "waiting_cd2_pull",
-            "pack_iso": True,
-            "last_size": 0,
-            "last_changed": created_at,
-            "partial_files": True,
-            "error": "等待 CD2 拉取完成",
-            "cd2_pull_source": source_path,
-            "cd2_pull_dest": dest_dir,
-            "cd2_pull_disc_type": disc_type,
-            "cd2_pull_created_at": created_at,
-            "cd2_pull_result_paths": result_paths,
-        })
-        item.pop("done_at", None)
-        item.pop("target", None)
-        item.pop("cd2_pull_finished_at", None)
-        save_state_locked()
-    log(f"CD2 手动拉取已创建: {source_path} -> {dest_dir}")
-    return jsonify({
-        "ok": True,
-        "message": "CD2 拉取任务已创建",
-        "source_path": source_path,
-        "dest_dir": dest_dir,
-        "local_path": str(local_source),
-        "disc_type": disc_type,
-        "result_paths": result_paths,
-    })
+    result, status_code = create_cd2_pull_task(cfg, source_path, mode="manual")
+    if result.get("ok"):
+        log(f"CD2 手动拉取已创建: {source_path} -> {result.get('dest_dir')}")
+    return jsonify(result), status_code
 
 
 

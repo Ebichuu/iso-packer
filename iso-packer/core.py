@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
     "cd2_refresh_after_transfer": True,
     "cd2_remote_source_dirs": [],
     "cd2_manual_pull_enabled": False,
+    "cd2_auto_pull_enabled": False,
     "cd2_local_pull_dir": "/watch",
     "cd2_remote_pull_dest_dir": "",
     "cd2_path_aliases": [

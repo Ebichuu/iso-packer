@@ -355,6 +355,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(payload["candidate_count"], 2)
         self.assertEqual({item["disc_type"] for item in payload["candidates"]}, {"BDMV", "VIDEO_TS"})
         self.assertIn(("/115/03-PT", True), FakeCloudDriveClient.calls)
+        self.assertFalse(payload["auto_pull_enabled"])
 
     def test_cd2_remote_candidates_endpoint_without_dirs_is_empty(self):
         self.login()
@@ -477,6 +478,153 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertIn("源目录", response.get_json()["message"])
 
+    def test_cd2_auto_pull_disabled_by_default(self):
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_remote_source_dirs=["/115/03-PT"],
+            cd2_remote_pull_dest_dir="/115/Downloads",
+        )
+
+        with mock.patch.object(app_module, "fetch_cd2_uploads", return_value=({}, {"connected": True, "downloads": [], "copy_tasks": []})), \
+             mock.patch.object(app_module, "scan_cd2_remote_candidates") as scan_remote:
+            app_module.scan_once(cfg)
+
+        scan_remote.assert_not_called()
+
+    def test_cd2_auto_pull_creates_one_task_from_remote_candidate(self):
+        class FakeFile:
+            def __init__(self, name, full_path, is_dir=True):
+                self.name = name
+                self.fullPathName = full_path
+                self.isDirectory = is_dir
+
+        class FakeResult:
+            success = True
+            errorMessage = ""
+            resultFilePaths = ["/115/Downloads/MovieBD"]
+
+        class FakeCloudDriveClient:
+            copy_calls = []
+
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                data = {
+                    "/115/03-PT": [
+                        FakeFile("MovieBD", "/115/03-PT/MovieBD"),
+                        FakeFile("MovieDVD", "/115/03-PT/MovieDVD"),
+                    ],
+                    "/115/03-PT/MovieBD": [FakeFile("BDMV", "/115/03-PT/MovieBD/BDMV")],
+                    "/115/03-PT/MovieDVD": [FakeFile("VIDEO_TS", "/115/03-PT/MovieDVD/VIDEO_TS")],
+                }
+                return data.get(path, [])
+
+            def copy_file(self, paths, dest_path):
+                self.copy_calls.append((list(paths), dest_path))
+                return FakeResult()
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_remote_source_dirs=["/115/03-PT"],
+            cd2_auto_pull_enabled=True,
+            cd2_local_pull_dir=str(self.watch),
+            cd2_remote_pull_dest_dir="/115/Downloads",
+        )
+
+        unrelated_copy = {
+            "kind": "copy",
+            "source": "/115/03-PT/OtherBD",
+            "target": "/115/Downloads/OtherBD",
+            "done": False,
+        }
+        with mock.patch.object(app_module, "fetch_cd2_uploads", return_value=({}, {"connected": True, "downloads": [], "copy_tasks": [unrelated_copy]})), \
+             mock.patch.object(app_module, "process_item") as process_item:
+            app_module.scan_once(cfg)
+
+        process_item.assert_not_called()
+        self.assertEqual(FakeCloudDriveClient.copy_calls, [(["/115/03-PT/MovieBD"], "/115/Downloads")])
+        item = app_module.state["items"][str((self.watch / "MovieBD").resolve())]
+        self.assertEqual(item["status"], "waiting_cd2_pull")
+        self.assertEqual(item["cd2_pull_mode"], "auto")
+        self.assertEqual(item["cd2_pull_source"], "/115/03-PT/MovieBD")
+        self.assertTrue(app_module.state["cd2"]["auto_pull"]["last_result"]["created"])
+
+    def test_cd2_auto_pull_does_not_duplicate_existing_source(self):
+        class FakeFile:
+            def __init__(self, name, full_path, is_dir=True):
+                self.name = name
+                self.fullPathName = full_path
+                self.isDirectory = is_dir
+
+        class FakeCloudDriveClient:
+            copy_calls = []
+
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                if path == "/115/03-PT":
+                    return [FakeFile("MovieBD", "/115/03-PT/MovieBD")]
+                if path == "/115/03-PT/MovieBD":
+                    return [FakeFile("BDMV", "/115/03-PT/MovieBD/BDMV")]
+                return []
+
+            def copy_file(self, paths, dest_path):
+                self.copy_calls.append((list(paths), dest_path))
+                raise AssertionError("duplicate pull should not be created")
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        app_module.state["items"][str((self.watch / "MovieBD").resolve())] = {
+            "first_seen": "2000-01-01 00:00:00",
+            "status": "done",
+            "pack_iso": True,
+            "cd2_pull_source": "/115/03-PT/MovieBD",
+        }
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_remote_source_dirs=["/115/03-PT"],
+            cd2_auto_pull_enabled=True,
+            cd2_local_pull_dir=str(self.watch),
+            cd2_remote_pull_dest_dir="/115/Downloads",
+        )
+
+        with mock.patch.object(app_module, "fetch_cd2_uploads", return_value=({}, {"connected": True, "downloads": [], "copy_tasks": []})):
+            app_module.scan_once(cfg)
+
+        self.assertEqual(FakeCloudDriveClient.copy_calls, [])
+
+    def test_cd2_auto_pull_requires_dest_dir_before_remote_scan(self):
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_remote_source_dirs=["/115/03-PT"],
+            cd2_auto_pull_enabled=True,
+            cd2_remote_pull_dest_dir="",
+            cd2_path_aliases=[],
+        )
+
+        with mock.patch.object(app_module, "fetch_cd2_uploads", return_value=({}, {"connected": True, "downloads": [], "copy_tasks": []})), \
+             mock.patch.object(app_module, "scan_cd2_remote_candidates") as scan_remote:
+            app_module.scan_once(cfg)
+
+        scan_remote.assert_not_called()
+        self.assertFalse(app_module.state["cd2"]["auto_pull"]["last_result"]["ok"])
+
     def test_cd2_webhook_refreshes_source_before_scan(self):
         class FakeCloudDriveClient:
             calls = []
@@ -585,6 +733,7 @@ class AppRouteTests(unittest.TestCase):
             "cd2_path_aliases_text": f"{self.data_dir / 'CloudNAS' / 'CloudDrive'}=/115",
             "cd2_remote_source_dirs_text": "/115/03-PT\n/115/04-BDMV",
             "cd2_manual_pull_enabled": "on",
+            "cd2_auto_pull_enabled": "on",
             "cd2_local_pull_dir": str(self.watch),
             "cd2_remote_pull_dest_dir": "/115/Downloads",
             "cd2_webhook_enabled": "on",
@@ -615,6 +764,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertTrue(cfg["cd2_refresh_after_transfer"])
         self.assertEqual(cfg["cd2_remote_source_dirs"], ["/115/03-PT", "/115/04-BDMV"])
         self.assertTrue(cfg["cd2_manual_pull_enabled"])
+        self.assertTrue(cfg["cd2_auto_pull_enabled"])
         self.assertEqual(cfg["cd2_local_pull_dir"], str(self.watch))
         self.assertEqual(cfg["cd2_remote_pull_dest_dir"], "/115/Downloads")
 
