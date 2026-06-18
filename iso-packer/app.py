@@ -58,6 +58,7 @@ worker_lock = threading.Lock()
 cd2_client_cache = {
     "key": None,
     "client": None,
+    "auth_mode": None,
     "last_error": None,
     "checked_at": None,
     "last_success_at": None,
@@ -278,10 +279,10 @@ def get_cd2_client(cfg: Dict):
         return None
     addr = normalize_cd2_api_addr(cfg.get("cd2_api_addr"))
     username = str(cfg.get("cd2_api_username") or "").strip()
-    password = str(cfg.get("cd2_api_password") or "")
-    if not addr or not username or not password:
+    secret = str(cfg.get("cd2_api_password") or "")
+    if not addr or not secret:
         return None
-    key = (addr, username, password)
+    key = (addr, username, secret)
     with cd2_lock:
         cached = cd2_client_cache.get("client")
         if cached is not None and cd2_client_cache.get("key") == key:
@@ -292,19 +293,23 @@ def get_cd2_client(cfg: Dict):
             except Exception:
                 pass
         client = CloudDriveClient(addr)
+        auth_mode = "api_token"
         try:
-            if not client.authenticate(username, password):
-                client.close()
-                cd2_client_cache.update({"key": None, "client": None, "last_error": "CD2 认证失败", "checked_at": now()})
-                return None
+            if username and client.authenticate(username, secret):
+                auth_mode = "password"
+            else:
+                client.jwt_token = secret
         except Exception as exc:
-            try:
-                client.close()
-            except Exception:
-                pass
-            cd2_client_cache.update({"key": None, "client": None, "last_error": str(exc), "checked_at": now()})
-            return None
-        cd2_client_cache.update({"key": key, "client": client, "last_error": None, "checked_at": now()})
+            client.jwt_token = secret
+            auth_mode = "api_token"
+            log(f"CD2 账号密码认证失败，改用 API Token 方式: {exc}")
+        cd2_client_cache.update({
+            "key": key,
+            "client": client,
+            "auth_mode": auth_mode,
+            "last_error": None,
+            "checked_at": now(),
+        })
         return client
 
 
@@ -319,6 +324,7 @@ def close_cd2_client() -> None:
         cd2_client_cache.update({
             "key": None,
             "client": None,
+            "auth_mode": None,
             "last_error": None,
             "checked_at": None,
             "last_success_at": None,
@@ -349,6 +355,7 @@ def fetch_cd2_uploads(cfg: Dict):
         "enabled": bool(cfg.get("cd2_api_enabled")),
         "available": CloudDriveClient is not None,
         "connected": False,
+        "auth_mode": cd2_client_cache.get("auth_mode"),
         "checked_at": cd2_client_cache.get("checked_at"),
         "last_success_at": cd2_client_cache.get("last_success_at"),
         "last_error": cd2_client_cache.get("last_error"),
@@ -365,6 +372,7 @@ def fetch_cd2_uploads(cfg: Dict):
     client = get_cd2_client(cfg)
     if client is None:
         status["checked_at"] = cd2_client_cache.get("checked_at")
+        status["auth_mode"] = cd2_client_cache.get("auth_mode")
         status["last_success_at"] = cd2_client_cache.get("last_success_at")
         status["last_error"] = cd2_client_cache.get("last_error") or "CD2 API 未连接"
         status["human"] = status["last_error"]
@@ -378,6 +386,7 @@ def fetch_cd2_uploads(cfg: Dict):
             cd2_client_cache["upload_map"] = {}
             cd2_client_cache["upload_status"] = None
         status["checked_at"] = cd2_client_cache.get("checked_at")
+        status["auth_mode"] = cd2_client_cache.get("auth_mode")
         status["last_success_at"] = cd2_client_cache.get("last_success_at")
         status["last_error"] = str(exc)
         status["human"] = str(exc)
@@ -387,6 +396,7 @@ def fetch_cd2_uploads(cfg: Dict):
     upload_map = {}
     status.update({
         "connected": True,
+        "auth_mode": cd2_client_cache.get("auth_mode"),
         "checked_at": checked_at,
         "last_success_at": checked_at,
         "last_error": None,

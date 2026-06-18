@@ -42,6 +42,8 @@ class AppRouteTests(unittest.TestCase):
         app_module.update_password(cfg, "test")
 
     def tearDown(self):
+        app_module.CloudDriveClient = getattr(self, "original_cd2_client", app_module.CloudDriveClient)
+        app_module.close_cd2_client()
         self.tmp.cleanup()
 
     def login(self):
@@ -67,6 +69,46 @@ class AppRouteTests(unittest.TestCase):
         response = self.client.get("/login?next=https://example.com")
         self.assertEqual(response.status_code, 200)
         self.assertIn('value="/"', response.get_data(as_text=True))
+
+    def test_cd2_api_token_fallback_when_password_login_fails(self):
+        class FakeUploadResult:
+            totalCount = 0
+            globalBytesPerSecond = 0
+            totalBytes = 0
+            finishedBytes = 0
+            uploadFiles = []
+
+        class FakeCloudDriveClient:
+            def __init__(self, addr):
+                self.addr = addr
+                self.jwt_token = None
+
+            def authenticate(self, username, password):
+                raise RuntimeError("password login disabled")
+
+            def get_upload_file_list(self, get_all=True):
+                if self.jwt_token != "api-token":
+                    raise RuntimeError("missing bearer token")
+                return FakeUploadResult()
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        cfg = app_module.load_config()
+        cfg.update({
+            "cd2_api_enabled": True,
+            "cd2_api_addr": "127.0.0.1:19798",
+            "cd2_api_username": "user@example.com",
+            "cd2_api_password": "api-token",
+        })
+
+        _, status = app_module.fetch_cd2_uploads(cfg)
+
+        self.assertTrue(status["connected"])
+        self.assertEqual(status["auth_mode"], "api_token")
+        self.assertEqual(status["human"], "未发现上传任务")
 
 
 if __name__ == "__main__":
