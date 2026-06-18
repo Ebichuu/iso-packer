@@ -45,6 +45,23 @@
 - 显示 API 不可用 / 未连接状态
 - 修改 CD2 API 设置后自动清理旧缓存和旧连接
 - 显示最后成功刷新时间和最后错误
+- 参考 SA/Symedia 的 CD2 接入模型，支持 API Token / 用户名密码两种认证方式
+- API Token 模式按 `Authorization: Bearer <token>` 调用 CD2 gRPC 接口，不再把 token 当账号密码登录
+- `/api/status` 不再返回 Web 密码哈希、Web secret 或 CD2 API 密钥
+
+### CD2 按 SA/Symedia 模型继续收口
+
+当前项目只需要 CD2 观察层，不使用 CD2 API 直传文件。后续 CD2 接入按下面原则做：
+
+- 认证方式明确区分：`API Token` / `用户名密码`
+- API Token 模式下用户名可留空，界面不再误导成“用户名 + 密码”
+- CD2 根目录和 ISO 目标目录分开展示：
+  - CD2 根目录建议 `/CloudNAS/CloudDrive`
+  - ISO 目标目录保持 `/CloudNAS/CloudDrive/00-未整理/00-mkiso`
+- 增加“测试 CD2 连接 / 重新连接”能力
+- CD2 状态展示认证模式、最后成功时间、最后错误和上传任务数量
+- 错误文案区分地址不可达、认证失败、Token 权限不足、暂无上传任务
+- 文档里明确 API Token 建议授予读取上传任务相关权限；个人部署可直接给全权限降低排错成本
 
 ### 目录观察
 

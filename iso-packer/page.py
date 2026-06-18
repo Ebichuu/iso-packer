@@ -434,7 +434,8 @@ body {
 .sidebar input[type=text],
 .sidebar input[type=number],
 .sidebar input[type=password],
-.sidebar input[type=url] {
+.sidebar input[type=url],
+.sidebar select {
   width: 100%;
   background: rgba(255,255,255,0.1);
   border: 1px solid rgba(255,255,255,0.13);
@@ -445,8 +446,10 @@ body {
   transition: all 0.2s;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
 }
+.sidebar select { color-scheme: dark; }
 .sidebar input::placeholder { color: rgba(255,255,255,0.38); }
-.sidebar input:focus {
+.sidebar input:focus,
+.sidebar select:focus {
   outline: none;
   border-color: rgba(255, 216, 223, 0.72);
   background: rgba(255,255,255,0.15);
@@ -1221,21 +1224,28 @@ tr:hover td { background: #fff8f7; }
         </div>
 
         <div class="settings-section-title">CD2 API</div>
-        <div class="settings-help">启用后展示上传进度并按轮询间隔刷新状态。</div>
+        <div class="settings-help">参考 SA/Symedia 模型，只读取上传队列和连接状态，不通过 API 直传 ISO。</div>
         <div class="checkbox-group" style="margin-top: 0;">
           <input name="cd2_api_enabled" type="checkbox" {% if cfg.cd2_api_enabled %}checked{% endif %}>
           <span>启用 CD2 API</span>
         </div>
         <div class="form-group">
+          <label>CD2 认证方式</label>
+          <select name="cd2_auth_mode" id="cd2-auth-mode">
+            <option value="api_token" {% if cfg.cd2_auth_mode != 'password' %}selected{% endif %}>API Token</option>
+            <option value="password" {% if cfg.cd2_auth_mode == 'password' %}selected{% endif %}>用户名密码</option>
+          </select>
+        </div>
+        <div class="form-group">
           <label>CD2 API 地址</label>
           <input name="cd2_api_addr" type="text" value="{{cfg.cd2_api_addr}}" placeholder="host.docker.internal:19798">
         </div>
-        <div class="form-group">
+        <div class="form-group" id="cd2-username-group">
           <label>CD2 API 用户名</label>
-          <input name="cd2_api_username" type="text" value="{{cfg.cd2_api_username}}">
+          <input name="cd2_api_username" type="text" value="{{cfg.cd2_api_username}}" placeholder="API Token 模式可留空">
         </div>
         <div class="form-group">
-          <label>CD2 API 密码</label>
+          <label id="cd2-secret-label">CD2 API Token</label>
           <input name="cd2_api_password" type="password" value="" autocomplete="new-password" placeholder="留空不修改">
         </div>
         <div class="form-group">
@@ -1262,6 +1272,7 @@ tr:hover td { background: #fff8f7; }
         <div class="button-stack">
           <button class="btn btn-primary" type="submit" data-saving-text="保存中...">保存设置</button>
           <button class="btn btn-secondary" name="scan" value="1" type="submit" data-saving-text="保存并扫描中...">保存并扫描</button>
+          <button class="btn btn-secondary" id="cd2-test-btn" type="button">测试 CD2 连接</button>
         </div>
       </form>
     </div>
@@ -1551,6 +1562,18 @@ function setupTaskActions(){
 function setupSettingsForm(){
   const form = $("settings-form");
   if(!form) return;
+  const cd2Mode = $("cd2-auth-mode");
+  const cd2UsernameGroup = $("cd2-username-group");
+  const cd2SecretLabel = $("cd2-secret-label");
+  const updateCd2AuthUi = () => {
+    const mode = cd2Mode ? cd2Mode.value : "api_token";
+    if(cd2UsernameGroup) cd2UsernameGroup.style.display = mode === "password" ? "" : "none";
+    if(cd2SecretLabel) cd2SecretLabel.textContent = mode === "password" ? "CD2 密码" : "CD2 API Token";
+  };
+  if(cd2Mode) {
+    cd2Mode.addEventListener("change", updateCd2AuthUi);
+    updateCd2AuthUi();
+  }
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const submitter = event.submitter;
@@ -1574,6 +1597,24 @@ function setupSettingsForm(){
       if(submitter) submitter.textContent = originalText;
     }
   });
+  const cd2TestButton = $("cd2-test-btn");
+  if(cd2TestButton) {
+    cd2TestButton.addEventListener("click", async () => {
+      const originalText = cd2TestButton.textContent;
+      cd2TestButton.disabled = true;
+      cd2TestButton.textContent = "测试中...";
+      try {
+        const payload = await fetchJson("/api/cd2/test", { method: "POST", body: new FormData(form) });
+        showSettingsAlert(payload.message || "CD2 连接成功");
+        refresh();
+      } catch(e) {
+        showSettingsAlert(e.message || "CD2 连接失败", true);
+      } finally {
+        cd2TestButton.disabled = false;
+        cd2TestButton.textContent = originalText;
+      }
+    });
+  }
 }
 
 function getBadgeClass(status) {
@@ -1717,7 +1758,9 @@ function pickErrorReason(item) {
 function formatCd2Status(status) {
   if(!status) return "--";
   const parts = [];
+  if(status.auth_mode) parts.push(status.auth_mode === "password" ? "用户名密码" : "API Token");
   if(status.human) parts.push(status.human);
+  if(status.upload_count != null) parts.push(String(status.upload_count) + " 项");
   if(status.last_success_at) parts.push("最后成功 " + status.last_success_at);
   if(status.last_error) parts.push("错误 " + status.last_error);
   if(!parts.length && status.checked_at) parts.push("最后检查 " + status.checked_at);

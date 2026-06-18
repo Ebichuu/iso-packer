@@ -18,6 +18,7 @@ DEFAULT_CONFIG = {
     "web_password_hash": "",
     "web_secret_key": "",
     "cd2_api_enabled": False,
+    "cd2_auth_mode": "api_token",
     "cd2_api_addr": "host.docker.internal:19798",
     "cd2_api_username": "",
     "cd2_api_password": "",
@@ -109,6 +110,7 @@ def cd2_client_key_from_cfg(cfg: Dict):
     cfg = cfg or {}
     return (
         bool(cfg.get("cd2_api_enabled")),
+        str(cfg.get("cd2_auth_mode") or "api_token"),
         normalize_cd2_api_addr(cfg.get("cd2_api_addr")),
         str(cfg.get("cd2_api_username") or "").strip(),
         str(cfg.get("cd2_api_password") or ""),

@@ -272,17 +272,39 @@ def normalize_upload_path(path: str) -> str:
     return str(Path(str(path or "")).expanduser()).replace("\\", "/").rstrip("/")
 
 
+def cd2_auth_mode_from_cfg(cfg: Dict) -> str:
+    mode = str((cfg or {}).get("cd2_auth_mode") or "api_token").strip().lower()
+    if mode not in {"api_token", "password"}:
+        return "api_token"
+    return mode
+
+
+def cd2_error_message(exc: Exception) -> str:
+    text = str(exc)
+    lowered = text.lower()
+    if "unauthenticated" in lowered or "invalid login" in lowered:
+        return "CD2 认证失败：请检查认证方式、API Token 或用户名密码"
+    if "permission" in lowered or "denied" in lowered:
+        return "CD2 权限不足：请检查 API Token 是否具备读取上传任务权限"
+    if "unavailable" in lowered or "failed to connect" in lowered:
+        return "CD2 API 地址不可达：请检查地址、端口和容器网络"
+    return text
+
+
 def get_cd2_client(cfg: Dict):
     if not CloudDriveClient:
         return None
     if not cfg.get("cd2_api_enabled"):
         return None
     addr = normalize_cd2_api_addr(cfg.get("cd2_api_addr"))
+    auth_mode = cd2_auth_mode_from_cfg(cfg)
     username = str(cfg.get("cd2_api_username") or "").strip()
     secret = str(cfg.get("cd2_api_password") or "")
     if not addr or not secret:
         return None
-    key = (addr, username, secret)
+    if auth_mode == "password" and not username:
+        return None
+    key = (addr, auth_mode, username, secret)
     with cd2_lock:
         cached = cd2_client_cache.get("client")
         if cached is not None and cd2_client_cache.get("key") == key:
@@ -293,16 +315,32 @@ def get_cd2_client(cfg: Dict):
             except Exception:
                 pass
         client = CloudDriveClient(addr)
-        auth_mode = "api_token"
         try:
-            if username and client.authenticate(username, secret):
-                auth_mode = "password"
-            else:
+            if auth_mode == "api_token":
                 client.jwt_token = secret
+            elif not client.authenticate(username, secret):
+                client.close()
+                cd2_client_cache.update({
+                    "key": None,
+                    "client": None,
+                    "auth_mode": auth_mode,
+                    "last_error": "CD2 认证失败：请检查用户名密码",
+                    "checked_at": now(),
+                })
+                return None
         except Exception as exc:
-            client.jwt_token = secret
-            auth_mode = "api_token"
-            log(f"CD2 账号密码认证失败，改用 API Token 方式: {exc}")
+            try:
+                client.close()
+            except Exception:
+                pass
+            cd2_client_cache.update({
+                "key": None,
+                "client": None,
+                "auth_mode": auth_mode,
+                "last_error": cd2_error_message(exc),
+                "checked_at": now(),
+            })
+            return None
         cd2_client_cache.update({
             "key": key,
             "client": client,
@@ -380,16 +418,17 @@ def fetch_cd2_uploads(cfg: Dict):
     try:
         result = client.get_upload_file_list(get_all=True)
     except Exception as exc:
+        message = cd2_error_message(exc)
         with cd2_lock:
-            cd2_client_cache["last_error"] = str(exc)
+            cd2_client_cache["last_error"] = message
             cd2_client_cache["checked_at"] = now()
             cd2_client_cache["upload_map"] = {}
             cd2_client_cache["upload_status"] = None
         status["checked_at"] = cd2_client_cache.get("checked_at")
         status["auth_mode"] = cd2_client_cache.get("auth_mode")
         status["last_success_at"] = cd2_client_cache.get("last_success_at")
-        status["last_error"] = str(exc)
-        status["human"] = str(exc)
+        status["last_error"] = message
+        status["human"] = message
         return {}, status
 
     checked_at = now()
@@ -1124,6 +1163,7 @@ def settings():
     cfg["cd2_mount_root"] = request.form.get("cd2_mount_root", cfg.get("cd2_mount_root", "/CloudNAS")).strip()
     cfg["cd2_target_dir"] = request.form.get("cd2_target_dir", cfg.get("cd2_target_dir", "/CloudNAS/CloudDrive/00-未整理/00-mkiso")).strip()
     cfg["cd2_api_enabled"] = "cd2_api_enabled" in request.form
+    cfg["cd2_auth_mode"] = cd2_auth_mode_from_cfg({"cd2_auth_mode": request.form.get("cd2_auth_mode", cfg.get("cd2_auth_mode", "api_token"))})
     cfg["cd2_api_addr"] = normalize_cd2_api_addr(request.form.get("cd2_api_addr", cfg.get("cd2_api_addr", "host.docker.internal:19798")))
     cfg["cd2_api_username"] = request.form.get("cd2_api_username", cfg.get("cd2_api_username", "")).strip()
     new_password = (request.form.get("web_password") or "").strip()
@@ -1147,6 +1187,32 @@ def settings():
     if request.form.get("scan"):
         threading.Thread(target=scan_once, args=(cfg,), daemon=True).start()
     return redirect(url_for("index"))
+
+
+@app.route("/api/cd2/test", methods=["POST"])
+def api_cd2_test():
+    cfg = load_config()
+    if request.form:
+        cfg["cd2_api_enabled"] = True
+        cfg["cd2_auth_mode"] = cd2_auth_mode_from_cfg({"cd2_auth_mode": request.form.get("cd2_auth_mode", cfg.get("cd2_auth_mode", "api_token"))})
+        cfg["cd2_api_addr"] = normalize_cd2_api_addr(request.form.get("cd2_api_addr", cfg.get("cd2_api_addr", "host.docker.internal:19798")))
+        cfg["cd2_api_username"] = request.form.get("cd2_api_username", cfg.get("cd2_api_username", "")).strip()
+        new_cd2_password = (request.form.get("cd2_api_password") or "").strip()
+        if new_cd2_password:
+            cfg["cd2_api_password"] = new_cd2_password
+    close_cd2_client()
+    _, status = fetch_cd2_uploads(cfg)
+    if status.get("connected"):
+        return jsonify({
+            "ok": True,
+            "message": status.get("human") or "CD2 连接成功",
+            "status": status,
+        })
+    return jsonify({
+        "ok": False,
+        "message": status.get("human") or status.get("last_error") or "CD2 连接失败",
+        "status": status,
+    }), 400
 
 
 
