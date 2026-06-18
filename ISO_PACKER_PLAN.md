@@ -66,6 +66,70 @@
 - 错误文案区分地址不可达、认证失败、Token 权限不足、暂无上传任务
 - 文档里明确 API Token 建议授予读取上传任务相关权限；个人部署可直接给全权限降低排错成本
 
+### SA/Symedia 式 CD2 事件模型规划
+
+后续 CD2 监控按 SA/Symedia 的模式收口：事件触发优先，轮询兜底，所有动作围绕固定个人流程做编排，不把 iso-packer 扩展成通用网盘管理器。
+
+- 增加 CD2 Webhook / 事件通知入口，用于接收 CD2 或网盘目录变化事件；默认关闭
+- Webhook 入口优先复用当前 Web 服务端口 `15865`，规划路径为 `/api/cd2/webhook`，避免额外开放端口
+- Webhook 必须有共享密钥 / 签名 token / 反代鉴权 / IP 白名单之一，不允许裸奔公网
+- 日志和状态接口不得输出完整 Webhook secret、CD2 API Token 或其它敏感凭据
+- 事件来源需要单选：CD2 原生 webhook、SA/Symedia 事件转发、或禁用 webhook 仅轮询；不要同时开启多个事件来源
+- 配置监听目录，例如 `/CloudNAS/CloudDrive/03-PT` 或 CD2 返回的网盘路径 `/115/03-PT`
+- 明确路径映射：容器路径 `/CloudNAS/CloudDrive/...` 和 CD2 网盘路径 `/115/...` 需要建立别名关系，避免事件路径和本地路径误判
+- Webhook 事件只触发复查，不作为“文件已完成”的证明
+- 事件命中监听目录后，不立即封装，先进入“待确认”状态
+- 增加延迟确认时间和稳定检查次数，默认按分钟级配置，避免 CD2 刚暴露文件/目录就触发封装
+- 延迟结束后重新读取目录结构、文件树签名、CD2 下载 / 复制任务状态，连续稳定后才进入封装
+- 保留轮询扫描作为兜底：Webhook 不可用或漏事件时，仍按现有 `/watch` 扫描逻辑发现任务
+- 支持调用 CD2 刷新指定目录，用于事件后刷新挂载目录和目标目录状态；只刷新配置过的源目录和 ISO 目标目录，不做全盘递归刷新
+- 目录刷新只代表“让 CD2 / 挂载层尽快反映变化”，不是上传 ISO，也不是强制转移
+- CD2 API Token 权限需要随能力分级：只读观察阶段可低权限；刷新目录 / 事件监听阶段建议按 CD2/Symedia 口径授予足够权限，个人部署可使用全权限降低排错成本
+- 上传进度展示继续读取 CD2 上传队列，并支持 CD2 网盘路径和本地挂载路径的别名匹配，例如 `/115/...` 对应 `/CloudNAS/CloudDrive/...`
+- CD2 API 的写操作只允许用于网盘内移动 / 复制 / 刷新目录，不用于本地 ISO API 直传
+- 本地生成的 ISO 仍通过文件系统交给 CD2 挂载目录；是否“直接封装到 CD2 目标目录 `.partial`”单独作为实验开关评估
+
+推荐实现顺序：
+
+1. 先完善只读能力：Webhook 接收、事件记录、目录刷新、上传队列路径别名匹配、Web 展示事件状态。
+2. 再做稳定确认：事件触发后延迟确认，结合文件树稳定、临时文件识别、CD2 任务完成状态。
+3. 再做半自动编排：Web 上显示候选原盘，允许手动确认拉取 / 封装。
+4. 最后做全自动：在独立开关开启时，自动发现、自动拉取、自动封装、自动转移。
+
+计划新增配置：
+
+- `cd2_webhook_enabled`、`cd2_webhook_secret`、`cd2_webhook_event_source`
+- `cd2_event_debounce_seconds`、`cd2_event_dedupe_ttl_seconds`
+- `cd2_confirm_delay_seconds`、`cd2_confirm_stable_checks`
+- `cd2_refresh_enabled`、`cd2_refresh_after_transfer`、`cd2_refresh_after_source_event`
+- `cd2_path_aliases`，例如 `{ "local": "/CloudNAS/CloudDrive", "remote": "/115" }`
+- `cd2_upload_match_mode`，优先别名匹配，再按策略决定是否允许后缀兜底
+- `cd2_wait_upload_complete`，用于区分“本地已转移”和“云端已上传”
+
+计划新增状态：
+
+- 全局 CD2 状态：最近 webhook 事件、重复事件数量、最近刷新结果、缓存失效时间
+- 单任务状态：事件来源、确认时间、确认次数、刷新结果、上传队列匹配路径
+- 新增中间状态：`waiting_cd2_confirm`、`refreshing_cd2_dir`、`waiting_cd2_upload`
+
+测试重点：
+
+- Webhook secret 校验、重复事件去重、事件只触发复查
+- 确认延迟结束后仍需经过文件树稳定和临时文件检查
+- CD2 刷新目录成功 / 失败状态记录
+- 本地路径和 CD2 网盘路径别名匹配，避免同名文件误匹配
+- `sanitize_config` 不泄露 webhook secret 或 CD2 API Token
+
+边界：
+
+- 不接管用户在 CD2 里手动创建的通用任务
+- 不把 webhook 事件当成文件已完成的证明，事件只能触发重新检查
+- 不同时启用多个 webhook / 事件来源来处理同一目录
+- 不自动删除网盘源文件
+- 不改变当前状态语义前先拆清楚“本地已转移”和“云端已上传”
+- 不把 TMDB、qB 深度集成、Agent / 分布式重新带回主线
+- 不默认把 `genisoimage` 直接输出到 CD2 FUSE 目录，除非用户明确开启实验模式
+
 ### CD2 受控自动化规划
 
 后续目标是把 iso-packer 从“监控本地 `/watch`”扩展为“自动拉取网盘原盘再封装”。这条能力可以控制 CD2，但只控制自己发起的下载 / 复制任务，不接管 CD2 的通用文件管理、删除、取消、移动等能力。
