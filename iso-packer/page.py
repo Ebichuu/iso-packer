@@ -1224,7 +1224,6 @@ tr:hover td { background: #fff8f7; }
         </div>
 
         <div class="settings-section-title">CD2 API</div>
-        <div class="settings-help">参考 SA/Symedia 模型，只读取上传队列和连接状态，不通过 API 直传 ISO。</div>
         <div class="checkbox-group" style="margin-top: 0;">
           <input name="cd2_api_enabled" type="checkbox" {% if cfg.cd2_api_enabled %}checked{% endif %}>
           <span>启用 CD2 API</span>
