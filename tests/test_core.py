@@ -59,6 +59,22 @@ class CoreUtilityTests(unittest.TestCase):
         self.assertEqual(result["cd2_auth_mode"], "api_token")
         self.assertEqual(result["cd2_api_username"], "user")
 
+    def test_cd2_path_alias_helpers(self):
+        aliases = core.parse_cd2_path_alias_lines("""
+        /CloudNAS/CloudDrive=/115
+        /mnt/cloud => /remote
+        # ignored
+        """)
+        self.assertEqual(aliases[0], {"local": "/CloudNAS/CloudDrive", "remote": "/115"})
+        self.assertIn(
+            "/115/00-未整理/Movie.iso",
+            core.alias_variants_for_path("/CloudNAS/CloudDrive/00-未整理/Movie.iso", aliases),
+        )
+        self.assertIn(
+            "/CloudNAS/CloudDrive/00-未整理/Movie.iso",
+            core.alias_variants_for_path("/115/00-未整理/Movie.iso", aliases),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

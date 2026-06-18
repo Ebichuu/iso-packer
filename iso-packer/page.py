@@ -435,6 +435,7 @@ body {
 .sidebar input[type=number],
 .sidebar input[type=password],
 .sidebar input[type=url],
+.sidebar textarea,
 .sidebar select {
   width: 100%;
   background: rgba(255,255,255,0.1);
@@ -446,9 +447,15 @@ body {
   transition: all 0.2s;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
 }
+.sidebar textarea {
+  min-height: 70px;
+  resize: vertical;
+  line-height: 1.45;
+}
 .sidebar select { color-scheme: dark; }
 .sidebar input::placeholder { color: rgba(255,255,255,0.38); }
 .sidebar input:focus,
+.sidebar textarea:focus,
 .sidebar select:focus {
   outline: none;
   border-color: rgba(255, 216, 223, 0.72);
@@ -1250,6 +1257,11 @@ tr:hover td { background: #fff8f7; }
         <div class="form-group">
           <label>CD2 轮询秒数</label>
           <input name="cd2_queue_poll_seconds" type="number" min="1" value="{{cfg.cd2_queue_poll_seconds}}">
+        </div>
+        <div class="form-group">
+          <label>CD2 路径别名</label>
+          <textarea name="cd2_path_aliases_text" spellcheck="false" placeholder="/CloudNAS/CloudDrive=/115">{{cfg.cd2_path_aliases_text}}</textarea>
+          <div class="settings-help">每行一组：本地挂载路径=CD2 网盘路径。用于匹配上传进度和任务门禁。</div>
         </div>
         
         <div class="settings-options">

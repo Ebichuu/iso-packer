@@ -20,12 +20,17 @@ from core import (
     PARTIAL_EXTENSIONS,
     TERMINAL_STATUSES,
     VIDEO_EXTENSIONS,
+    alias_variants_for_path,
     apply_task_timings,
     badge_class,
     cd2_client_key_from_cfg,
+    cd2_path_aliases_from_cfg,
+    cd2_path_aliases_to_text,
     format_size,
     normalize_cd2_api_addr,
+    normalize_path_text,
     now,
+    parse_cd2_path_alias_lines,
     path_in_root,
     safe_filename,
     safe_next_path,
@@ -121,6 +126,7 @@ def load_config() -> Dict:
     ensure_app_dir()
     if not CONFIG_PATH.exists():
         cfg = DEFAULT_CONFIG.copy()
+        cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
         if not cfg.get("web_secret_key"):
             cfg["web_secret_key"] = secrets.token_urlsafe(32)
         save_config(cfg)
@@ -131,6 +137,8 @@ def load_config() -> Dict:
         data = {}
     cfg = DEFAULT_CONFIG.copy()
     cfg.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
+    cfg["cd2_path_aliases"] = cd2_path_aliases_from_cfg(cfg)
+    cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
     if not cfg.get("web_secret_key"):
         cfg["web_secret_key"] = secrets.token_urlsafe(32)
         save_config(cfg)
@@ -140,7 +148,8 @@ def load_config() -> Dict:
 def save_config(cfg: Dict) -> None:
     ensure_app_dir()
     tmp = CONFIG_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    saved = {key: value for key, value in (cfg or {}).items() if key in DEFAULT_CONFIG}
+    tmp.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(CONFIG_PATH)
 
 
@@ -272,15 +281,20 @@ def parse_int_form(name: str, fallback, minimum: Optional[int] = None) -> int:
 
 
 def normalize_upload_path(path: str) -> str:
-    return str(Path(str(path or "")).expanduser()).replace("\\", "/").rstrip("/")
+    return normalize_path_text(str(Path(str(path or "")).expanduser()))
 
 
 def upload_lookup_keys(path: str, cfg: Optional[Dict] = None):
-    normalized = normalize_upload_path(path)
-    keys = []
-    if normalized:
-        keys.append(normalized)
     cfg = cfg or {}
+    aliases = cd2_path_aliases_from_cfg(cfg)
+    base_paths = alias_variants_for_path(path, aliases)
+    normalized = normalize_upload_path(path)
+    if normalized not in base_paths:
+        base_paths.insert(0, normalized)
+    keys = []
+    for base_path in base_paths:
+        if base_path:
+            keys.append(base_path)
     for root_name in ("cd2_mount_root", "cd2_target_dir"):
         root_value = cfg.get(root_name)
         if not root_value:
@@ -483,33 +497,43 @@ def is_download_done(info: Dict) -> bool:
     return total > 0 and current >= total
 
 
-def cd2_path_matches_candidate(path: str, candidate: Path) -> bool:
-    value = normalize_match_path(path)
-    if not value:
-        return False
-    candidate_path = normalize_match_path(str(candidate))
-    if value == candidate_path or value.startswith(candidate_path + "/"):
-        return True
+def cd2_path_matches_candidate(path: str, candidate: Path, cfg: Optional[Dict] = None) -> bool:
+    aliases = cd2_path_aliases_from_cfg(cfg or {})
+    candidate_variants = alias_variants_for_path(str(candidate), aliases)
+    value_variants = alias_variants_for_path(path, aliases)
+    if not candidate_variants:
+        candidate_variants = [str(candidate)]
+    for candidate_value in candidate_variants:
+        candidate_path = normalize_match_path(candidate_value)
+        if not candidate_path:
+            continue
+        for value in value_variants:
+            value_path = normalize_match_path(value)
+            if value_path == candidate_path or value_path.startswith(candidate_path + "/"):
+                return True
     name = candidate.name.strip().lower()
     if not name:
         return False
-    return value.endswith("/" + name) or ("/" + name + "/") in value
+    return any(
+        (value.endswith("/" + name) or ("/" + name + "/") in value)
+        for value in (normalize_match_path(item) for item in value_variants)
+    )
 
 
-def cd2_pending_source_task(candidate: Path, cd2_status: Optional[Dict]) -> Optional[Dict]:
+def cd2_pending_source_task(candidate: Path, cd2_status: Optional[Dict], cfg: Optional[Dict] = None) -> Optional[Dict]:
     if not cd2_status or not cd2_status.get("connected"):
         return None
     for task in cd2_status.get("copy_tasks", []) or []:
         if task.get("done"):
             continue
         fields = (task.get("source"), task.get("target"), task.get("key"))
-        if any(cd2_path_matches_candidate(value, candidate) for value in fields):
+        if any(cd2_path_matches_candidate(value, candidate, cfg) for value in fields):
             return task
     for task in cd2_status.get("downloads", []) or []:
         if task.get("done"):
             continue
         fields = (task.get("path"), task.get("key"))
-        if any(cd2_path_matches_candidate(value, candidate) for value in fields):
+        if any(cd2_path_matches_candidate(value, candidate, cfg) for value in fields):
             return task
     return None
 
@@ -523,7 +547,7 @@ def cd2_pending_reason(task: Dict) -> str:
     return task.get("human") or "CD2 任务未完成"
 
 
-def source_readiness_blocker(source: Path, source_size: int, cd2_status: Optional[Dict] = None):
+def source_readiness_blocker(source: Path, source_size: int, cd2_status: Optional[Dict] = None, cfg: Optional[Dict] = None):
     if source_size < 0:
         return "receiving", "源目录仍在变化，文件暂不可读", None
     if source_size <= 0:
@@ -533,7 +557,7 @@ def source_readiness_blocker(source: Path, source_size: int, cd2_status: Optiona
     structure_ready, structure_reason = disc_structure_ready(source)
     if not structure_ready:
         return "waiting_partial", structure_reason, None
-    pending_task = cd2_pending_source_task(source, cd2_status)
+    pending_task = cd2_pending_source_task(source, cd2_status, cfg)
     if pending_task:
         return "waiting_partial", cd2_pending_reason(pending_task), pending_task
     return None, None, None
@@ -1067,7 +1091,7 @@ def process_item(source: Path, cfg: Dict) -> None:
     output_dir = Path(cfg["output_dir"]).expanduser().resolve()
     source_size = size_of(source)
     _, cd2_status = fetch_cd2_uploads(cfg)
-    wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status)
+    wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status, cfg)
     if wait_status:
         mark_source_waiting(source, wait_status, wait_reason, source_size, pending_task)
         log(f"等待源目录完成 {source}: {wait_reason}")
@@ -1305,7 +1329,7 @@ def scan_once(cfg: Dict) -> None:
             last_size = item.get("last_size")
             last_signature = item.get("tree_signature")
             last_changed = item.get("last_changed", now())
-            wait_status, wait_reason, pending_task = source_readiness_blocker(candidate, size, cd2_status)
+            wait_status, wait_reason, pending_task = source_readiness_blocker(candidate, size, cd2_status, cfg)
             if wait_status:
                 item["last_size"] = max(0, size)
                 item["tree_signature"] = signature
@@ -1516,6 +1540,7 @@ def index():
         items = ordered_items[:5]
         history_items = ordered_items
     safe_cfg = sanitize_config(cfg)
+    safe_cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
     return render_template_string(PAGE, cfg=safe_cfg, state=snapshot, items=items, history_items=history_items, events=events, status_label=status_label, badge_class=badge_class, format_size=format_size)
 
 
@@ -1538,6 +1563,9 @@ def settings():
     cfg["cd2_require_mount"] = "cd2_require_mount" in request.form
     cfg["cd2_mount_root"] = request.form.get("cd2_mount_root", cfg.get("cd2_mount_root", "/CloudNAS")).strip()
     cfg["cd2_target_dir"] = request.form.get("cd2_target_dir", cfg.get("cd2_target_dir", "/CloudNAS/CloudDrive/00-未整理/00-mkiso")).strip()
+    aliases = parse_cd2_path_alias_lines(request.form.get("cd2_path_aliases_text", cfg.get("cd2_path_aliases_text", "")))
+    cfg["cd2_path_aliases"] = aliases or cd2_path_aliases_from_cfg(DEFAULT_CONFIG)
+    cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
     cfg["cd2_api_enabled"] = "cd2_api_enabled" in request.form
     cfg["cd2_auth_mode"] = cd2_auth_mode_from_cfg({"cd2_auth_mode": request.form.get("cd2_auth_mode", cfg.get("cd2_auth_mode", "api_token"))})
     cfg["cd2_api_addr"] = normalize_cd2_api_addr(request.form.get("cd2_api_addr", cfg.get("cd2_api_addr", "host.docker.internal:19798")))
@@ -1612,7 +1640,7 @@ def rerun_item():
         return jsonify({"ok": False, "message": f"\u8be5\u8def\u5f84\u4e0d\u9700\u8981\u5c01\u88c5: {pack_reason}"}), 400
     source_size = size_of(source)
     _, cd2_status = fetch_cd2_uploads(cfg)
-    wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status)
+    wait_status, wait_reason, pending_task = source_readiness_blocker(source, source_size, cd2_status, cfg)
     if wait_status:
         mark_source_waiting(source, wait_status, wait_reason, source_size, pending_task)
         return jsonify({"ok": False, "message": wait_reason}), 409
@@ -1647,7 +1675,9 @@ def api_status():
     if snapshot_active:
         snapshot["active"] = apply_task_timings(dict(snapshot_active), snapshot_active)
     snapshot["cd2_status"] = cd2_status
-    return jsonify({"config": sanitize_config(cfg), "state": snapshot, "cd2_status": cd2_status})
+    safe_cfg = sanitize_config(cfg)
+    safe_cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
+    return jsonify({"config": safe_cfg, "state": snapshot, "cd2_status": cd2_status})
 
 
 @app.route("/api/directories")

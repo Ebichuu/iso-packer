@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterable, List, Optional
 
 DEFAULT_CONFIG = {
     "watch_dir": "/watch",
@@ -23,6 +23,9 @@ DEFAULT_CONFIG = {
     "cd2_api_username": "",
     "cd2_api_password": "",
     "cd2_queue_poll_seconds": 10,
+    "cd2_path_aliases": [
+        {"local": "/CloudNAS/CloudDrive", "remote": "/115"},
+    ],
 }
 
 PARTIAL_EXTENSIONS = {
@@ -114,6 +117,89 @@ def normalize_cd2_api_addr(value: str) -> str:
     addr = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", addr)
     addr = addr.split("/", 1)[0].rstrip("/")
     return addr
+
+
+def normalize_path_text(path: str) -> str:
+    value = str(path or "").strip().replace("\\", "/")
+    value = re.sub(r"/+", "/", value)
+    if len(value) > 1:
+        value = value.rstrip("/")
+    return value
+
+
+def parse_cd2_path_alias_lines(value: str) -> List[Dict[str, str]]:
+    aliases = []
+    for raw in str(value or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            local, remote = line.split("=", 1)
+        elif "=>" in line:
+            local, remote = line.split("=>", 1)
+        elif "," in line:
+            local, remote = line.split(",", 1)
+        else:
+            continue
+        local = normalize_path_text(local)
+        remote = normalize_path_text(remote)
+        if local and remote:
+            aliases.append({"local": local, "remote": remote})
+    return dedupe_cd2_path_aliases(aliases)
+
+
+def dedupe_cd2_path_aliases(aliases: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
+    result = []
+    seen = set()
+    for alias in aliases or []:
+        local = normalize_path_text((alias or {}).get("local"))
+        remote = normalize_path_text((alias or {}).get("remote"))
+        if not local or not remote:
+            continue
+        key = (local.lower(), remote.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"local": local, "remote": remote})
+    return result
+
+
+def cd2_path_aliases_from_cfg(cfg: Dict) -> List[Dict[str, str]]:
+    aliases = (cfg or {}).get("cd2_path_aliases")
+    if isinstance(aliases, str):
+        aliases = parse_cd2_path_alias_lines(aliases)
+    return dedupe_cd2_path_aliases(aliases or DEFAULT_CONFIG["cd2_path_aliases"])
+
+
+def cd2_path_aliases_to_text(cfg: Dict) -> str:
+    return "\n".join(
+        f"{alias['local']}={alias['remote']}"
+        for alias in cd2_path_aliases_from_cfg(cfg)
+    )
+
+
+def alias_variants_for_path(path: str, aliases: Iterable[Dict[str, str]]) -> List[str]:
+    normalized = normalize_path_text(path)
+    variants = [normalized] if normalized else []
+    lowered = normalized.lower()
+    for alias in aliases or []:
+        local = normalize_path_text((alias or {}).get("local"))
+        remote = normalize_path_text((alias or {}).get("remote"))
+        for source, target in ((local, remote), (remote, local)):
+            source_lower = source.lower()
+            if lowered == source_lower:
+                variants.append(target)
+            elif lowered.startswith(source_lower + "/"):
+                variants.append(target + normalized[len(source):])
+    result = []
+    seen = set()
+    for value in variants:
+        value = normalize_path_text(value)
+        key = value.lower()
+        if value and key not in seen:
+            seen.add(key)
+            result.append(value)
+    return result
 
 
 def cd2_client_key_from_cfg(cfg: Dict):

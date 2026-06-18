@@ -215,6 +215,7 @@ class AppRouteTests(unittest.TestCase):
             "cd2_api_username": "user",
             "cd2_api_password": "secret",
             "cd2_queue_poll_seconds": "10",
+            "cd2_path_aliases_text": f"{self.data_dir / 'CloudNAS' / 'CloudDrive'}=/115",
             "enabled": "on",
             "delete_source_after_success": "on",
             "cd2_transfer_enabled": "on",
@@ -225,6 +226,7 @@ class AppRouteTests(unittest.TestCase):
         cfg = app_module.load_config()
         self.assertEqual(cfg["cd2_auth_mode"], "password")
         self.assertEqual(cfg["cd2_api_addr"], "127.0.0.1:19798")
+        self.assertEqual(cfg["cd2_path_aliases"][0]["remote"], "/115")
 
     def test_has_partial_files_detects_cd2_temp_files(self):
         source = self.watch / "Disc"
@@ -444,16 +446,23 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("下载任务读取失败", status["last_error"])
         self.assertEqual([], status["downloads"])
 
-    def test_cd2_upload_matches_cloudnas_target_by_relative_suffix(self):
+    def test_cd2_upload_matches_cloudnas_target_by_alias(self):
         source_key = str(self.watch / "Movie")
         target = self.cd2 / "Movie.iso"
         upload = {
             "path": "/115/00-未整理/00-mkiso/Movie.iso",
             "human": "42.0%",
         }
+        other_upload = {
+            "path": "/115/Other/Movie.iso",
+            "human": "10.0%",
+        }
         cfg = self.scan_config(
-            cd2_mount_root=str(self.data_dir / "CloudNAS" / "CloudDrive"),
+            cd2_mount_root=str(self.data_dir / "CloudNAS"),
             cd2_target_dir=str(self.cd2),
+            cd2_path_aliases=[
+                {"local": str(self.data_dir / "CloudNAS" / "CloudDrive"), "remote": "/115"}
+            ],
         )
         items = {
             source_key: {
@@ -463,8 +472,11 @@ class AppRouteTests(unittest.TestCase):
         }
 
         with mock.patch.object(app_module, "fetch_cd2_uploads", return_value=(
-            {app_module.normalize_upload_path(upload["path"]): upload},
-            {"uploads": [upload]},
+            {
+                app_module.normalize_upload_path(other_upload["path"]): other_upload,
+                app_module.normalize_upload_path(upload["path"]): upload,
+            },
+            {"uploads": [other_upload, upload]},
         )):
             enriched, active, _ = app_module.attach_cd2_uploads(cfg, items, None)
 
