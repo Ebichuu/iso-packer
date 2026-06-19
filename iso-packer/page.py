@@ -1912,6 +1912,19 @@ function formatCd2Status(status) {
   return parts.join(" / ") || "--";
 }
 
+function formatCd2AutoPullStatus(cd2State) {
+  const result = cd2State && cd2State.auto_pull && cd2State.auto_pull.last_result;
+  if(!result) return "";
+  if(result.created) {
+    return "自动拉取已创建 " + (result.source_path || result.local_path || "");
+  }
+  if(result.candidate_count != null) {
+    const suffix = result.skipped && result.skipped.length ? "，跳过 " + result.skipped.length + " 个" : "";
+    return "自动拉取未创建，候选 " + result.candidate_count + " 个" + suffix + (result.message ? "，" + result.message : "");
+  }
+  return result.message ? "自动拉取：" + result.message : "";
+}
+
 function statusBadgeText(status, item={}) {
   if (status === "running") return "\u6b63\u5728\u5c01\u88c5";
   if (status === "transferring") return "\u6b63\u5728\u79fb\u52a8\u5230 CD2";
@@ -2417,7 +2430,10 @@ async function refresh(){
       $("active-cd2-upload").textContent = state.cd2_status.human || state.cd2_status.status || "--";
     }
     if($("cd2-status-detail")) {
-      $("cd2-status-detail").textContent = formatCd2Status(state.cd2_status || data.cd2_status);
+      const cd2Parts = [formatCd2Status(state.cd2_status || data.cd2_status)];
+      const autoPullText = formatCd2AutoPullStatus(state.cd2 || {});
+      if(autoPullText) cd2Parts.push(autoPullText);
+      $("cd2-status-detail").textContent = cd2Parts.filter(Boolean).join(" / ");
     }
     if(!state.active && firstItem && $("active-duration")) {
       $("active-duration").textContent = pickTiming(firstItem);

@@ -139,6 +139,14 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("function renderTableProgress", script)
         self.assertIn("cells[3].innerHTML = renderTableProgress", script)
 
+    def test_dashboard_shows_cd2_auto_pull_status(self):
+        match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        self.assertIn("function formatCd2AutoPullStatus", script)
+        self.assertIn("formatCd2AutoPullStatus(state.cd2 || {})", script)
+        self.assertIn("自动拉取已创建", script)
+
     def test_cd2_api_token_auth_uses_bearer_token(self):
         class FakeUploadResult:
             totalCount = 0
