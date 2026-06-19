@@ -1549,6 +1549,85 @@ class AppRouteTests(unittest.TestCase):
         self.assertNotIn("last_error", item)
         self.assertNotIn("cd2_source_task", item)
 
+    def test_process_item_records_pack_failure_code(self):
+        source = self.make_bdmv("PackFailure", complete=True)
+        result = app_module.subprocess.CompletedProcess(["genisoimage"], 1, "", "genisoimage failed")
+
+        with mock.patch.object(app_module, "run_iso", return_value=result):
+            app_module.process_item(source, self.scan_config())
+
+        item = app_module.state["items"][str(source)]
+        self.assertEqual(item["status"], "failed")
+        self.assertEqual(item["failure_code"], "pack_failed")
+        self.assertEqual(item["failure_label"], "封装失败")
+        self.assertIn("genisoimage failed", item["error"])
+
+    def test_process_item_records_verify_failure_code(self):
+        source = self.make_bdmv("VerifyFailure", complete=True)
+
+        def fake_run_iso(_source, target, _size):
+            target.write_bytes(b"not-an-iso")
+            return app_module.subprocess.CompletedProcess(["genisoimage"], 0, "", "")
+
+        with mock.patch.object(app_module, "run_iso", side_effect=fake_run_iso), \
+             mock.patch.object(app_module, "validate_iso", return_value=False):
+            app_module.process_item(source, self.scan_config())
+
+        item = app_module.state["items"][str(source)]
+        self.assertEqual(item["status"], "verify_failed")
+        self.assertEqual(item["failure_code"], "verify_failed")
+        self.assertEqual(item["failure_label"], "校验失败")
+
+    def test_process_item_records_transfer_failure_code(self):
+        source = self.make_bdmv("TransferFailure", complete=True)
+
+        def fake_run_iso(_source, target, _size):
+            target.write_bytes(b"iso")
+            return app_module.subprocess.CompletedProcess(["genisoimage"], 0, "", "")
+
+        cfg = self.scan_config(cd2_transfer_enabled=True)
+        with mock.patch.object(app_module, "run_iso", side_effect=fake_run_iso), \
+             mock.patch.object(app_module, "validate_iso", return_value=True), \
+             mock.patch.object(app_module, "transfer_iso_to_mount", return_value=None):
+            app_module.process_item(source, cfg)
+
+        item = app_module.state["items"][str(source)]
+        self.assertEqual(item["status"], "transfer_failed")
+        self.assertEqual(item["failure_code"], "transfer_failed")
+        self.assertEqual(item["failure_label"], "CD2 转移失败")
+
+    def test_process_item_records_insufficient_space_code_without_terminal_failure(self):
+        source = self.make_bdmv("SpaceFailure", complete=True)
+        key = str(source)
+        app_module.state["items"][key] = {"status": "ready", "pack_iso": True}
+
+        app_module.process_item(source, self.scan_config(min_free_space_gb=10**9))
+
+        item = app_module.state["items"][key]
+        self.assertEqual(item["status"], "ready")
+        self.assertEqual(item["failure_code"], "insufficient_space")
+        self.assertEqual(item["failure_label"], "空间不足")
+
+    def test_process_item_records_delete_source_warning_without_failing_task(self):
+        source = self.make_bdmv("DeleteWarning", complete=True)
+
+        def fake_run_iso(_source, target, _size):
+            target.write_bytes(b"iso")
+            return app_module.subprocess.CompletedProcess(["genisoimage"], 0, "", "")
+
+        cfg = self.scan_config(delete_source_after_success=True)
+        with mock.patch.object(app_module, "run_iso", side_effect=fake_run_iso), \
+             mock.patch.object(app_module, "validate_iso", return_value=True), \
+             mock.patch.object(app_module.shutil, "rmtree", side_effect=PermissionError("denied")):
+            app_module.process_item(source, cfg)
+
+        item = app_module.state["items"][str(source)]
+        self.assertEqual(item["status"], "done")
+        self.assertNotIn("failure_code", item)
+        self.assertEqual(item["warning_code"], "delete_source_failed")
+        self.assertEqual(item["warning_label"], "源文件删除失败")
+        self.assertIn("denied", item["warning_message"])
+
     def test_scan_once_waits_when_cd2_copy_or_download_task_matches_candidate(self):
         source = self.make_bdmv("PendingFromCD2", complete=True)
         key = self.mark_candidate_stable(source)

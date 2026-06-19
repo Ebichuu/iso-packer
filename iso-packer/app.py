@@ -85,6 +85,16 @@ CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS = 30
 CD2_WEBHOOK_EVENT_LIMIT = 50
 CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS = 600
 CD2_UPLOAD_MATCH_MODES = {"alias_then_suffix", "alias_only"}
+FAILURE_LABELS = {
+    "insufficient_space": "空间不足",
+    "pack_failed": "封装失败",
+    "verify_failed": "校验失败",
+    "transfer_failed": "CD2 转移失败",
+    "unexpected_error": "任务异常",
+}
+WARNING_LABELS = {
+    "delete_source_failed": "源文件删除失败",
+}
 DIRECTORY_PICKER_ROOT = "@roots"
 DIRECTORY_PICKER_SCOPES = {
     "watch_dir": ("watch_dir",),
@@ -323,6 +333,30 @@ def cd2_cache_status_fields(cfg: Dict, checked_at: Optional[str], cache_hit: boo
         "cache_expires_at": expires_at,
         "cache_human": cache_human,
     }
+
+
+def set_failure(item: Dict, code: str, message: Optional[str] = None) -> None:
+    item["failure_code"] = code
+    item["failure_label"] = FAILURE_LABELS.get(code, code)
+    if message is not None:
+        item["error"] = message
+
+
+def clear_failure(item: Dict) -> None:
+    item.pop("failure_code", None)
+    item.pop("failure_label", None)
+
+
+def set_warning(item: Dict, code: str, message: str) -> None:
+    item["warning_code"] = code
+    item["warning_label"] = WARNING_LABELS.get(code, code)
+    item["warning_message"] = message
+
+
+def clear_warning(item: Dict) -> None:
+    item.pop("warning_code", None)
+    item.pop("warning_label", None)
+    item.pop("warning_message", None)
 
 
 def cd2_webhook_secret_matches(cfg: Dict) -> bool:
@@ -2141,6 +2175,11 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
 
     if not enough_space(output_dir, source_size, float(cfg["min_free_space_gb"])):
         log(f"空间不足，暂停处理 {source}")
+        with lock:
+            item = state["items"].setdefault(str(source), {})
+            set_failure(item, "insufficient_space", "空间不足，暂停处理")
+            item["last_changed"] = now()
+            save_state_locked()
         return
 
     target = iso_path_for(source, output_dir)
@@ -2166,6 +2205,8 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
             item.pop("error", None)
             item.pop("reason", None)
             item.pop("last_error", None)
+            clear_failure(item)
+            clear_warning(item)
             item.pop("cd2_source_task", None)
             state["active"] = {
                 "source": str(source),
@@ -2196,7 +2237,7 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
                 state["active"] = None
                 item = state["items"].setdefault(str(source), {})
                 item["status"] = "failed"
-                item["error"] = error
+                set_failure(item, "pack_failed", error)
                 item["pack_finished_at"] = now()
                 item["finished_at"] = now()
                 item["last_changed"] = now()
@@ -2210,7 +2251,7 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
                 state["active"] = None
                 item = state["items"].setdefault(str(source), {})
                 item["status"] = "verify_failed"
-                item["error"] = "xorriso 校验失败"
+                set_failure(item, "verify_failed", "xorriso 校验失败")
                 item["pack_finished_at"] = now()
                 item["finished_at"] = now()
                 item["last_changed"] = now()
@@ -2246,13 +2287,13 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
                     item.update({
                         "status": "transfer_failed",
                         "target": str(target),
-                        "error": "移动到 CD2 挂载目录失败",
                         "done_at": transfer_finished_at,
                         "finished_at": transfer_finished_at,
                         "pack_finished_at": item.get("pack_finished_at") or transfer_finished_at,
                         "transfer_finished_at": transfer_finished_at,
                         "size": source_size,
                     })
+                    set_failure(item, "transfer_failed", "移动到 CD2 挂载目录失败")
                     item["last_changed"] = now()
                     state["active"] = None
                     save_state_locked()
@@ -2263,6 +2304,7 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
             transfer_finished_at = None
 
         if cfg.get("delete_source_after_success"):
+            delete_source_error = None
             try:
                 if source.is_dir():
                     shutil.rmtree(source)
@@ -2270,7 +2312,10 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
                     source.unlink()
                 log(f"已删除源文件: {source}")
             except Exception as exc:
+                delete_source_error = str(exc)
                 log(f"删除源文件失败 {source}: {exc}")
+        else:
+            delete_source_error = None
 
         with lock:
             item = state["items"].setdefault(str(source), {})
@@ -2302,6 +2347,11 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
                 update["finished_at"] = finished_at
                 item.pop("error", None)
             item.update(update)
+            clear_failure(item)
+            if delete_source_error:
+                set_warning(item, "delete_source_failed", delete_source_error)
+            else:
+                clear_warning(item)
             state["active"] = None
             save_state_locked()
     except Exception as exc:
@@ -2317,7 +2367,7 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
             if item.get("status") not in TERMINAL_STATUSES:
                 failed_at = now()
                 item["status"] = "failed"
-                item["error"] = str(exc)
+                set_failure(item, "unexpected_error", str(exc))
                 item["pack_finished_at"] = item.get("pack_finished_at") or failed_at
                 item["finished_at"] = failed_at
                 item["last_changed"] = failed_at

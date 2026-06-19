@@ -1512,7 +1512,7 @@ tr:hover td { background: #fff8f7; }
               <td class="small-muted">-</td>
               <td class="small-muted">{{item.timings.human if item.timings and item.timings.human else (item.timings.duration if item.timings and item.timings.duration else '-')}}</td>
               <td class="small-muted">{{item.cd2_upload.human if item.cd2_upload and item.cd2_upload.human else '-'}}</td>
-              <td class="small-muted">{{item.error or '-'}}</td>
+              <td class="small-muted">{{((item.failure_label ~ (': ' ~ item.error if item.error else '')) if item.failure_label else ((item.warning_label ~ (': ' ~ item.warning_message if item.warning_message else '')) if item.warning_label else (item.error or '-')))}}</td>
               <td><span class="target-text" title="{{item.target or '-'}}">{{item.target or '-'}}</span></td>
             </tr>
             {% endfor %}
@@ -1552,7 +1552,7 @@ tr:hover td { background: #fff8f7; }
               <td class="small-muted">-</td>
               <td class="small-muted">{{item.timings.human if item.timings and item.timings.human else (item.timings.duration if item.timings and item.timings.duration else '-')}}</td>
               <td class="small-muted">{{item.cd2_upload.human if item.cd2_upload and item.cd2_upload.human else '-'}}</td>
-              <td class="small-muted">{{item.error or '-'}}</td>
+              <td class="small-muted">{{((item.failure_label ~ (': ' ~ item.error if item.error else '')) if item.failure_label else ((item.warning_label ~ (': ' ~ item.warning_message if item.warning_message else '')) if item.warning_label else (item.error or '-')))}}</td>
               <td><span class="target-text" title="{{item.target or '-'}}">{{item.target or '-'}}</span></td>
               <td><button class="rerun-btn" type="button" data-rerun-source="{{key}}" {% if state.active %}disabled{% endif %}>{% if state.active %}任务运行中{% else %}重新封装{% endif %}</button></td>
             </tr>
@@ -1926,6 +1926,14 @@ function pickCd2Upload(item) {
 }
 
 function pickErrorReason(item) {
+  if(item && item.failure_label) {
+    const detail = item.error || item.reason || item.last_error || "";
+    return detail ? String(item.failure_label) + ": " + String(detail) : String(item.failure_label);
+  }
+  if(item && item.warning_label) {
+    const detail = item.warning_message || item.error || "";
+    return detail ? String(item.warning_label) + ": " + String(detail) : String(item.warning_label);
+  }
   const value = (item && (item.error || item.reason || item.last_error)) || "";
   return value ? String(value) : "-";
 }
