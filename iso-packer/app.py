@@ -855,6 +855,9 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
         "candidate_count": len(payload.get("candidates") or []),
         "message": payload.get("message") or "",
         "created": False,
+        "created_count": 0,
+        "created_tasks": [],
+        "max_tasks_per_scan": int_config(cfg, "cd2_auto_pull_max_tasks_per_scan", DEFAULT_CONFIG["cd2_auto_pull_max_tasks_per_scan"], minimum=1),
         "skipped": [],
     }
     if not payload.get("ok"):
@@ -865,23 +868,36 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
         return result
 
     for candidate in payload.get("candidates") or []:
+        if result["created_count"] >= result["max_tasks_per_scan"]:
+            break
         source_path = normalize_path_text(candidate.get("path"))
         if not source_path:
             continue
         created, status_code = create_cd2_pull_task(cfg, source_path, mode="auto", cd2_status=cd2_status)
         if created.get("ok"):
-            result.update(created)
+            if result["created_count"] == 0:
+                result.update(created)
             result["created"] = True
+            result["created_count"] += 1
+            result["created_tasks"].append({
+                "source_path": created.get("source_path") or source_path,
+                "dest_dir": created.get("dest_dir") or "",
+                "local_path": created.get("local_path") or "",
+                "disc_type": created.get("disc_type") or "",
+                "status_code": status_code,
+            })
             result["status_code"] = status_code
             log(f"CD2 自动拉取已创建: {source_path} -> {created.get('dest_dir')}")
-            break
+            continue
         result["skipped"].append({
             "source_path": source_path,
             "status_code": status_code,
             "message": created.get("message") or "",
         })
 
-    if not result["created"] and result["skipped"]:
+    if result["created"]:
+        result["message"] = f"本轮已创建 {result['created_count']} 个 CD2 自动拉取任务"
+    elif result["skipped"]:
         result["message"] = result["skipped"][0].get("message") or result["message"]
     with lock:
         cd2_state = state.setdefault("cd2", {})
@@ -2402,6 +2418,7 @@ def settings():
         cfg["cd2_event_dedupe_ttl_seconds"] = parse_int_form("cd2_event_dedupe_ttl_seconds", cfg.get("cd2_event_dedupe_ttl_seconds", 600), minimum=0)
         cfg["cd2_confirm_delay_seconds"] = parse_int_form("cd2_confirm_delay_seconds", cfg.get("cd2_confirm_delay_seconds", 30), minimum=0)
         cfg["cd2_confirm_stable_checks"] = parse_int_form("cd2_confirm_stable_checks", cfg.get("cd2_confirm_stable_checks", 1), minimum=1)
+        cfg["cd2_auto_pull_max_tasks_per_scan"] = parse_int_form("cd2_auto_pull_max_tasks_per_scan", cfg.get("cd2_auto_pull_max_tasks_per_scan", 1), minimum=1)
         cfg["cd2_auto_pull_failure_cooldown_seconds"] = parse_int_form("cd2_auto_pull_failure_cooldown_seconds", cfg.get("cd2_auto_pull_failure_cooldown_seconds", CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS), minimum=0)
     except ValueError as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400

@@ -1285,6 +1285,11 @@ tr:hover td { background: #fff8f7; }
           <span>启用 CD2 自动拉取</span>
         </label>
         <div class="form-group">
+          <label>每轮自动拉取任务数</label>
+          <input name="cd2_auto_pull_max_tasks_per_scan" type="number" min="1" value="{{cfg.cd2_auto_pull_max_tasks_per_scan}}">
+          <div class="settings-help">默认 1，调大后每次扫描可连续创建多个 CD2 拉取任务。</div>
+        </div>
+        <div class="form-group">
           <label>自动拉取失败冷却秒数</label>
           <input name="cd2_auto_pull_failure_cooldown_seconds" type="number" min="0" value="{{cfg.cd2_auto_pull_failure_cooldown_seconds}}">
         </div>
@@ -1929,6 +1934,7 @@ function formatCd2AutoPullStatus(cd2State) {
   const result = cd2State && cd2State.auto_pull && cd2State.auto_pull.last_result;
   if(!result) return "";
   if(result.created) {
+    if(Number(result.created_count || 0) > 1) return "自动拉取本轮已创建 " + result.created_count + " 个任务";
     return "自动拉取已创建 " + (result.source_path || result.local_path || "");
   }
   if(result.candidate_count != null) {

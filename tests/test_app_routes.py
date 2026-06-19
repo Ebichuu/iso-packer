@@ -634,6 +634,74 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(item["cd2_pull_mode"], "auto")
         self.assertEqual(item["cd2_pull_source"], "/115/03-PT/MovieBD")
         self.assertTrue(app_module.state["cd2"]["auto_pull"]["last_result"]["created"])
+        self.assertEqual(app_module.state["cd2"]["auto_pull"]["last_result"]["created_count"], 1)
+
+    def test_cd2_auto_pull_respects_max_tasks_per_scan(self):
+        class FakeFile:
+            def __init__(self, name, full_path, is_dir=True):
+                self.name = name
+                self.fullPathName = full_path
+                self.isDirectory = is_dir
+
+        class FakeResult:
+            success = True
+            errorMessage = ""
+            resultFilePaths = []
+
+        class FakeCloudDriveClient:
+            copy_calls = []
+
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                data = {
+                    "/115/03-PT": [
+                        FakeFile("MovieA", "/115/03-PT/MovieA"),
+                        FakeFile("MovieB", "/115/03-PT/MovieB"),
+                        FakeFile("MovieC", "/115/03-PT/MovieC"),
+                    ],
+                    "/115/03-PT/MovieA": [FakeFile("BDMV", "/115/03-PT/MovieA/BDMV")],
+                    "/115/03-PT/MovieB": [FakeFile("BDMV", "/115/03-PT/MovieB/BDMV")],
+                    "/115/03-PT/MovieC": [FakeFile("BDMV", "/115/03-PT/MovieC/BDMV")],
+                }
+                return data.get(path, [])
+
+            def copy_file(self, paths, dest_path):
+                self.copy_calls.append((list(paths), dest_path))
+                return FakeResult()
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_remote_source_dirs=["/115/03-PT"],
+            cd2_auto_pull_enabled=True,
+            cd2_auto_pull_max_tasks_per_scan=2,
+            cd2_local_pull_dir=str(self.watch),
+            cd2_remote_pull_dest_dir="/115/Downloads",
+        )
+
+        with mock.patch.object(app_module, "fetch_cd2_uploads", return_value=({}, {"connected": True, "downloads": [], "copy_tasks": []})), \
+             mock.patch.object(app_module, "process_item") as process_item:
+            app_module.scan_once(cfg)
+
+        process_item.assert_not_called()
+        self.assertEqual(FakeCloudDriveClient.copy_calls, [
+            (["/115/03-PT/MovieA"], "/115/Downloads"),
+            (["/115/03-PT/MovieB"], "/115/Downloads"),
+        ])
+        result = app_module.state["cd2"]["auto_pull"]["last_result"]
+        self.assertTrue(result["created"])
+        self.assertEqual(result["created_count"], 2)
+        self.assertEqual(len(result["created_tasks"]), 2)
+        self.assertIn("本轮已创建 2 个", result["message"])
 
     def test_cd2_auto_pull_does_not_duplicate_existing_source(self):
         class FakeFile:
@@ -921,6 +989,7 @@ class AppRouteTests(unittest.TestCase):
             "cd2_event_dedupe_ttl_seconds": "60",
             "cd2_confirm_delay_seconds": "15",
             "cd2_confirm_stable_checks": "2",
+            "cd2_auto_pull_max_tasks_per_scan": "3",
             "cd2_auto_pull_failure_cooldown_seconds": "30",
             "cd2_refresh_enabled": "on",
             "cd2_refresh_after_source_event": "on",
@@ -955,6 +1024,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(cfg["cd2_event_dedupe_ttl_seconds"], 60)
         self.assertEqual(cfg["cd2_confirm_delay_seconds"], 15)
         self.assertEqual(cfg["cd2_confirm_stable_checks"], 2)
+        self.assertEqual(cfg["cd2_auto_pull_max_tasks_per_scan"], 3)
         self.assertEqual(cfg["cd2_auto_pull_failure_cooldown_seconds"], 30)
         self.assertTrue(cfg["cd2_refresh_enabled"])
         self.assertTrue(cfg["cd2_refresh_after_source_event"])
