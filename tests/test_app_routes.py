@@ -200,6 +200,15 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("data-remote-select-path", script)
         self.assertIn("selectedVisibleRemotePaths", script)
 
+    def test_dashboard_shows_failure_suggestions(self):
+        match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        self.assertIn("failureSuggestions", script)
+        self.assertIn("warningSuggestions", script)
+        self.assertIn("建议：", script)
+        self.assertIn("issue_text(item)", page_module.PAGE)
+
     def test_dashboard_shows_cd2_cache_status(self):
         match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
         self.assertIsNotNone(match)
@@ -1582,6 +1591,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(item["status"], "failed")
         self.assertEqual(item["failure_code"], "pack_failed")
         self.assertEqual(item["failure_label"], "封装失败")
+        self.assertIn("genisoimage", item["failure_suggestion"])
         self.assertIn("genisoimage failed", item["error"])
 
     def test_process_item_records_verify_failure_code(self):
@@ -1599,6 +1609,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(item["status"], "verify_failed")
         self.assertEqual(item["failure_code"], "verify_failed")
         self.assertEqual(item["failure_label"], "校验失败")
+        self.assertIn("xorriso", item["failure_suggestion"])
 
     def test_process_item_records_transfer_failure_code(self):
         source = self.make_bdmv("TransferFailure", complete=True)
@@ -1617,6 +1628,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(item["status"], "transfer_failed")
         self.assertEqual(item["failure_code"], "transfer_failed")
         self.assertEqual(item["failure_label"], "CD2 转移失败")
+        self.assertIn("CD2 挂载目录", item["failure_suggestion"])
 
     def test_process_item_records_insufficient_space_code_without_terminal_failure(self):
         source = self.make_bdmv("SpaceFailure", complete=True)
@@ -1629,6 +1641,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(item["status"], "ready")
         self.assertEqual(item["failure_code"], "insufficient_space")
         self.assertEqual(item["failure_label"], "空间不足")
+        self.assertIn("清理输出目录", item["failure_suggestion"])
 
     def test_process_item_records_delete_source_warning_without_failing_task(self):
         source = self.make_bdmv("DeleteWarning", complete=True)
@@ -1648,6 +1661,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertNotIn("failure_code", item)
         self.assertEqual(item["warning_code"], "delete_source_failed")
         self.assertEqual(item["warning_label"], "源文件删除失败")
+        self.assertIn("手动检查源目录", item["warning_suggestion"])
         self.assertIn("denied", item["warning_message"])
 
     def test_scan_once_waits_when_cd2_copy_or_download_task_matches_candidate(self):

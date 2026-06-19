@@ -1539,7 +1539,7 @@ tr:hover td { background: #fff8f7; }
               <td class="small-muted">-</td>
               <td class="small-muted">{{item.timings.human if item.timings and item.timings.human else (item.timings.duration if item.timings and item.timings.duration else '-')}}</td>
               <td class="small-muted">{{item.cd2_upload.human if item.cd2_upload and item.cd2_upload.human else '-'}}</td>
-              <td class="small-muted">{{((item.failure_label ~ (': ' ~ item.error if item.error else '')) if item.failure_label else ((item.warning_label ~ (': ' ~ item.warning_message if item.warning_message else '')) if item.warning_label else (item.error or '-')))}}</td>
+              <td class="small-muted">{{issue_text(item)}}</td>
               <td><span class="target-text" title="{{item.target or '-'}}">{{item.target or '-'}}</span></td>
             </tr>
             {% endfor %}
@@ -1579,7 +1579,7 @@ tr:hover td { background: #fff8f7; }
               <td class="small-muted">-</td>
               <td class="small-muted">{{item.timings.human if item.timings and item.timings.human else (item.timings.duration if item.timings and item.timings.duration else '-')}}</td>
               <td class="small-muted">{{item.cd2_upload.human if item.cd2_upload and item.cd2_upload.human else '-'}}</td>
-              <td class="small-muted">{{((item.failure_label ~ (': ' ~ item.error if item.error else '')) if item.failure_label else ((item.warning_label ~ (': ' ~ item.warning_message if item.warning_message else '')) if item.warning_label else (item.error or '-')))}}</td>
+              <td class="small-muted">{{issue_text(item)}}</td>
               <td><span class="target-text" title="{{item.target or '-'}}">{{item.target or '-'}}</span></td>
               <td><button class="rerun-btn" type="button" data-rerun-source="{{key}}" {% if state.active %}disabled{% endif %}>{% if state.active %}任务运行中{% else %}重新封装{% endif %}</button></td>
             </tr>
@@ -1963,14 +1963,32 @@ function pickCd2Upload(item) {
   return "--";
 }
 
+const failureSuggestions = {
+  insufficient_space: "清理输出目录或降低最小空间阈值后等待下轮扫描。",
+  pack_failed: "查看系统日志里的 genisoimage 错误，确认原盘结构完整且路径可读。",
+  verify_failed: "保留源目录和 ISO，优先检查 xorriso 是否可用以及输出文件是否完整。",
+  transfer_failed: "检查 CD2 挂载目录、目标路径权限和磁盘空间后重新封装。",
+  unexpected_error: "查看系统日志里的异常堆栈，确认后可手动重新封装。"
+};
+
+const warningSuggestions = {
+  delete_source_failed: "ISO 已完成，手动检查源目录占用或权限后再删除。"
+};
+
 function pickErrorReason(item) {
   if(item && item.failure_label) {
     const detail = item.error || item.reason || item.last_error || "";
-    return detail ? String(item.failure_label) + ": " + String(detail) : String(item.failure_label);
+    const suggestion = item.failure_suggestion || failureSuggestions[item.failure_code] || "";
+    const parts = [detail ? String(item.failure_label) + ": " + String(detail) : String(item.failure_label)];
+    if(suggestion) parts.push("建议：" + String(suggestion));
+    return parts.join("；");
   }
   if(item && item.warning_label) {
     const detail = item.warning_message || item.error || "";
-    return detail ? String(item.warning_label) + ": " + String(detail) : String(item.warning_label);
+    const suggestion = item.warning_suggestion || warningSuggestions[item.warning_code] || "";
+    const parts = [detail ? String(item.warning_label) + ": " + String(detail) : String(item.warning_label)];
+    if(suggestion) parts.push("建议：" + String(suggestion));
+    return parts.join("；");
   }
   const value = (item && (item.error || item.reason || item.last_error)) || "";
   return value ? String(value) : "-";

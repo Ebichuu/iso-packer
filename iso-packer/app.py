@@ -92,8 +92,18 @@ FAILURE_LABELS = {
     "transfer_failed": "CD2 转移失败",
     "unexpected_error": "任务异常",
 }
+FAILURE_SUGGESTIONS = {
+    "insufficient_space": "清理输出目录或降低最小空间阈值后等待下轮扫描。",
+    "pack_failed": "查看系统日志里的 genisoimage 错误，确认原盘结构完整且路径可读。",
+    "verify_failed": "保留源目录和 ISO，优先检查 xorriso 是否可用以及输出文件是否完整。",
+    "transfer_failed": "检查 CD2 挂载目录、目标路径权限和磁盘空间后重新封装。",
+    "unexpected_error": "查看系统日志里的异常堆栈，确认后可手动重新封装。",
+}
 WARNING_LABELS = {
     "delete_source_failed": "源文件删除失败",
+}
+WARNING_SUGGESTIONS = {
+    "delete_source_failed": "ISO 已完成，手动检查源目录占用或权限后再删除。",
 }
 DIRECTORY_PICKER_ROOT = "@roots"
 DIRECTORY_PICKER_SCOPES = {
@@ -338,6 +348,8 @@ def cd2_cache_status_fields(cfg: Dict, checked_at: Optional[str], cache_hit: boo
 def set_failure(item: Dict, code: str, message: Optional[str] = None) -> None:
     item["failure_code"] = code
     item["failure_label"] = FAILURE_LABELS.get(code, code)
+    if code in FAILURE_SUGGESTIONS:
+        item["failure_suggestion"] = FAILURE_SUGGESTIONS[code]
     if message is not None:
         item["error"] = message
 
@@ -345,18 +357,51 @@ def set_failure(item: Dict, code: str, message: Optional[str] = None) -> None:
 def clear_failure(item: Dict) -> None:
     item.pop("failure_code", None)
     item.pop("failure_label", None)
+    item.pop("failure_suggestion", None)
 
 
 def set_warning(item: Dict, code: str, message: str) -> None:
     item["warning_code"] = code
     item["warning_label"] = WARNING_LABELS.get(code, code)
     item["warning_message"] = message
+    if code in WARNING_SUGGESTIONS:
+        item["warning_suggestion"] = WARNING_SUGGESTIONS[code]
 
 
 def clear_warning(item: Dict) -> None:
     item.pop("warning_code", None)
     item.pop("warning_label", None)
     item.pop("warning_message", None)
+    item.pop("warning_suggestion", None)
+
+
+def with_issue_guidance(item: Dict) -> Dict:
+    copy = dict(item or {})
+    failure_code = copy.get("failure_code")
+    if failure_code and not copy.get("failure_suggestion") and failure_code in FAILURE_SUGGESTIONS:
+        copy["failure_suggestion"] = FAILURE_SUGGESTIONS[failure_code]
+    warning_code = copy.get("warning_code")
+    if warning_code and not copy.get("warning_suggestion") and warning_code in WARNING_SUGGESTIONS:
+        copy["warning_suggestion"] = WARNING_SUGGESTIONS[warning_code]
+    return copy
+
+
+def task_issue_text(item: Dict) -> str:
+    item = with_issue_guidance(item)
+    if item.get("failure_label"):
+        detail = item.get("error") or item.get("reason") or item.get("last_error") or ""
+        parts = [f"{item['failure_label']}: {detail}" if detail else str(item["failure_label"])]
+        if item.get("failure_suggestion"):
+            parts.append(f"建议：{item['failure_suggestion']}")
+        return "；".join(parts)
+    if item.get("warning_label"):
+        detail = item.get("warning_message") or item.get("error") or ""
+        parts = [f"{item['warning_label']}: {detail}" if detail else str(item["warning_label"])]
+        if item.get("warning_suggestion"):
+            parts.append(f"建议：{item['warning_suggestion']}")
+        return "；".join(parts)
+    value = item.get("error") or item.get("reason") or item.get("last_error") or ""
+    return str(value) if value else "-"
 
 
 def cd2_webhook_secret_matches(cfg: Dict) -> bool:
@@ -2506,7 +2551,7 @@ def scan_once(cfg: Dict) -> None:
 
 from page import PAGE, PAGE_LOGIN
 def visible_iso_items(items: Dict) -> Dict:
-    return {key: item for key, item in (items or {}).items() if item.get("pack_iso") is True}
+    return {key: with_issue_guidance(item) for key, item in (items or {}).items() if item.get("pack_iso") is True}
 
 
 def ordered_visible_items(items: Dict, active: Optional[Dict] = None):
@@ -2658,7 +2703,7 @@ def index():
     safe_cfg = sanitize_config(cfg)
     safe_cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
     safe_cfg["cd2_remote_source_dirs_text"] = cd2_remote_source_dirs_to_text(cfg)
-    return render_template_string(PAGE, cfg=safe_cfg, state=snapshot, items=items, history_items=history_items, events=events, status_label=status_label, badge_class=badge_class, format_size=format_size)
+    return render_template_string(PAGE, cfg=safe_cfg, state=snapshot, items=items, history_items=history_items, events=events, status_label=status_label, badge_class=badge_class, format_size=format_size, issue_text=task_issue_text)
 
 
 @app.route("/settings", methods=["POST"])
