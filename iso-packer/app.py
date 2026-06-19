@@ -605,7 +605,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
                 disc_type = "BDMV" if "bdmv" in names else ("VIDEO_TS" if "video_ts" in names else "")
                 if disc_type:
                     pull_status = cd2_remote_candidate_status(cfg, child_path)
-                    payload["candidates"].append({
+                    candidate = {
                         "name": cd2_file_name(child) or child_path.rsplit("/", 1)[-1],
                         "path": child_path,
                         "root": remote_root,
@@ -614,11 +614,14 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
                         "size": cd2_file_size(child),
                         "modified": cd2_file_mtime(child),
                         **pull_status,
-                    })
+                    }
+                    candidate["skip_reason"] = cd2_remote_candidate_skip_reason(candidate, cfg)
+                    payload["candidates"].append(candidate)
                     continue
                 if child_depth < scan_depth:
                     stack.append((child_path, child_depth, False))
     payload["candidate_count"] = len(payload["candidates"])
+    payload["summary"] = cd2_remote_candidate_summary(payload["candidates"])
     payload["message"] = f"发现 {payload['candidate_count']} 个远程原盘候选"
     if payload["errors"] and not payload["candidates"]:
         payload["ok"] = False
@@ -739,6 +742,35 @@ def cd2_auto_pull_filter_reason(candidate: Dict, cfg: Dict) -> str:
     if include_keywords and not any(keyword in text for keyword in include_keywords):
         return "未命中包含关键词"
     return ""
+
+
+def cd2_remote_candidate_skip_reason(candidate: Dict, cfg: Dict) -> str:
+    pull_state = (candidate or {}).get("pull_state") or "new"
+    if pull_state == "new":
+        return cd2_auto_pull_filter_reason(candidate, cfg)
+    if pull_state == "active":
+        return "已有拉取或封装任务"
+    if pull_state == "done":
+        return "已处理"
+    if pull_state == "recent_failure":
+        return "最近失败冷却中"
+    if pull_state in {"failed", "finished"}:
+        return (candidate or {}).get("pull_status_label") or "已结束"
+    return ""
+
+
+def cd2_remote_candidate_summary(candidates: list[Dict]) -> Dict:
+    summary = {"total": len(candidates), "pullable": 0, "skipped": 0, "by_state": {}, "by_skip_reason": {}}
+    for candidate in candidates:
+        state_name = candidate.get("pull_state") or "unknown"
+        summary["by_state"][state_name] = summary["by_state"].get(state_name, 0) + 1
+        reason = candidate.get("skip_reason") or ""
+        if reason:
+            summary["skipped"] += 1
+            summary["by_skip_reason"][reason] = summary["by_skip_reason"].get(reason, 0) + 1
+        else:
+            summary["pullable"] += 1
+    return summary
 
 
 def cd2_auto_pull_active_count() -> int:

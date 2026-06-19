@@ -2360,7 +2360,7 @@ function updateRemoteRows(items, pullEnabled=false) {
       <td><span class="browser-kind">${esc(item.disc_type || "-")}</span></td>
       <td><span class="target-text" title="${esc(item.path || "-")}">${esc(item.path || "-")}</span></td>
       <td><span class="target-text" title="${esc(item.root || "-")}">${esc(item.root || "-")}</span></td>
-      <td><span class="browser-kind" title="${esc(item.pull_error || item.local_path || "")}">${esc(status)}</span></td>
+      <td><span class="browser-kind" title="${esc(item.skip_reason || item.pull_error || item.local_path || "")}">${esc(status)}</span></td>
       <td>${action}</td>
     </tr>`;
   }).join("");
@@ -2396,6 +2396,7 @@ async function loadRemoteCandidates(force=false) {
     const payload = await fetchJson("/api/cd2/remote-candidates?force=" + (force ? "1" : "0") + "&_=" + Date.now());
     updateRemoteRows(payload.candidates || [], payload.manual_pull_enabled === true);
     const parts = [payload.message || "远程目录已读取"];
+    if(payload.summary) parts.push("可拉取 " + (payload.summary.pullable || 0) + " / 跳过 " + (payload.summary.skipped || 0));
     parts.push(payload.auto_pull_enabled === true ? "自动拉取已启用" : "自动拉取未启用");
     if(payload.checked_at) parts.push(payload.checked_at);
     if(payload.errors && payload.errors.length) parts.push(String(payload.errors.length) + " 个目录读取失败");

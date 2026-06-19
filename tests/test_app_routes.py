@@ -474,6 +474,66 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(by_name["DoneBD"]["pull_state"], "done")
         self.assertEqual(by_name["DoneBD"]["pull_item_status"], "done")
 
+    def test_cd2_remote_candidates_include_skip_summary(self):
+        class FakeFile:
+            def __init__(self, name, full_path, is_dir=True, size=0):
+                self.name = name
+                self.fullPathName = full_path
+                self.isDirectory = is_dir
+                self.size = size
+
+        class FakeCloudDriveClient:
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                gib = 1024 * 1024 * 1024
+                data = {
+                    "/115/03-PT": [
+                        FakeFile("ReadyBD", "/115/03-PT/ReadyBD", size=80 * gib),
+                        FakeFile("SmallBD", "/115/03-PT/SmallBD", size=10 * gib),
+                        FakeFile("SkipBD.Sample", "/115/03-PT/SkipBD.Sample", size=80 * gib),
+                        FakeFile("PullingBD", "/115/03-PT/PullingBD", size=80 * gib),
+                    ],
+                    "/115/03-PT/ReadyBD": [FakeFile("BDMV", "/115/03-PT/ReadyBD/BDMV")],
+                    "/115/03-PT/SmallBD": [FakeFile("BDMV", "/115/03-PT/SmallBD/BDMV")],
+                    "/115/03-PT/SkipBD.Sample": [FakeFile("BDMV", "/115/03-PT/SkipBD.Sample/BDMV")],
+                    "/115/03-PT/PullingBD": [FakeFile("BDMV", "/115/03-PT/PullingBD/BDMV")],
+                }
+                return data.get(path, [])
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        app_module.state["items"][str((self.watch / "PullingBD").resolve())] = {
+            "status": "waiting_cd2_pull",
+            "pack_iso": True,
+            "cd2_pull_mode": "auto",
+            "cd2_pull_source": "/115/03-PT/PullingBD",
+        }
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_remote_source_dirs=["/115/03-PT"],
+            cd2_auto_pull_min_size_gb=50,
+            cd2_auto_pull_exclude_keywords="Sample",
+        )
+
+        payload = app_module.scan_cd2_remote_candidates(cfg, force_refresh=True)
+        by_name = {item["name"]: item for item in payload["candidates"]}
+
+        self.assertEqual(payload["summary"]["total"], 4)
+        self.assertEqual(payload["summary"]["pullable"], 1)
+        self.assertEqual(payload["summary"]["skipped"], 3)
+        self.assertEqual(by_name["ReadyBD"]["skip_reason"], "")
+        self.assertIn("最小体积", by_name["SmallBD"]["skip_reason"])
+        self.assertIn("排除关键词", by_name["SkipBD.Sample"]["skip_reason"])
+        self.assertEqual(by_name["PullingBD"]["skip_reason"], "已有拉取或封装任务")
+
     def test_cd2_remote_candidates_endpoint_without_dirs_is_empty(self):
         self.login()
         response = self.client.get("/api/cd2/remote-candidates")
