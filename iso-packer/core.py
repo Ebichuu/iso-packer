@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     "cd2_manual_pull_enabled": False,
     "cd2_auto_pull_enabled": False,
     "cd2_auto_pull_max_tasks_per_scan": 1,
+    "cd2_auto_pull_max_active_tasks": 1,
     "cd2_auto_pull_include_keywords": "",
     "cd2_auto_pull_exclude_keywords": "",
     "cd2_auto_pull_failure_cooldown_seconds": 600,

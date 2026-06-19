@@ -724,6 +724,7 @@ class AppRouteTests(unittest.TestCase):
             cd2_remote_source_dirs=["/115/03-PT"],
             cd2_auto_pull_enabled=True,
             cd2_auto_pull_max_tasks_per_scan=2,
+            cd2_auto_pull_max_active_tasks=2,
             cd2_local_pull_dir=str(self.watch),
             cd2_remote_pull_dest_dir="/115/Downloads",
         )
@@ -742,6 +743,32 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(result["created_count"], 2)
         self.assertEqual(len(result["created_tasks"]), 2)
         self.assertIn("本轮已创建 2 个", result["message"])
+
+    def test_cd2_auto_pull_respects_max_active_tasks(self):
+        app_module.state["items"][str((self.watch / "ActivePull").resolve())] = {
+            "status": "waiting_cd2_pull",
+            "pack_iso": True,
+            "cd2_pull_mode": "auto",
+            "cd2_pull_source": "/115/03-PT/ActivePull",
+        }
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_remote_source_dirs=["/115/03-PT"],
+            cd2_auto_pull_enabled=True,
+            cd2_auto_pull_max_active_tasks=1,
+            cd2_remote_pull_dest_dir="/115/Downloads",
+        )
+
+        with mock.patch.object(app_module, "fetch_cd2_uploads", return_value=({}, {"connected": True, "downloads": [], "copy_tasks": []})), \
+             mock.patch.object(app_module, "scan_cd2_remote_candidates") as scan_remote:
+            app_module.scan_once(cfg)
+
+        scan_remote.assert_not_called()
+        result = app_module.state["cd2"]["auto_pull"]["last_result"]
+        self.assertFalse(result["created"])
+        self.assertEqual(result["active_pull_count"], 1)
+        self.assertEqual(result["max_active_tasks"], 1)
+        self.assertIn("达到上限 1", result["message"])
 
     def test_cd2_auto_pull_filters_candidates_by_keywords(self):
         class FakeFile:
@@ -791,6 +818,7 @@ class AppRouteTests(unittest.TestCase):
             cd2_remote_source_dirs=["/115/03-PT"],
             cd2_auto_pull_enabled=True,
             cd2_auto_pull_max_tasks_per_scan=3,
+            cd2_auto_pull_max_active_tasks=3,
             cd2_auto_pull_include_keywords="UHD",
             cd2_auto_pull_exclude_keywords="Skip",
             cd2_local_pull_dir=str(self.watch),
@@ -1106,6 +1134,7 @@ class AppRouteTests(unittest.TestCase):
             "cd2_auto_pull_enabled": "on",
             "cd2_auto_pull_include_keywords": "UHD\nCHDBits",
             "cd2_auto_pull_exclude_keywords": "sample\ntrailer",
+            "cd2_auto_pull_max_active_tasks": "2",
             "cd2_local_pull_dir": str(self.watch),
             "cd2_remote_pull_dest_dir": "/115/Downloads",
             "cd2_webhook_enabled": "on",
@@ -1143,6 +1172,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertTrue(cfg["cd2_auto_pull_enabled"])
         self.assertEqual(cfg["cd2_auto_pull_include_keywords"], "UHD\nCHDBits")
         self.assertEqual(cfg["cd2_auto_pull_exclude_keywords"], "sample\ntrailer")
+        self.assertEqual(cfg["cd2_auto_pull_max_active_tasks"], 2)
         self.assertEqual(cfg["cd2_local_pull_dir"], str(self.watch))
         self.assertEqual(cfg["cd2_remote_pull_dest_dir"], "/115/Downloads")
 

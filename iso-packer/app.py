@@ -737,6 +737,22 @@ def cd2_auto_pull_filter_reason(candidate: Dict, cfg: Dict) -> str:
     return ""
 
 
+def cd2_auto_pull_active_count() -> int:
+    with lock:
+        items = list((state.get("items") or {}).values())
+    count = 0
+    for item in items:
+        status = item.get("status") or ""
+        if item.get("cd2_pull_mode") != "auto":
+            continue
+        if not item.get("cd2_pull_source") or item.get("cd2_pull_finished_at"):
+            continue
+        if status in TERMINAL_STATUSES:
+            continue
+        count += 1
+    return count
+
+
 def cd2_pull_already_tracked(source_path: str, local_source: Path, include_finished_source: bool = False) -> bool:
     source_path = normalize_path_text(source_path)
     local_key = str(local_source)
@@ -883,6 +899,26 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
             save_state_locked()
         return None
 
+    max_active_tasks = int_config(cfg, "cd2_auto_pull_max_active_tasks", DEFAULT_CONFIG["cd2_auto_pull_max_active_tasks"], minimum=1)
+    active_pull_count = cd2_auto_pull_active_count()
+    if active_pull_count >= max_active_tasks:
+        result = {
+            "ok": True,
+            "checked_at": now(),
+            "candidate_count": 0,
+            "message": f"已有 {active_pull_count} 个自动拉取任务进行中，达到上限 {max_active_tasks}",
+            "created": False,
+            "created_count": 0,
+            "active_pull_count": active_pull_count,
+            "max_active_tasks": max_active_tasks,
+            "skipped": [],
+        }
+        with lock:
+            cd2_state = state.setdefault("cd2", {})
+            cd2_state.setdefault("auto_pull", {})["last_result"] = result
+            save_state_locked()
+        return result
+
     payload = scan_cd2_remote_candidates(cfg, force_refresh=False)
     result = {
         "ok": bool(payload.get("ok")),
@@ -893,6 +929,8 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
         "created_count": 0,
         "created_tasks": [],
         "max_tasks_per_scan": int_config(cfg, "cd2_auto_pull_max_tasks_per_scan", DEFAULT_CONFIG["cd2_auto_pull_max_tasks_per_scan"], minimum=1),
+        "active_pull_count": active_pull_count,
+        "max_active_tasks": max_active_tasks,
         "skipped": [],
     }
     if not payload.get("ok"):
@@ -904,6 +942,8 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
 
     for candidate in payload.get("candidates") or []:
         if result["created_count"] >= result["max_tasks_per_scan"]:
+            break
+        if result["active_pull_count"] + result["created_count"] >= result["max_active_tasks"]:
             break
         source_path = normalize_path_text(candidate.get("path"))
         if not source_path:
@@ -2463,6 +2503,7 @@ def settings():
         cfg["cd2_confirm_stable_checks"] = parse_int_form("cd2_confirm_stable_checks", cfg.get("cd2_confirm_stable_checks", 1), minimum=1)
         cfg["cd2_remote_scan_depth"] = parse_int_form("cd2_remote_scan_depth", cfg.get("cd2_remote_scan_depth", 1), minimum=1)
         cfg["cd2_auto_pull_max_tasks_per_scan"] = parse_int_form("cd2_auto_pull_max_tasks_per_scan", cfg.get("cd2_auto_pull_max_tasks_per_scan", 1), minimum=1)
+        cfg["cd2_auto_pull_max_active_tasks"] = parse_int_form("cd2_auto_pull_max_active_tasks", cfg.get("cd2_auto_pull_max_active_tasks", 1), minimum=1)
         cfg["cd2_auto_pull_failure_cooldown_seconds"] = parse_int_form("cd2_auto_pull_failure_cooldown_seconds", cfg.get("cd2_auto_pull_failure_cooldown_seconds", CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS), minimum=0)
     except ValueError as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
