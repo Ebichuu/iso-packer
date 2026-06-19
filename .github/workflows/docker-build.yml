@@ -29,8 +29,12 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          echo "BUILD_VERSION=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
-          echo "IMAGE_VERSION=$(grep -E '^LABEL version=' Dockerfile | sed -E 's/LABEL version=\"([^\"]+)\"/\\1/')" >> $GITHUB_OUTPUT
+          IMAGE_VERSION="$(awk -F'"' '/^LABEL version=/{print $2; exit}' Dockerfile)"
+          test -n "$IMAGE_VERSION"
+          BUILD_VERSION="$(date +'%Y%m%d-%H%M%S')"
+          echo "IMAGE_VERSION=$IMAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Docker image tags: latest, $IMAGE_VERSION, $BUILD_VERSION"
 
       - name: Build and push
         uses: docker/build-push-action@v4
