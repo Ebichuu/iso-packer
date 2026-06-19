@@ -199,6 +199,11 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("function pullSelectedRemoteCandidates", script)
         self.assertIn("data-remote-select-path", script)
         self.assertIn("selectedVisibleRemotePaths", script)
+        self.assertIn('id="remote-batch-result"', page_module.PAGE)
+        self.assertIn("remoteBatchHasFailures", script)
+        self.assertIn("function setRemoteBatchResult", script)
+        self.assertIn("失败项已保留选中，可重试", script)
+        self.assertIn("重试选中", script)
 
     def test_dashboard_shows_failure_suggestions(self):
         match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)

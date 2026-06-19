@@ -870,6 +870,21 @@ tr:hover td { background: #fff8f7; }
   font-size: 12px;
   font-weight: 700;
 }
+.remote-batch-result {
+  display: none;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  background: #f8fbf7;
+  color: #176447;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.remote-batch-result.show { display: block; }
+.remote-batch-result.error {
+  background: #fff7ed;
+  color: #9a3412;
+}
 .remote-select-cell {
   width: 46px;
   text-align: center;
@@ -1616,6 +1631,7 @@ tr:hover td { background: #fff8f7; }
           <button class="browser-btn" type="button" id="remote-pull-selected" disabled>拉取选中</button>
         </div>
       </div>
+      <div class="remote-batch-result" id="remote-batch-result"></div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -1697,6 +1713,7 @@ let lastRemoteCandidates = [];
 let lastRemoteManualPullEnabled = false;
 let lastRemotePayload = null;
 let remoteSelectedPaths = new Set();
+let remoteBatchHasFailures = false;
 function browseRootPath(root) {
   if(root === "watch") return document.querySelector('[name="watch_dir"]')?.value || "/";
   if(root === "output") return document.querySelector('[name="output_dir"]')?.value || "/";
@@ -2468,13 +2485,36 @@ function updateRemoteSelectionBar(items, pullEnabled=false) {
   const count = $("remote-selection-count");
   const pullButton = $("remote-pull-selected");
   const selectVisible = $("remote-select-visible");
+  if(selectedPaths.length === 0) remoteBatchHasFailures = false;
   if(count) count.textContent = "已选 " + selectedPaths.length;
-  if(pullButton) pullButton.disabled = !pullEnabled || selectedPaths.length === 0;
+  if(pullButton) {
+    pullButton.disabled = !pullEnabled || selectedPaths.length === 0;
+    pullButton.textContent = remoteBatchHasFailures && selectedPaths.length > 0 ? "重试选中" : "拉取选中";
+  }
   if(selectVisible) {
     selectVisible.disabled = !pullEnabled || paths.length === 0;
     selectVisible.checked = paths.length > 0 && selectedPaths.length === paths.length;
     selectVisible.indeterminate = selectedPaths.length > 0 && selectedPaths.length < paths.length;
   }
+}
+
+function setRemoteBatchResult(okCount=0, errors=[]) {
+  const box = $("remote-batch-result");
+  if(!box) return;
+  if(!okCount && (!errors || !errors.length)) {
+    box.className = "remote-batch-result";
+    box.textContent = "";
+    return;
+  }
+  const hasErrors = errors && errors.length > 0;
+  const parts = ["批量拉取：已提交 " + okCount + " 个"];
+  if(hasErrors) {
+    parts.push("失败 " + errors.length + " 个");
+    parts.push("失败项已保留选中，可重试");
+    parts.push(errors.slice(0, 5).join("；"));
+  }
+  box.className = "remote-batch-result show" + (hasErrors ? " error" : "");
+  box.textContent = parts.join(" / ");
 }
 
 function remoteCandidateMatchesQuery(item) {
@@ -2591,6 +2631,8 @@ async function pullSelectedRemoteCandidates() {
     button.disabled = true;
     button.textContent = "提交中...";
   }
+  remoteBatchHasFailures = false;
+  setRemoteBatchResult();
   const errors = [];
   let okCount = 0;
   for(const path of paths) {
@@ -2604,6 +2646,8 @@ async function pullSelectedRemoteCandidates() {
   }
   const messageParts = ["已提交 " + okCount + " 个"];
   if(errors.length) messageParts.push("失败 " + errors.length + " 个：" + errors.slice(0, 2).join("；"));
+  remoteBatchHasFailures = errors.length > 0;
+  setRemoteBatchResult(okCount, errors);
   showSettingsAlert(messageParts.join("，"), errors.length > 0);
   renderRemoteCandidates();
   loadRemoteCandidates(true);
