@@ -155,6 +155,14 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn('colspan="6"', page_module.PAGE)
         self.assertIn("item.pull_status_label", script)
 
+    def test_remote_candidates_table_can_clear_pull_record(self):
+        match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        self.assertIn("清除记录", script)
+        self.assertIn("data-remote-clear-path", script)
+        self.assertIn("/api/cd2/pull-record", script)
+
     def test_cd2_api_token_auth_uses_bearer_token(self):
         class FakeUploadResult:
             totalCount = 0
@@ -654,6 +662,61 @@ class AppRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("源目录", response.get_json()["message"])
+
+    def test_cd2_clear_pull_record_allows_candidate_to_be_new_again(self):
+        cfg = app_module.load_config()
+        cfg.update({
+            "cd2_remote_source_dirs": ["/115/03-PT"],
+            "cd2_local_pull_dir": str(self.watch),
+        })
+        app_module.save_config(cfg)
+        source_path = "/115/03-PT/MovieBD"
+        local_key = str((self.watch / "MovieBD").resolve())
+        app_module.state["items"][local_key] = {
+            "first_seen": "2000-01-01 00:00:00",
+            "status": "transfer_done",
+            "pack_iso": True,
+            "cd2_pull_source": source_path,
+            "cd2_pull_mode": "auto",
+        }
+        app_module.record_cd2_pull_result(source_path, "/115/Downloads", False, "copy failed")
+        self.login()
+
+        response = self.client.post("/api/cd2/pull-record", data={"path": source_path})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["removed_item_count"], 1)
+        self.assertEqual(payload["removed_recent_count"], 1)
+        self.assertNotIn(local_key, app_module.state["items"])
+        self.assertFalse(app_module.cd2_pull_recent_failure(source_path, 600))
+        status = app_module.cd2_remote_candidate_status(cfg, source_path)
+        self.assertEqual(status["pull_state"], "new")
+
+    def test_cd2_clear_pull_record_rejects_active_candidate(self):
+        cfg = app_module.load_config()
+        cfg.update({
+            "cd2_remote_source_dirs": ["/115/03-PT"],
+            "cd2_local_pull_dir": str(self.watch),
+        })
+        app_module.save_config(cfg)
+        source_path = "/115/03-PT/MovieBD"
+        local_key = str((self.watch / "MovieBD").resolve())
+        app_module.state["items"][local_key] = {
+            "first_seen": "2000-01-01 00:00:00",
+            "status": "waiting_cd2_pull",
+            "pack_iso": True,
+            "cd2_pull_source": source_path,
+            "cd2_pull_mode": "auto",
+        }
+        self.login()
+
+        response = self.client.post("/api/cd2/pull-record", data={"path": source_path})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("不能清除", response.get_json()["message"])
+        self.assertIn(local_key, app_module.state["items"])
 
     def test_cd2_auto_pull_disabled_by_default(self):
         cfg = self.scan_config(

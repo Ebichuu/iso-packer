@@ -807,6 +807,66 @@ def cd2_pull_already_tracked(source_path: str, local_source: Path, include_finis
     return False
 
 
+def clear_cd2_pull_record(cfg: Dict, source_path: str) -> tuple[Dict, int]:
+    source_path = normalize_path_text(source_path)
+    if not source_path:
+        return {"ok": False, "message": "缺少远程源路径"}, 400
+    if not cd2_remote_source_allowed(source_path, cfg):
+        return {"ok": False, "message": "远程源路径不在已配置的 CD2 源目录内"}, 403
+
+    local_source = cd2_local_pull_path_for_source(cfg, source_path)
+    local_key = str(local_source)
+    removed_items = []
+    removed_recent_count = 0
+    removed_last_result = False
+
+    with lock:
+        active = state.get("active") or {}
+        if active and (active.get("source") == local_key or normalize_path_text(active.get("cd2_pull_source")) == source_path):
+            return {"ok": False, "message": "候选仍在运行中，不能清除记录"}, 409
+
+        items = state.setdefault("items", {})
+        for key, item in list(items.items()):
+            if key != local_key and normalize_path_text(item.get("cd2_pull_source")) != source_path:
+                continue
+            status = item.get("status") or ""
+            if status not in TERMINAL_STATUSES and status != "removed":
+                return {"ok": False, "message": "候选仍在拉取或封装流程中，不能清除记录"}, 409
+            removed_items.append(key)
+            del items[key]
+
+        cd2_state = state.setdefault("cd2", {})
+        pull_state = cd2_state.setdefault("pull", {})
+        recent = list(pull_state.get("recent_results") or [])
+        if recent:
+            kept = []
+            for result in recent:
+                if normalize_path_text(result.get("source_path")) == source_path:
+                    removed_recent_count += 1
+                    continue
+                kept.append(result)
+            pull_state["recent_results"] = kept
+        last_result = pull_state.get("last_result") or {}
+        if normalize_path_text(last_result.get("source_path")) == source_path:
+            pull_state.pop("last_result", None)
+            removed_last_result = True
+
+        changed = bool(removed_items or removed_recent_count or removed_last_result)
+        if changed:
+            save_state_locked()
+
+    message = "已清除候选记录，可重新拉取" if changed else "没有可清除的候选记录"
+    return {
+        "ok": True,
+        "message": message,
+        "source_path": source_path,
+        "local_path": local_key,
+        "removed_items": removed_items,
+        "removed_item_count": len(removed_items),
+        "removed_recent_count": removed_recent_count,
+    }, 200
+
+
 def cd2_remote_task_matches_pull(source_path: str, dest_dir: str, cd2_status: Optional[Dict]) -> bool:
     if not cd2_status or not cd2_status.get("connected"):
         return False
@@ -2672,6 +2732,17 @@ def api_cd2_pull():
     result, status_code = create_cd2_pull_task(cfg, source_path, mode="manual")
     if result.get("ok"):
         log(f"CD2 手动拉取已创建: {source_path} -> {result.get('dest_dir')}")
+    return jsonify(result), status_code
+
+
+@app.route("/api/cd2/pull-record", methods=["DELETE", "POST"])
+def api_cd2_pull_record():
+    cfg = load_config()
+    payload = request.get_json(silent=True) if request.is_json else request.form
+    source_path = normalize_path_text((payload or {}).get("path"))
+    result, status_code = clear_cd2_pull_record(cfg, source_path)
+    if result.get("ok") and (result.get("removed_item_count") or result.get("removed_recent_count")):
+        log(f"CD2 候选记录已清除: {source_path}")
     return jsonify(result), status_code
 
 

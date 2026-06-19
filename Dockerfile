@@ -2,7 +2,7 @@
 FROM python:3.11-slim
 
 LABEL maintainer="iso-packer"
-LABEL version="1.1.0"
+LABEL version="1.1.1"
 LABEL description="Automatic Blu-ray ISO packing and CloudDrive2 transfer tool"
 
 WORKDIR /app

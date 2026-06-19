@@ -2352,16 +2352,22 @@ function updateRemoteRows(items, pullEnabled=false) {
   body.innerHTML = items.map(item => {
     const path = item.path || "";
     const status = item.pull_status_label || "新候选";
-    const action = pullEnabled
-      ? `<button class="browser-btn" type="button" data-remote-pull-path="${esc(path)}">拉取</button>`
-      : `<span class="browser-kind">未启用</span>`;
+    const actions = [];
+    if(pullEnabled) {
+      actions.push(`<button class="browser-btn" type="button" data-remote-pull-path="${esc(path)}">拉取</button>`);
+    } else {
+      actions.push(`<span class="browser-kind">未启用</span>`);
+    }
+    if(["done", "failed", "finished", "recent_failure"].includes(item.pull_state || "")) {
+      actions.push(`<button class="browser-btn" type="button" data-remote-clear-path="${esc(path)}">清除记录</button>`);
+    }
     return `<tr>
       <td><span class="browser-name">${esc(item.name || "-")}</span></td>
       <td><span class="browser-kind">${esc(item.disc_type || "-")}</span></td>
       <td><span class="target-text" title="${esc(item.path || "-")}">${esc(item.path || "-")}</span></td>
       <td><span class="target-text" title="${esc(item.root || "-")}">${esc(item.root || "-")}</span></td>
       <td><span class="browser-kind" title="${esc(item.skip_reason || item.pull_error || item.local_path || "")}">${esc(status)}</span></td>
-      <td>${action}</td>
+      <td>${actions.join(" ")}</td>
     </tr>`;
   }).join("");
 }
@@ -2383,6 +2389,28 @@ async function pullRemoteCandidate(button) {
     refresh();
   } catch(e) {
     showSettingsAlert(e.message || "CD2 拉取失败", true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+async function clearRemoteCandidateRecord(button) {
+  const path = button.dataset.remoteClearPath || "";
+  if(!path) return;
+  if(!confirm("确认清除这个候选的拉取记录？清除后自动拉取可以重新处理它。")) return;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "清除中...";
+  try {
+    const data = new FormData();
+    data.set("path", path);
+    const payload = await fetchJson("/api/cd2/pull-record", { method: "POST", body: data });
+    showSettingsAlert(payload.message || "候选记录已清除");
+    loadRemoteCandidates(true);
+    refresh();
+  } catch(e) {
+    showSettingsAlert(e.message || "清除候选记录失败", true);
   } finally {
     button.disabled = false;
     button.textContent = originalText;
@@ -2432,6 +2460,11 @@ async function loadBrowser(root = currentBrowseRoot, path = currentBrowsePath) {
 
 function setupBrowser() {
   document.addEventListener("click", (event) => {
+    const clearButton = event.target.closest("[data-remote-clear-path]");
+    if(clearButton) {
+      clearRemoteCandidateRecord(clearButton);
+      return;
+    }
     const pullButton = event.target.closest("[data-remote-pull-path]");
     if(pullButton) {
       pullRemoteCandidate(pullButton);
