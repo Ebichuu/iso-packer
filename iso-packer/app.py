@@ -728,6 +728,10 @@ def cd2_auto_pull_filter_reason(candidate: Dict, cfg: Dict) -> str:
         str((candidate or {}).get("name") or ""),
         str((candidate or {}).get("path") or ""),
     ]).lower()
+    min_size_gb = int_config(cfg, "cd2_auto_pull_min_size_gb", DEFAULT_CONFIG["cd2_auto_pull_min_size_gb"], minimum=0)
+    size = int((candidate or {}).get("size") or 0)
+    if min_size_gb > 0 and size > 0 and size < min_size_gb * 1024 * 1024 * 1024:
+        return f"低于最小体积: {min_size_gb} GB"
     for keyword in cd2_auto_pull_keywords((cfg or {}).get("cd2_auto_pull_exclude_keywords")):
         if keyword in text:
             return f"命中排除关键词: {keyword}"
@@ -2504,6 +2508,7 @@ def settings():
         cfg["cd2_remote_scan_depth"] = parse_int_form("cd2_remote_scan_depth", cfg.get("cd2_remote_scan_depth", 1), minimum=1)
         cfg["cd2_auto_pull_max_tasks_per_scan"] = parse_int_form("cd2_auto_pull_max_tasks_per_scan", cfg.get("cd2_auto_pull_max_tasks_per_scan", 1), minimum=1)
         cfg["cd2_auto_pull_max_active_tasks"] = parse_int_form("cd2_auto_pull_max_active_tasks", cfg.get("cd2_auto_pull_max_active_tasks", 1), minimum=1)
+        cfg["cd2_auto_pull_min_size_gb"] = parse_int_form("cd2_auto_pull_min_size_gb", cfg.get("cd2_auto_pull_min_size_gb", 0), minimum=0)
         cfg["cd2_auto_pull_failure_cooldown_seconds"] = parse_int_form("cd2_auto_pull_failure_cooldown_seconds", cfg.get("cd2_auto_pull_failure_cooldown_seconds", CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS), minimum=0)
     except ValueError as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400

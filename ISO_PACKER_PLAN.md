@@ -2,7 +2,7 @@
 
 ## 基线
 
-- 主线版本：`ebichu/iso-packer:latest`
+- 主线版本：`ebichu/iso-packer:latest` / `ebichu/iso-packer:1.1.0`
 - 使用方式：单 VPS、单容器、个人自用
 - 固定流程：
 
@@ -152,6 +152,7 @@ CD2 控制边界：
 - 已新增：`cd2_auto_pull_enabled`
 - 已新增：`cd2_auto_pull_max_tasks_per_scan`，默认每轮自动拉取 1 个任务
 - 已新增：`cd2_auto_pull_max_active_tasks`，默认同时保留 1 个自动拉取任务
+- 已新增：`cd2_auto_pull_min_size_gb`，默认 0 不过滤；仅在 CD2 返回目录大小时用于自动拉取候选过滤
 - 已新增：`cd2_auto_pull_include_keywords` / `cd2_auto_pull_exclude_keywords`，用于自动拉取候选过滤；手动拉取不受影响
 - 已新增：`cd2_local_pull_dir`，默认 `/watch`
 - 已新增：`cd2_remote_pull_dest_dir`，用于指定 CD2 拉取目标目录；留空时走路径别名转换
@@ -212,7 +213,7 @@ CD2 控制边界：
 
 - 把 `cd2_remote_source_dirs` 在界面上明确为“CD2 归档监控路径”，每行一个允许扫描的网盘源目录。
 - 仅识别完整原盘结构候选，不把普通散文件或单视频文件纳入自动封装流水线。
-- 增加监控策略：最小体积；递归深度、每轮创建任务数、全局同时拉取任务数、包含 / 排除关键词已支持配置。
+- 监控策略已支持：递归深度、最小体积、每轮创建任务数、全局同时拉取任务数、包含 / 排除关键词。
 - 增加重拉控制：失败冷却、手动清除同源记录、手动重新拉取指定远程候选。
 - 增加候选分组和跳过原因展示：已拉取、拉取中、已处理、最近失败、目录不完整、目标已存在、超过队列上限。
 - 保持受控边界：只处理配置过的监控目录，只跟踪 iso-packer 自己创建的 CD2 任务，不删除网盘源文件，不接管用户在 CD2 里手动创建的其它任务。

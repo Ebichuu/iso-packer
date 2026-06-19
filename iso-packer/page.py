@@ -1300,6 +1300,11 @@ tr:hover td { background: #fff8f7; }
           <div class="settings-help">默认 1，已有自动拉取任务未完成时暂停创建新的自动拉取任务。</div>
         </div>
         <div class="form-group">
+          <label>自动拉取最小体积 GB</label>
+          <input name="cd2_auto_pull_min_size_gb" type="number" min="0" value="{{cfg.cd2_auto_pull_min_size_gb}}">
+          <div class="settings-help">默认 0 表示不过滤；仅当 CD2 返回目录大小时生效。</div>
+        </div>
+        <div class="form-group">
           <label>自动拉取包含关键词</label>
           <textarea name="cd2_auto_pull_include_keywords" spellcheck="false" placeholder="CHDBits&#10;UHD">{{cfg.cd2_auto_pull_include_keywords}}</textarea>
           <div class="settings-help">留空表示不过滤；每行或逗号分隔一个关键词，名称或路径命中才会自动拉取。</div>
