@@ -849,6 +849,16 @@ tr:hover td { background: #fff8f7; }
   padding: 10px 24px;
   border-bottom: 1px solid var(--border);
 }
+.remote-search {
+  min-height: 34px;
+  width: min(100%, 320px);
+  border: 1px solid #d8cfc3;
+  border-radius: 7px;
+  background: #fffdfa;
+  color: var(--text-main);
+  font-size: 12px;
+  padding: 0 12px;
+}
 .browser-name {
   display: inline-flex;
   align-items: center;
@@ -1581,7 +1591,10 @@ tr:hover td { background: #fff8f7; }
         </div>
       </div>
       <div class="browser-path" id="remote-status">未加载</div>
-      <div class="browser-toolbar remote-filter-bar" id="remote-filters"></div>
+      <div class="browser-toolbar remote-filter-bar">
+        <input class="remote-search" id="remote-search" type="search" placeholder="搜索名称或路径">
+        <div id="remote-filters"></div>
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -1657,8 +1670,10 @@ const seenLogEvents = new Set();
 let currentBrowseRoot = "watch";
 let currentBrowsePath = "/";
 let remoteCandidateFilter = "all";
+let remoteCandidateQuery = "";
 let lastRemoteCandidates = [];
 let lastRemoteManualPullEnabled = false;
+let lastRemotePayload = null;
 function browseRootPath(root) {
   if(root === "watch") return document.querySelector('[name="watch_dir"]')?.value || "/";
   if(root === "output") return document.querySelector('[name="output_dir"]')?.value || "/";
@@ -2390,21 +2405,54 @@ function remoteFilterCounts(items) {
 function updateRemoteFilters(items) {
   const container = $("remote-filters");
   if(!container) return;
-  const counts = remoteFilterCounts(items || []);
+  const counts = remoteFilterCounts((items || []).filter(remoteCandidateMatchesQuery));
   container.innerHTML = `<div class="browser-tabs" role="tablist" aria-label="远程候选筛选">` + Object.entries(remoteFilterLabels).map(([key, label]) => {
     const count = counts[key] || 0;
     return `<button class="browser-tab${remoteCandidateFilter === key ? " active" : ""}" type="button" data-remote-filter="${esc(key)}">${esc(label)} ${count}</button>`;
   }).join("") + `</div>`;
 }
 
+function remoteCandidateMatchesQuery(item) {
+  const query = String(remoteCandidateQuery || "").trim().toLowerCase();
+  if(!query) return true;
+  const haystack = [
+    item.name,
+    item.path,
+    item.root,
+    item.disc_type,
+    item.pull_status_label,
+    item.skip_reason,
+    item.pull_error
+  ].map(value => String(value || "").toLowerCase()).join(" ");
+  return haystack.includes(query);
+}
+
 function filteredRemoteCandidates(items) {
-  if(remoteCandidateFilter === "all") return items || [];
-  return (items || []).filter(item => remoteCandidateGroup(item) === remoteCandidateFilter);
+  return (items || []).filter(item => {
+    if(remoteCandidateFilter !== "all" && remoteCandidateGroup(item) !== remoteCandidateFilter) return false;
+    return remoteCandidateMatchesQuery(item);
+  });
 }
 
 function renderRemoteCandidates() {
+  const visibleCandidates = filteredRemoteCandidates(lastRemoteCandidates);
   updateRemoteFilters(lastRemoteCandidates);
-  updateRemoteRows(filteredRemoteCandidates(lastRemoteCandidates), lastRemoteManualPullEnabled);
+  updateRemoteRows(visibleCandidates, lastRemoteManualPullEnabled);
+  updateRemoteStatus(visibleCandidates.length);
+}
+
+function updateRemoteStatus(visibleCount) {
+  const status = $("remote-status");
+  const payload = lastRemotePayload || {};
+  if(!status || !lastRemotePayload) return;
+  const parts = [payload.message || "远程目录已读取"];
+  parts.push("显示 " + visibleCount + " / " + lastRemoteCandidates.length);
+  if(payload.summary) parts.push("可拉取 " + (payload.summary.pullable || 0) + " / 跳过 " + (payload.summary.skipped || 0));
+  parts.push(payload.auto_pull_enabled === true ? "自动拉取已启用" : "自动拉取未启用");
+  if(remoteCandidateQuery) parts.push("搜索 " + remoteCandidateQuery);
+  if(payload.checked_at) parts.push(payload.checked_at);
+  if(payload.errors && payload.errors.length) parts.push(String(payload.errors.length) + " 个目录读取失败");
+  status.textContent = parts.join(" / ");
 }
 
 function updateRemoteRows(items, pullEnabled=false) {
@@ -2487,16 +2535,12 @@ async function loadRemoteCandidates(force=false) {
   if(status) status.textContent = force ? "正在强制刷新..." : "正在读取远程目录...";
   try {
     const payload = await fetchJson("/api/cd2/remote-candidates?force=" + (force ? "1" : "0") + "&_=" + Date.now());
+    lastRemotePayload = payload;
     lastRemoteCandidates = payload.candidates || [];
     lastRemoteManualPullEnabled = payload.manual_pull_enabled === true;
     renderRemoteCandidates();
-    const parts = [payload.message || "远程目录已读取"];
-    if(payload.summary) parts.push("可拉取 " + (payload.summary.pullable || 0) + " / 跳过 " + (payload.summary.skipped || 0));
-    parts.push(payload.auto_pull_enabled === true ? "自动拉取已启用" : "自动拉取未启用");
-    if(payload.checked_at) parts.push(payload.checked_at);
-    if(payload.errors && payload.errors.length) parts.push(String(payload.errors.length) + " 个目录读取失败");
-    if(status) status.textContent = parts.join(" / ");
   } catch(e) {
+    lastRemotePayload = null;
     lastRemoteCandidates = [];
     lastRemoteManualPullEnabled = false;
     renderRemoteCandidates();
@@ -2528,6 +2572,13 @@ async function loadBrowser(root = currentBrowseRoot, path = currentBrowsePath) {
 }
 
 function setupBrowser() {
+  const remoteSearch = $("remote-search");
+  if(remoteSearch) {
+    remoteSearch.addEventListener("input", () => {
+      remoteCandidateQuery = remoteSearch.value || "";
+      renderRemoteCandidates();
+    });
+  }
   document.addEventListener("click", (event) => {
     const filterButton = event.target.closest("[data-remote-filter]");
     if(filterButton) {

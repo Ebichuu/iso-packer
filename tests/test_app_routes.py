@@ -178,6 +178,17 @@ class AppRouteTests(unittest.TestCase):
         self.assertNotIn("低于最小体积", script)
         self.assertNotIn("命中排除关键词", script)
 
+    def test_remote_candidates_table_supports_local_search(self):
+        match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        self.assertIn('id="remote-search"', page_module.PAGE)
+        self.assertIn("remoteCandidateQuery", script)
+        self.assertIn("function filteredRemoteCandidates", script)
+        self.assertIn("item.name", script)
+        self.assertIn("item.path", script)
+        self.assertIn("搜索 \" + remoteCandidateQuery", script)
+
     def test_dashboard_shows_cd2_cache_status(self):
         match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
         self.assertIsNotNone(match)
