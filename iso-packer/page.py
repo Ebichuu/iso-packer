@@ -1950,6 +1950,7 @@ function formatCd2Status(status) {
     if(status.copy_task_count != null) parts.push(String(status.copy_task_count) + " 项复制");
   }
   if(status.last_success_at) parts.push("最后成功 " + status.last_success_at);
+  if(status.cache_human) parts.push(status.cache_human);
   if(status.last_error) parts.push("错误 " + status.last_error);
   if(!parts.length && status.checked_at) parts.push("最后检查 " + status.checked_at);
   return parts.join(" / ") || "--";

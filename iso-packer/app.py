@@ -303,6 +303,28 @@ def int_config(cfg: Dict, key: str, fallback: int, minimum: Optional[int] = None
     return value
 
 
+def cd2_cache_status_fields(cfg: Dict, checked_at: Optional[str], cache_hit: bool = False) -> Dict:
+    poll_seconds = int_config(cfg, "cd2_queue_poll_seconds", DEFAULT_CONFIG["cd2_queue_poll_seconds"], minimum=1)
+    checked_dt = parse_time(checked_at)
+    age_seconds = seconds_between(checked_at) if checked_dt else None
+    expires_in = max(0, poll_seconds - int(age_seconds or 0)) if checked_dt else 0
+    expires_at = (checked_dt + timedelta(seconds=poll_seconds)).strftime("%Y-%m-%d %H:%M:%S") if checked_dt else ""
+    if not checked_dt:
+        cache_human = f"未缓存，轮询 {poll_seconds}s"
+    elif cache_hit:
+        cache_human = f"缓存 {age_seconds}s，{expires_in}s 后刷新"
+    else:
+        cache_human = f"实时刷新，{poll_seconds}s 后过期"
+    return {
+        "cache_hit": bool(cache_hit),
+        "cache_ttl_seconds": poll_seconds,
+        "cache_age_seconds": age_seconds,
+        "cache_expires_in_seconds": expires_in,
+        "cache_expires_at": expires_at,
+        "cache_human": cache_human,
+    }
+
+
 def cd2_webhook_secret_matches(cfg: Dict) -> bool:
     expected = str((cfg or {}).get("cd2_webhook_secret") or "").strip()
     if not expected:
@@ -1563,7 +1585,9 @@ def fetch_cd2_uploads(cfg: Dict):
         cached_map = cd2_client_cache.get("upload_map") or {}
         cached_checked_at = cd2_client_cache.get("checked_at")
         if cached_status and cached_checked_at and seconds_between(cached_checked_at) < poll_seconds:
-            return dict(cached_map), dict(cached_status)
+            status = dict(cached_status)
+            status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=True))
+            return dict(cached_map), status
     status = {
         "enabled": bool(cfg.get("cd2_api_enabled")),
         "available": CloudDriveClient is not None,
@@ -1579,10 +1603,12 @@ def fetch_cd2_uploads(cfg: Dict):
     if not status["enabled"]:
         status["last_error"] = "CD2 API 未启用"
         status["human"] = "CD2 API 未启用"
+        status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
         return {}, status
     if not status["available"]:
         status["last_error"] = "缺少 clouddrive2-client 依赖"
         status["human"] = "缺少 clouddrive2-client 依赖"
+        status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
         return {}, status
     client = get_cd2_client(cfg)
     if client is None:
@@ -1591,6 +1617,7 @@ def fetch_cd2_uploads(cfg: Dict):
         status["last_success_at"] = cd2_client_cache.get("last_success_at")
         status["last_error"] = cd2_client_cache.get("last_error") or "CD2 API 未连接"
         status["human"] = status["last_error"]
+        status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
         return {}, status
     queue_errors = []
     try:
@@ -1607,6 +1634,7 @@ def fetch_cd2_uploads(cfg: Dict):
         status["last_success_at"] = cd2_client_cache.get("last_success_at")
         status["last_error"] = message
         status["human"] = message
+        status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
         return {}, status
     try:
         downloads = fetch_cd2_downloads(client)
@@ -1663,6 +1691,7 @@ def fetch_cd2_uploads(cfg: Dict):
     status["human"] = " / ".join(parts) if parts else "未发现传输任务"
     if queue_errors:
         status["human"] = f"{status['human']}，部分队列读取失败"
+    status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
     with cd2_lock:
         cd2_client_cache["checked_at"] = status["checked_at"]
         cd2_client_cache["last_success_at"] = status["last_success_at"]

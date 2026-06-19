@@ -163,6 +163,12 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("data-remote-clear-path", script)
         self.assertIn("/api/cd2/pull-record", script)
 
+    def test_dashboard_shows_cd2_cache_status(self):
+        match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        self.assertIn("status.cache_human", script)
+
     def test_cd2_api_token_auth_uses_bearer_token(self):
         class FakeUploadResult:
             totalCount = 0
@@ -203,6 +209,49 @@ class AppRouteTests(unittest.TestCase):
         self.assertTrue(status["connected"])
         self.assertEqual(status["auth_mode"], "api_token")
         self.assertEqual(status["human"], "未发现传输任务")
+
+    def test_cd2_status_reports_cache_hit_and_expiration(self):
+        class FakeUploadResult:
+            totalCount = 0
+            globalBytesPerSecond = 0
+            totalBytes = 0
+            finishedBytes = 0
+            uploadFiles = []
+
+        class FakeCloudDriveClient:
+            calls = 0
+
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_upload_file_list(self, get_all=True):
+                self.__class__.calls += 1
+                return FakeUploadResult()
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_queue_poll_seconds=60,
+        )
+
+        _, first_status = app_module.fetch_cd2_uploads(cfg)
+        _, second_status = app_module.fetch_cd2_uploads(cfg)
+
+        self.assertEqual(FakeCloudDriveClient.calls, 1)
+        self.assertFalse(first_status["cache_hit"])
+        self.assertEqual(first_status["cache_ttl_seconds"], 60)
+        self.assertIn("实时刷新", first_status["cache_human"])
+        self.assertTrue(second_status["cache_hit"])
+        self.assertGreaterEqual(second_status["cache_expires_in_seconds"], 0)
+        self.assertLessEqual(second_status["cache_expires_in_seconds"], 60)
+        self.assertIn("缓存", second_status["cache_human"])
 
     def test_cd2_test_endpoint_reports_success(self):
         class FakeUploadResult:
