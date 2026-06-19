@@ -152,7 +152,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertIsNotNone(match)
         script = match.group(1)
         self.assertIn("<th>状态</th>", page_module.PAGE)
-        self.assertIn('colspan="6"', page_module.PAGE)
+        self.assertIn('colspan="7"', page_module.PAGE)
         self.assertIn("item.pull_status_label", script)
 
     def test_remote_candidates_table_can_clear_pull_record(self):
@@ -188,6 +188,17 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("item.name", script)
         self.assertIn("item.path", script)
         self.assertIn("搜索 \" + remoteCandidateQuery", script)
+
+    def test_remote_candidates_table_supports_batch_pull(self):
+        match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        self.assertIn('id="remote-select-visible"', page_module.PAGE)
+        self.assertIn('id="remote-pull-selected"', page_module.PAGE)
+        self.assertIn("remoteSelectedPaths", script)
+        self.assertIn("function pullSelectedRemoteCandidates", script)
+        self.assertIn("data-remote-select-path", script)
+        self.assertIn("selectedVisibleRemotePaths", script)
 
     def test_dashboard_shows_cd2_cache_status(self):
         match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)

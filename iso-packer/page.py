@@ -859,6 +859,23 @@ tr:hover td { background: #fff8f7; }
   font-size: 12px;
   padding: 0 12px;
 }
+.remote-selection {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.remote-selection-count {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.remote-select-cell {
+  width: 46px;
+  text-align: center;
+  padding-left: 14px;
+  padding-right: 14px;
+}
 .browser-name {
   display: inline-flex;
   align-items: center;
@@ -1594,11 +1611,16 @@ tr:hover td { background: #fff8f7; }
       <div class="browser-toolbar remote-filter-bar">
         <input class="remote-search" id="remote-search" type="search" placeholder="搜索名称或路径">
         <div id="remote-filters"></div>
+        <div class="remote-selection">
+          <span class="remote-selection-count" id="remote-selection-count">已选 0</span>
+          <button class="browser-btn" type="button" id="remote-pull-selected" disabled>拉取选中</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
+              <th class="remote-select-cell"><input id="remote-select-visible" type="checkbox" aria-label="选择当前筛选的远程候选"></th>
               <th>名称</th>
               <th>类型</th>
               <th>远程路径</th>
@@ -1608,7 +1630,7 @@ tr:hover td { background: #fff8f7; }
             </tr>
           </thead>
           <tbody id="remote-body">
-            <tr><td colspan="6" class="browser-empty">正在加载...</td></tr>
+            <tr><td colspan="7" class="browser-empty">正在加载...</td></tr>
           </tbody>
         </table>
       </div>
@@ -1674,6 +1696,7 @@ let remoteCandidateQuery = "";
 let lastRemoteCandidates = [];
 let lastRemoteManualPullEnabled = false;
 let lastRemotePayload = null;
+let remoteSelectedPaths = new Set();
 function browseRootPath(root) {
   if(root === "watch") return document.querySelector('[name="watch_dir"]')?.value || "/";
   if(root === "output") return document.querySelector('[name="output_dir"]')?.value || "/";
@@ -2412,6 +2435,30 @@ function updateRemoteFilters(items) {
   }).join("") + `</div>`;
 }
 
+function pruneRemoteSelection(items) {
+  const available = new Set((items || []).map(item => item.path || "").filter(Boolean));
+  remoteSelectedPaths = new Set(Array.from(remoteSelectedPaths).filter(path => available.has(path)));
+}
+
+function selectedVisibleRemotePaths(items) {
+  return (items || []).map(item => item.path || "").filter(path => path && remoteSelectedPaths.has(path));
+}
+
+function updateRemoteSelectionBar(items, pullEnabled=false) {
+  const paths = (items || []).map(item => item.path || "").filter(Boolean);
+  const selectedPaths = selectedVisibleRemotePaths(items);
+  const count = $("remote-selection-count");
+  const pullButton = $("remote-pull-selected");
+  const selectVisible = $("remote-select-visible");
+  if(count) count.textContent = "已选 " + selectedPaths.length;
+  if(pullButton) pullButton.disabled = !pullEnabled || selectedPaths.length === 0;
+  if(selectVisible) {
+    selectVisible.disabled = !pullEnabled || paths.length === 0;
+    selectVisible.checked = paths.length > 0 && selectedPaths.length === paths.length;
+    selectVisible.indeterminate = selectedPaths.length > 0 && selectedPaths.length < paths.length;
+  }
+}
+
 function remoteCandidateMatchesQuery(item) {
   const query = String(remoteCandidateQuery || "").trim().toLowerCase();
   if(!query) return true;
@@ -2438,6 +2485,7 @@ function renderRemoteCandidates() {
   const visibleCandidates = filteredRemoteCandidates(lastRemoteCandidates);
   updateRemoteFilters(lastRemoteCandidates);
   updateRemoteRows(visibleCandidates, lastRemoteManualPullEnabled);
+  updateRemoteSelectionBar(visibleCandidates, lastRemoteManualPullEnabled);
   updateRemoteStatus(visibleCandidates.length);
 }
 
@@ -2459,7 +2507,7 @@ function updateRemoteRows(items, pullEnabled=false) {
   const body = $("remote-body");
   if(!body) return;
   if(!items || !items.length) {
-    body.innerHTML = `<tr><td colspan="6" class="browser-empty">没有符合筛选的远程原盘候选</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="browser-empty">没有符合筛选的远程原盘候选</td></tr>`;
     return;
   }
   body.innerHTML = items.map(item => {
@@ -2475,6 +2523,7 @@ function updateRemoteRows(items, pullEnabled=false) {
       actions.push(`<button class="browser-btn" type="button" data-remote-clear-path="${esc(path)}">清除记录</button>`);
     }
     return `<tr>
+      <td class="remote-select-cell"><input type="checkbox" data-remote-select-path="${esc(path)}"${remoteSelectedPaths.has(path) ? " checked" : ""}${pullEnabled && path ? "" : " disabled"}></td>
       <td><span class="browser-name">${esc(item.name || "-")}</span></td>
       <td><span class="browser-kind">${esc(item.disc_type || "-")}</span></td>
       <td><span class="target-text" title="${esc(item.path || "-")}">${esc(item.path || "-")}</span></td>
@@ -2485,6 +2534,12 @@ function updateRemoteRows(items, pullEnabled=false) {
   }).join("");
 }
 
+async function submitRemotePull(path) {
+  const data = new FormData();
+  data.set("path", path);
+  return fetchJson("/api/cd2/pull", { method: "POST", body: data });
+}
+
 async function pullRemoteCandidate(button) {
   const path = button.dataset.remotePullPath || "";
   if(!path) return;
@@ -2493,9 +2548,8 @@ async function pullRemoteCandidate(button) {
   button.disabled = true;
   button.textContent = "提交中...";
   try {
-    const data = new FormData();
-    data.set("path", path);
-    const payload = await fetchJson("/api/cd2/pull", { method: "POST", body: data });
+    const payload = await submitRemotePull(path);
+    remoteSelectedPaths.delete(path);
     showSettingsAlert(payload.message || "CD2 拉取任务已创建");
     loadRemoteCandidates(true);
     loadBrowser("watch", "/");
@@ -2506,6 +2560,38 @@ async function pullRemoteCandidate(button) {
     button.disabled = false;
     button.textContent = originalText;
   }
+}
+
+async function pullSelectedRemoteCandidates() {
+  const visibleCandidates = filteredRemoteCandidates(lastRemoteCandidates);
+  const paths = selectedVisibleRemotePaths(visibleCandidates);
+  if(!paths.length) return;
+  if(!confirm("确认让 CD2 拉取选中的 " + paths.length + " 个远程原盘？")) return;
+  const button = $("remote-pull-selected");
+  const originalText = button ? button.textContent : "";
+  if(button) {
+    button.disabled = true;
+    button.textContent = "提交中...";
+  }
+  const errors = [];
+  let okCount = 0;
+  for(const path of paths) {
+    try {
+      await submitRemotePull(path);
+      okCount += 1;
+      remoteSelectedPaths.delete(path);
+    } catch(e) {
+      errors.push(path.split("/").pop() + ": " + (e.message || "拉取失败"));
+    }
+  }
+  const messageParts = ["已提交 " + okCount + " 个"];
+  if(errors.length) messageParts.push("失败 " + errors.length + " 个：" + errors.slice(0, 2).join("；"));
+  showSettingsAlert(messageParts.join("，"), errors.length > 0);
+  renderRemoteCandidates();
+  loadRemoteCandidates(true);
+  loadBrowser("watch", "/");
+  refresh();
+  if(button) button.textContent = originalText;
 }
 
 async function clearRemoteCandidateRecord(button) {
@@ -2537,6 +2623,7 @@ async function loadRemoteCandidates(force=false) {
     const payload = await fetchJson("/api/cd2/remote-candidates?force=" + (force ? "1" : "0") + "&_=" + Date.now());
     lastRemotePayload = payload;
     lastRemoteCandidates = payload.candidates || [];
+    pruneRemoteSelection(lastRemoteCandidates);
     lastRemoteManualPullEnabled = payload.manual_pull_enabled === true;
     renderRemoteCandidates();
   } catch(e) {
@@ -2579,6 +2666,20 @@ function setupBrowser() {
       renderRemoteCandidates();
     });
   }
+  const pullSelectedButton = $("remote-pull-selected");
+  if(pullSelectedButton) pullSelectedButton.addEventListener("click", pullSelectedRemoteCandidates);
+  const selectVisible = $("remote-select-visible");
+  if(selectVisible) {
+    selectVisible.addEventListener("change", () => {
+      filteredRemoteCandidates(lastRemoteCandidates).forEach(item => {
+        const path = item.path || "";
+        if(!path) return;
+        if(selectVisible.checked) remoteSelectedPaths.add(path);
+        else remoteSelectedPaths.delete(path);
+      });
+      renderRemoteCandidates();
+    });
+  }
   document.addEventListener("click", (event) => {
     const filterButton = event.target.closest("[data-remote-filter]");
     if(filterButton) {
@@ -2605,6 +2706,15 @@ function setupBrowser() {
     if(row && row.dataset.browserDir === "1" && row.dataset.browserPath) {
       loadBrowser(currentBrowseRoot, row.dataset.browserPath);
     }
+  });
+  document.addEventListener("change", (event) => {
+    const checkbox = event.target.closest("[data-remote-select-path]");
+    if(!checkbox) return;
+    const path = checkbox.dataset.remoteSelectPath || "";
+    if(!path) return;
+    if(checkbox.checked) remoteSelectedPaths.add(path);
+    else remoteSelectedPaths.delete(path);
+    updateRemoteSelectionBar(filteredRemoteCandidates(lastRemoteCandidates), lastRemoteManualPullEnabled);
   });
   const up = $("browser-up");
   const refreshButton = $("browser-refresh");
