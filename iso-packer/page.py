@@ -845,6 +845,10 @@ tr:hover td { background: #fff8f7; }
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+.remote-filter-bar {
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+}
 .browser-name {
   display: inline-flex;
   align-items: center;
@@ -1577,6 +1581,7 @@ tr:hover td { background: #fff8f7; }
         </div>
       </div>
       <div class="browser-path" id="remote-status">未加载</div>
+      <div class="browser-toolbar remote-filter-bar" id="remote-filters"></div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -1651,6 +1656,9 @@ let alertTimer;
 const seenLogEvents = new Set();
 let currentBrowseRoot = "watch";
 let currentBrowsePath = "/";
+let remoteCandidateFilter = "all";
+let lastRemoteCandidates = [];
+let lastRemoteManualPullEnabled = false;
 function browseRootPath(root) {
   if(root === "watch") return document.querySelector('[name="watch_dir"]')?.value || "/";
   if(root === "output") return document.querySelector('[name="output_dir"]')?.value || "/";
@@ -2343,11 +2351,59 @@ function updateBrowserRows(items) {
   }).join("");
 }
 
+const remoteFilterLabels = {
+  all: "全部",
+  pullable: "可拉取",
+  active: "处理中",
+  done: "已处理",
+  recent_failure: "最近失败",
+  ended: "失败/已结束"
+};
+
+function remoteCandidateGroup(item) {
+  const state = item && item.pull_state || "new";
+  if(state === "active") return "active";
+  if(state === "done") return "done";
+  if(state === "recent_failure") return "recent_failure";
+  if(["failed", "finished"].includes(state)) return "ended";
+  if(!item || !item.skip_reason) return "pullable";
+  return "other";
+}
+
+function remoteFilterCounts(items) {
+  const counts = { all: (items || []).length, pullable: 0, active: 0, done: 0, recent_failure: 0, ended: 0 };
+  (items || []).forEach(item => {
+    const group = remoteCandidateGroup(item);
+    if(Object.prototype.hasOwnProperty.call(counts, group)) counts[group] += 1;
+  });
+  return counts;
+}
+
+function updateRemoteFilters(items) {
+  const container = $("remote-filters");
+  if(!container) return;
+  const counts = remoteFilterCounts(items || []);
+  container.innerHTML = `<div class="browser-tabs" role="tablist" aria-label="远程候选筛选">` + Object.entries(remoteFilterLabels).map(([key, label]) => {
+    const count = counts[key] || 0;
+    return `<button class="browser-tab${remoteCandidateFilter === key ? " active" : ""}" type="button" data-remote-filter="${esc(key)}">${esc(label)} ${count}</button>`;
+  }).join("") + `</div>`;
+}
+
+function filteredRemoteCandidates(items) {
+  if(remoteCandidateFilter === "all") return items || [];
+  return (items || []).filter(item => remoteCandidateGroup(item) === remoteCandidateFilter);
+}
+
+function renderRemoteCandidates() {
+  updateRemoteFilters(lastRemoteCandidates);
+  updateRemoteRows(filteredRemoteCandidates(lastRemoteCandidates), lastRemoteManualPullEnabled);
+}
+
 function updateRemoteRows(items, pullEnabled=false) {
   const body = $("remote-body");
   if(!body) return;
   if(!items || !items.length) {
-    body.innerHTML = `<tr><td colspan="6" class="browser-empty">没有远程原盘候选</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="browser-empty">没有符合筛选的远程原盘候选</td></tr>`;
     return;
   }
   body.innerHTML = items.map(item => {
@@ -2423,7 +2479,9 @@ async function loadRemoteCandidates(force=false) {
   if(status) status.textContent = force ? "正在强制刷新..." : "正在读取远程目录...";
   try {
     const payload = await fetchJson("/api/cd2/remote-candidates?force=" + (force ? "1" : "0") + "&_=" + Date.now());
-    updateRemoteRows(payload.candidates || [], payload.manual_pull_enabled === true);
+    lastRemoteCandidates = payload.candidates || [];
+    lastRemoteManualPullEnabled = payload.manual_pull_enabled === true;
+    renderRemoteCandidates();
     const parts = [payload.message || "远程目录已读取"];
     if(payload.summary) parts.push("可拉取 " + (payload.summary.pullable || 0) + " / 跳过 " + (payload.summary.skipped || 0));
     parts.push(payload.auto_pull_enabled === true ? "自动拉取已启用" : "自动拉取未启用");
@@ -2431,7 +2489,9 @@ async function loadRemoteCandidates(force=false) {
     if(payload.errors && payload.errors.length) parts.push(String(payload.errors.length) + " 个目录读取失败");
     if(status) status.textContent = parts.join(" / ");
   } catch(e) {
-    updateRemoteRows([]);
+    lastRemoteCandidates = [];
+    lastRemoteManualPullEnabled = false;
+    renderRemoteCandidates();
     if(status) status.textContent = e.message || "读取远程目录失败";
   }
 }
@@ -2461,6 +2521,12 @@ async function loadBrowser(root = currentBrowseRoot, path = currentBrowsePath) {
 
 function setupBrowser() {
   document.addEventListener("click", (event) => {
+    const filterButton = event.target.closest("[data-remote-filter]");
+    if(filterButton) {
+      remoteCandidateFilter = filterButton.dataset.remoteFilter || "all";
+      renderRemoteCandidates();
+      return;
+    }
     const clearButton = event.target.closest("[data-remote-clear-path]");
     if(clearButton) {
       clearRemoteCandidateRecord(clearButton);

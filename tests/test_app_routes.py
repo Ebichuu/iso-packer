@@ -163,6 +163,21 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("data-remote-clear-path", script)
         self.assertIn("/api/cd2/pull-record", script)
 
+    def test_remote_candidates_table_filters_by_process_state(self):
+        match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        self.assertIn('id="remote-filters"', page_module.PAGE)
+        self.assertIn("data-remote-filter", script)
+        self.assertIn("function remoteCandidateGroup", script)
+        self.assertIn("可拉取", script)
+        self.assertIn("处理中", script)
+        self.assertIn("已处理", script)
+        self.assertIn("最近失败", script)
+        self.assertIn("失败/已结束", script)
+        self.assertNotIn("低于最小体积", script)
+        self.assertNotIn("命中排除关键词", script)
+
     def test_dashboard_shows_cd2_cache_status(self):
         match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
         self.assertIsNotNone(match)
