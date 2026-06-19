@@ -702,6 +702,32 @@ def cd2_pull_recent_failure(source_path: str, cooldown_seconds: int = CD2_AUTO_P
     return False
 
 
+def cd2_auto_pull_keywords(value) -> list[str]:
+    parts = re.split(r"[\n,;]+", str(value or ""))
+    seen = set()
+    result = []
+    for part in parts:
+        keyword = part.strip().lower()
+        if keyword and keyword not in seen:
+            seen.add(keyword)
+            result.append(keyword)
+    return result
+
+
+def cd2_auto_pull_filter_reason(candidate: Dict, cfg: Dict) -> str:
+    text = " ".join([
+        str((candidate or {}).get("name") or ""),
+        str((candidate or {}).get("path") or ""),
+    ]).lower()
+    for keyword in cd2_auto_pull_keywords((cfg or {}).get("cd2_auto_pull_exclude_keywords")):
+        if keyword in text:
+            return f"命中排除关键词: {keyword}"
+    include_keywords = cd2_auto_pull_keywords((cfg or {}).get("cd2_auto_pull_include_keywords"))
+    if include_keywords and not any(keyword in text for keyword in include_keywords):
+        return "未命中包含关键词"
+    return ""
+
+
 def cd2_pull_already_tracked(source_path: str, local_source: Path, include_finished_source: bool = False) -> bool:
     source_path = normalize_path_text(source_path)
     local_key = str(local_source)
@@ -872,6 +898,14 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
             break
         source_path = normalize_path_text(candidate.get("path"))
         if not source_path:
+            continue
+        filter_reason = cd2_auto_pull_filter_reason(candidate, cfg)
+        if filter_reason:
+            result["skipped"].append({
+                "source_path": source_path,
+                "status_code": 0,
+                "message": filter_reason,
+            })
             continue
         created, status_code = create_cd2_pull_task(cfg, source_path, mode="auto", cd2_status=cd2_status)
         if created.get("ok"):
@@ -2439,6 +2473,8 @@ def settings():
     cfg["cd2_remote_source_dirs_text"] = cd2_remote_source_dirs_to_text(cfg)
     cfg["cd2_manual_pull_enabled"] = "cd2_manual_pull_enabled" in request.form
     cfg["cd2_auto_pull_enabled"] = "cd2_auto_pull_enabled" in request.form
+    cfg["cd2_auto_pull_include_keywords"] = request.form.get("cd2_auto_pull_include_keywords", cfg.get("cd2_auto_pull_include_keywords", "")).strip()
+    cfg["cd2_auto_pull_exclude_keywords"] = request.form.get("cd2_auto_pull_exclude_keywords", cfg.get("cd2_auto_pull_exclude_keywords", "")).strip()
     cfg["cd2_local_pull_dir"] = request.form.get("cd2_local_pull_dir", cfg.get("cd2_local_pull_dir", cfg["watch_dir"])).strip() or cfg["watch_dir"]
     cfg["cd2_remote_pull_dest_dir"] = normalize_path_text(request.form.get("cd2_remote_pull_dest_dir", cfg.get("cd2_remote_pull_dest_dir", "")))
     cfg["cd2_api_enabled"] = "cd2_api_enabled" in request.form

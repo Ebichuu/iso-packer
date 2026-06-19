@@ -703,6 +703,71 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(len(result["created_tasks"]), 2)
         self.assertIn("本轮已创建 2 个", result["message"])
 
+    def test_cd2_auto_pull_filters_candidates_by_keywords(self):
+        class FakeFile:
+            def __init__(self, name, full_path, is_dir=True):
+                self.name = name
+                self.fullPathName = full_path
+                self.isDirectory = is_dir
+
+        class FakeResult:
+            success = True
+            errorMessage = ""
+            resultFilePaths = []
+
+        class FakeCloudDriveClient:
+            copy_calls = []
+
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                data = {
+                    "/115/03-PT": [
+                        FakeFile("MovieKeep.UHD", "/115/03-PT/MovieKeep.UHD"),
+                        FakeFile("MovieSkip.UHD", "/115/03-PT/MovieSkip.UHD"),
+                        FakeFile("OtherMovie", "/115/03-PT/OtherMovie"),
+                    ],
+                    "/115/03-PT/MovieKeep.UHD": [FakeFile("BDMV", "/115/03-PT/MovieKeep.UHD/BDMV")],
+                    "/115/03-PT/MovieSkip.UHD": [FakeFile("BDMV", "/115/03-PT/MovieSkip.UHD/BDMV")],
+                    "/115/03-PT/OtherMovie": [FakeFile("BDMV", "/115/03-PT/OtherMovie/BDMV")],
+                }
+                return data.get(path, [])
+
+            def copy_file(self, paths, dest_path):
+                self.copy_calls.append((list(paths), dest_path))
+                return FakeResult()
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_remote_source_dirs=["/115/03-PT"],
+            cd2_auto_pull_enabled=True,
+            cd2_auto_pull_max_tasks_per_scan=3,
+            cd2_auto_pull_include_keywords="UHD",
+            cd2_auto_pull_exclude_keywords="Skip",
+            cd2_local_pull_dir=str(self.watch),
+            cd2_remote_pull_dest_dir="/115/Downloads",
+        )
+
+        with mock.patch.object(app_module, "fetch_cd2_uploads", return_value=({}, {"connected": True, "downloads": [], "copy_tasks": []})), \
+             mock.patch.object(app_module, "process_item"):
+            app_module.scan_once(cfg)
+
+        self.assertEqual(FakeCloudDriveClient.copy_calls, [
+            (["/115/03-PT/MovieKeep.UHD"], "/115/Downloads"),
+        ])
+        result = app_module.state["cd2"]["auto_pull"]["last_result"]
+        self.assertEqual(result["created_count"], 1)
+        self.assertEqual(len(result["skipped"]), 2)
+
     def test_cd2_auto_pull_does_not_duplicate_existing_source(self):
         class FakeFile:
             def __init__(self, name, full_path, is_dir=True):
@@ -998,6 +1063,8 @@ class AppRouteTests(unittest.TestCase):
             "cd2_remote_source_dirs_text": "/115/03-PT\n/115/04-BDMV",
             "cd2_manual_pull_enabled": "on",
             "cd2_auto_pull_enabled": "on",
+            "cd2_auto_pull_include_keywords": "UHD\nCHDBits",
+            "cd2_auto_pull_exclude_keywords": "sample\ntrailer",
             "cd2_local_pull_dir": str(self.watch),
             "cd2_remote_pull_dest_dir": "/115/Downloads",
             "cd2_webhook_enabled": "on",
@@ -1032,6 +1099,8 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(cfg["cd2_remote_source_dirs"], ["/115/03-PT", "/115/04-BDMV"])
         self.assertTrue(cfg["cd2_manual_pull_enabled"])
         self.assertTrue(cfg["cd2_auto_pull_enabled"])
+        self.assertEqual(cfg["cd2_auto_pull_include_keywords"], "UHD\nCHDBits")
+        self.assertEqual(cfg["cd2_auto_pull_exclude_keywords"], "sample\ntrailer")
         self.assertEqual(cfg["cd2_local_pull_dir"], str(self.watch))
         self.assertEqual(cfg["cd2_remote_pull_dest_dir"], "/115/Downloads")
 

@@ -1290,6 +1290,16 @@ tr:hover td { background: #fff8f7; }
           <div class="settings-help">默认 1，调大后每次扫描可连续创建多个 CD2 拉取任务。</div>
         </div>
         <div class="form-group">
+          <label>自动拉取包含关键词</label>
+          <textarea name="cd2_auto_pull_include_keywords" spellcheck="false" placeholder="CHDBits&#10;UHD">{{cfg.cd2_auto_pull_include_keywords}}</textarea>
+          <div class="settings-help">留空表示不过滤；每行或逗号分隔一个关键词，名称或路径命中才会自动拉取。</div>
+        </div>
+        <div class="form-group">
+          <label>自动拉取排除关键词</label>
+          <textarea name="cd2_auto_pull_exclude_keywords" spellcheck="false" placeholder="sample&#10;trailer">{{cfg.cd2_auto_pull_exclude_keywords}}</textarea>
+          <div class="settings-help">名称或路径命中时跳过自动拉取；手动拉取不受影响。</div>
+        </div>
+        <div class="form-group">
           <label>自动拉取失败冷却秒数</label>
           <input name="cd2_auto_pull_failure_cooldown_seconds" type="number" min="0" value="{{cfg.cd2_auto_pull_failure_cooldown_seconds}}">
         </div>
