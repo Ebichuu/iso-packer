@@ -598,6 +598,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
             disc_type = "BDMV" if "bdmv" in names else ("VIDEO_TS" if "video_ts" in names else "")
             if not disc_type:
                 continue
+            pull_status = cd2_remote_candidate_status(cfg, child_path)
             payload["candidates"].append({
                 "name": cd2_file_name(child) or child_path.rsplit("/", 1)[-1],
                 "path": child_path,
@@ -605,6 +606,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
                 "disc_type": disc_type,
                 "size": cd2_file_size(child),
                 "modified": cd2_file_mtime(child),
+                **pull_status,
             })
     payload["candidate_count"] = len(payload["candidates"])
     payload["message"] = f"发现 {payload['candidate_count']} 个远程原盘候选"
@@ -637,6 +639,49 @@ def record_cd2_pull_result(source_path: str, dest_dir: str, ok: bool, message: s
 def cd2_local_pull_path_for_source(cfg: Dict, source_path: str) -> Path:
     local_pull_dir = Path(cfg.get("cd2_local_pull_dir") or cfg.get("watch_dir") or DEFAULT_CONFIG["watch_dir"]).expanduser()
     return (local_pull_dir / safe_filename(source_path.rsplit("/", 1)[-1])).resolve()
+
+
+def cd2_remote_candidate_status(cfg: Dict, source_path: str) -> Dict:
+    source_path = normalize_path_text(source_path)
+    local_source = cd2_local_pull_path_for_source(cfg, source_path)
+    result = {
+        "local_path": str(local_source),
+        "pull_state": "new",
+        "pull_status_label": "新候选",
+    }
+    local_key = str(local_source)
+    source_match = None
+    with lock:
+        items = dict(state.get("items", {}))
+    for key, item in items.items():
+        if item.get("status") == "removed":
+            continue
+        if key == local_key or normalize_path_text(item.get("cd2_pull_source")) == source_path:
+            source_match = dict(item)
+            break
+    if source_match:
+        item_status = source_match.get("status") or ""
+        result.update({
+            "pull_item_status": item_status,
+            "pull_mode": source_match.get("cd2_pull_mode") or "",
+            "pull_created_at": source_match.get("cd2_pull_created_at") or "",
+            "pull_error": source_match.get("error") or source_match.get("last_error") or "",
+            "pull_status_label": status_label(item_status),
+        })
+        if item_status in {"done", "transfer_done"}:
+            result["pull_state"] = "done"
+        elif item_status in {"failed", "verify_failed", "transfer_failed"}:
+            result["pull_state"] = "failed"
+        elif item_status in TERMINAL_STATUSES:
+            result["pull_state"] = "finished"
+        else:
+            result["pull_state"] = "active"
+        return result
+    failure_cooldown = int_config(cfg, "cd2_auto_pull_failure_cooldown_seconds", CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS, minimum=0)
+    if cd2_pull_recent_failure(source_path, failure_cooldown):
+        result["pull_state"] = "recent_failure"
+        result["pull_status_label"] = "最近失败"
+    return result
 
 
 def cd2_pull_recent_failure(source_path: str, cooldown_seconds: int = CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS) -> bool:

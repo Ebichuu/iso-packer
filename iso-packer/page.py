@@ -1547,11 +1547,12 @@ tr:hover td { background: #fff8f7; }
               <th>类型</th>
               <th>远程路径</th>
               <th>来源目录</th>
+              <th>状态</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody id="remote-body">
-            <tr><td colspan="5" class="browser-empty">正在加载...</td></tr>
+            <tr><td colspan="6" class="browser-empty">正在加载...</td></tr>
           </tbody>
         </table>
       </div>
@@ -2304,11 +2305,12 @@ function updateRemoteRows(items, pullEnabled=false) {
   const body = $("remote-body");
   if(!body) return;
   if(!items || !items.length) {
-    body.innerHTML = `<tr><td colspan="5" class="browser-empty">没有远程原盘候选</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="browser-empty">没有远程原盘候选</td></tr>`;
     return;
   }
   body.innerHTML = items.map(item => {
     const path = item.path || "";
+    const status = item.pull_status_label || "新候选";
     const action = pullEnabled
       ? `<button class="browser-btn" type="button" data-remote-pull-path="${esc(path)}">拉取</button>`
       : `<span class="browser-kind">未启用</span>`;
@@ -2317,6 +2319,7 @@ function updateRemoteRows(items, pullEnabled=false) {
       <td><span class="browser-kind">${esc(item.disc_type || "-")}</span></td>
       <td><span class="target-text" title="${esc(item.path || "-")}">${esc(item.path || "-")}</span></td>
       <td><span class="target-text" title="${esc(item.root || "-")}">${esc(item.root || "-")}</span></td>
+      <td><span class="browser-kind" title="${esc(item.pull_error || item.local_path || "")}">${esc(status)}</span></td>
       <td>${action}</td>
     </tr>`;
   }).join("");
