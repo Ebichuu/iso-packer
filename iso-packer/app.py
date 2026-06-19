@@ -1843,7 +1843,7 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
             return None
         update_active_progress("transfer", final_path, {"percent": 100.0, "current": total, "total": total, "verified": True})
         target.unlink()
-        log(f"CloudDrive2转移完成并校验通过，已删除本地ISO: {final_path}")
+        log(f"CloudDrive2转移完成并校验通过，已删除输出目录临时ISO: {target}，目标文件保留: {final_path}")
         if cfg.get("cd2_refresh_enabled") and cfg.get("cd2_refresh_after_transfer"):
             refresh = refresh_cd2_directory(cfg, str(final_path.parent), "transfer")
             if refresh.get("ok"):

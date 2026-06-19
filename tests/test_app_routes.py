@@ -850,6 +850,10 @@ class AppRouteTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertFalse(source_iso.exists())
+        self.assertTrue(result.exists())
+        transfer_log = "\n".join(app_module.state.get("events", []))
+        self.assertIn(f"已删除输出目录临时ISO: {source_iso}", transfer_log)
+        self.assertIn(f"目标文件保留: {result}", transfer_log)
         self.assertEqual(FakeCloudDriveClient.calls, [("/115/00-未整理/00-mkiso", True)])
 
     def test_settings_saves_cd2_auth_mode(self):
