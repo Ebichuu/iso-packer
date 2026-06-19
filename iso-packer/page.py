@@ -1277,6 +1277,10 @@ tr:hover td { background: #fff8f7; }
           <span>启用 CD2 自动拉取</span>
         </label>
         <div class="form-group">
+          <label>自动拉取失败冷却秒数</label>
+          <input name="cd2_auto_pull_failure_cooldown_seconds" type="number" min="0" value="{{cfg.cd2_auto_pull_failure_cooldown_seconds}}">
+        </div>
+        <div class="form-group">
           <label>CD2 本地拉取目录</label>
           <div class="path-picker-row">
             <input name="cd2_local_pull_dir" type="text" value="{{cfg.cd2_local_pull_dir}}">

@@ -640,6 +640,8 @@ def cd2_local_pull_path_for_source(cfg: Dict, source_path: str) -> Path:
 
 
 def cd2_pull_recent_failure(source_path: str, cooldown_seconds: int = CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS) -> bool:
+    if cooldown_seconds <= 0:
+        return False
     source_path = normalize_path_text(source_path)
     with lock:
         recent = list(state.get("cd2", {}).get("pull", {}).get("recent_results") or [])
@@ -714,7 +716,8 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
     include_finished = mode == "auto"
     if cd2_pull_already_tracked(source_path, local_source, include_finished_source=include_finished):
         return {"ok": False, "message": "该远程候选已经在拉取或封装流程中"}, 409
-    if mode == "auto" and cd2_pull_recent_failure(source_path):
+    failure_cooldown = int_config(cfg, "cd2_auto_pull_failure_cooldown_seconds", CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS, minimum=0)
+    if mode == "auto" and cd2_pull_recent_failure(source_path, failure_cooldown):
         return {"ok": False, "message": "该远程候选最近自动拉取失败，暂时跳过"}, 409
     if mode == "auto" and cd2_remote_task_matches_pull(source_path, dest_dir, cd2_status):
         return {"ok": False, "message": "CD2 队列里已有对应拉取任务"}, 409
@@ -2321,6 +2324,7 @@ def settings():
         cfg["cd2_event_dedupe_ttl_seconds"] = parse_int_form("cd2_event_dedupe_ttl_seconds", cfg.get("cd2_event_dedupe_ttl_seconds", 600), minimum=0)
         cfg["cd2_confirm_delay_seconds"] = parse_int_form("cd2_confirm_delay_seconds", cfg.get("cd2_confirm_delay_seconds", 30), minimum=0)
         cfg["cd2_confirm_stable_checks"] = parse_int_form("cd2_confirm_stable_checks", cfg.get("cd2_confirm_stable_checks", 1), minimum=1)
+        cfg["cd2_auto_pull_failure_cooldown_seconds"] = parse_int_form("cd2_auto_pull_failure_cooldown_seconds", cfg.get("cd2_auto_pull_failure_cooldown_seconds", CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS), minimum=0)
     except ValueError as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
     cfg["enabled"] = "enabled" in request.form
