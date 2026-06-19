@@ -280,6 +280,7 @@ def status_label(status: str) -> str:
         "failed": "失败",
         "verify_failed": "验证失败",
         "transferring": "正在移动到 CD2",
+        "refreshing_cd2_dir": "正在刷新 CD2 目录",
         "waiting_cd2_upload": "等待 CD2 上传完成",
         "transfer_done": "已交给 CD2",
         "transfer_failed": "转移失败",
@@ -293,7 +294,7 @@ def badge_class(status: str) -> str:
         return "badge-green"
     if status in {"failed", "verify_failed", "transfer_failed"}:
         return "badge-red"
-    if status in {"running", "transferring", "waiting_cd2_upload", "waiting_cd2_confirm", "waiting_cd2_pull"}:
+    if status in {"running", "transferring", "refreshing_cd2_dir", "waiting_cd2_upload", "waiting_cd2_confirm", "waiting_cd2_pull"}:
         return "badge-yellow"
     if status in {"skipped", "removed"}:
         return "badge-gray"

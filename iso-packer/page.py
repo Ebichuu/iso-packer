@@ -1615,7 +1615,7 @@ tr:hover td { background: #fff8f7; }
 
 <script>
 (function(){
-const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiting_cd2_confirm:"\u7b49\u5f85 CD2 \u786e\u8ba4",waiting_cd2_pull:"\u7b49\u5f85 CD2 \u62c9\u53d6",waiting_stable:"\u7b49\u5f85\u7a33\u5b9a",waiting_partial:"\u7b49\u5f85\u4e0b\u8f7d\u5b8c\u6210",ready:"\u51c6\u5907\u6253\u5305",running:"\u6b63\u5728\u5c01\u88c5",done:"\u5df2\u5b8c\u6210",failed:"\u5931\u8d25",verify_failed:"\u9a8c\u8bc1\u5931\u8d25",transferring:"\u6b63\u5728\u79fb\u52a8\u5230 CD2",waiting_cd2_upload:"\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210",transfer_done:"\u5df2\u4ea4\u7ed9 CD2",transfer_failed:"\u79fb\u52a8\u5931\u8d25",removed:"\u6e90\u5df2\u79fb\u9664"};
+const labels={watching:"\u76d1\u63a7\u4e2d",receiving:"\u63a5\u6536\u4e2d",waiting_cd2_confirm:"\u7b49\u5f85 CD2 \u786e\u8ba4",waiting_cd2_pull:"\u7b49\u5f85 CD2 \u62c9\u53d6",waiting_stable:"\u7b49\u5f85\u7a33\u5b9a",waiting_partial:"\u7b49\u5f85\u4e0b\u8f7d\u5b8c\u6210",ready:"\u51c6\u5907\u6253\u5305",running:"\u6b63\u5728\u5c01\u88c5",done:"\u5df2\u5b8c\u6210",failed:"\u5931\u8d25",verify_failed:"\u9a8c\u8bc1\u5931\u8d25",transferring:"\u6b63\u5728\u79fb\u52a8\u5230 CD2",refreshing_cd2_dir:"\u6b63\u5728\u5237\u65b0 CD2 \u76ee\u5f55",waiting_cd2_upload:"\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210",transfer_done:"\u5df2\u4ea4\u7ed9 CD2",transfer_failed:"\u79fb\u52a8\u5931\u8d25",removed:"\u6e90\u5df2\u79fb\u9664"};
 const $=id=>document.getElementById(id);
 let alertTimer;
 const seenLogEvents = new Set();
@@ -1757,7 +1757,7 @@ function setupSettingsForm(){
 function getBadgeClass(status) {
   if (['done', 'transfer_done'].includes(status)) return 'badge-green';
   if (['failed', 'verify_failed', 'transfer_failed'].includes(status)) return 'badge-red';
-  if (['running', 'transferring', 'waiting_cd2_upload', 'waiting_cd2_confirm', 'waiting_cd2_pull'].includes(status)) return 'badge-yellow';
+  if (['running', 'transferring', 'refreshing_cd2_dir', 'waiting_cd2_upload', 'waiting_cd2_confirm', 'waiting_cd2_pull'].includes(status)) return 'badge-yellow';
   if (['skipped', 'removed'].includes(status)) return 'badge-gray';
   return 'badge-blue';
 }
@@ -1941,6 +1941,7 @@ function formatCd2AutoPullStatus(cd2State) {
 function statusBadgeText(status, item={}) {
   if (status === "running") return "\u6b63\u5728\u5c01\u88c5";
   if (status === "transferring") return "\u6b63\u5728\u79fb\u52a8\u5230 CD2";
+  if (status === "refreshing_cd2_dir") return "\u6b63\u5728\u5237\u65b0 CD2 \u76ee\u5f55";
   if (status === "waiting_cd2_upload") return "\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210";
   if (status === "transfer_done") return "\u5df2\u4ea4\u7ed9 CD2";
   if (status === "done") return item.pack_iso === false ? "\u8df3\u8fc7\u5c01\u88c5" : "\u5df2\u5c01\u88c5 ISO";
@@ -1954,6 +1955,7 @@ function phaseStatusText(active) {
   const status = active && active.status;
   if (phase === "packing" || status === "running") return "\u6b63\u5728\u5c01\u88c5";
   if (phase === "transfer" || status === "transferring") return "\u6b63\u5728\u79fb\u52a8\u5230 CD2";
+  if (phase === "refresh_cd2_dir" || status === "refreshing_cd2_dir") return "\u6b63\u5728\u5237\u65b0 CD2 \u76ee\u5f55";
   if (status === "waiting_cd2_upload") return "\u7b49\u5f85 CD2 \u4e0a\u4f20\u5b8c\u6210";
   return statusBadgeText(status, active || {});
 }
@@ -1991,7 +1993,7 @@ function getTaskProgress(item, active, key) {
 function renderTableProgress(item, active, key) {
   item = rowItem(item, active, key);
   const status = (item || {}).status;
-  const visibleStatuses = ["running", "transferring", "waiting_cd2_upload", "done", "transfer_done"];
+  const visibleStatuses = ["running", "transferring", "refreshing_cd2_dir", "waiting_cd2_upload", "done", "transfer_done"];
   if(!visibleStatuses.includes(status)) return `<span class="small-muted">--</span>`;
   const progress = getTaskProgress(item, active, key);
   const percent = Math.max(0, Math.min(100, Number(progress.percent || 0)));

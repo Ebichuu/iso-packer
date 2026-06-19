@@ -163,7 +163,7 @@ CD2 控制边界：
 - 已新增远程候选拉取状态：新候选、拉取中、已处理、失败、最近失败，并在 Web 远程候选表格展示
 - 已新增中间状态：`waiting_cd2_confirm`
 - 已新增中间状态：`waiting_cd2_pull`
-- 仍待新增中间状态：`refreshing_cd2_dir`
+- 已新增中间状态：`refreshing_cd2_dir`
 
 测试重点：
 

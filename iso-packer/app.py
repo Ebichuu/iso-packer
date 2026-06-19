@@ -1738,6 +1738,28 @@ def update_active_progress(phase: str, target: Path, progress: Dict) -> None:
         save_state_locked()
 
 
+def mark_active_status(status: str, target: Path, phase: Optional[str] = None) -> None:
+    with lock:
+        active = state.get("active")
+        if not active:
+            return
+        active["status"] = status
+        active["target"] = str(target)
+        progress = dict(active.get("progress") or {})
+        if phase:
+            progress["phase"] = phase
+            progress["percent"] = max(0.0, min(100.0, float(progress.get("percent") or 0)))
+            progress["updated_at"] = now()
+            active["progress"] = progress
+        source = active.get("source")
+        item = state.get("items", {}).get(source) if source else None
+        if item and item.get("status") not in TERMINAL_STATUSES:
+            item["status"] = status
+            item["last_changed"] = now()
+        state["active"] = active
+        save_state_locked()
+
+
 def run_iso(source: Path, target: Path, source_size: int) -> subprocess.CompletedProcess:
     volid = safe_volume_id(source.stem if source.is_file() else source.name)[:32].upper() or "DISC"
     # genisoimage supports UDF, which is important for Blu-ray folders and files over 4 GB.
@@ -1855,6 +1877,7 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
         target.unlink()
         log(f"CloudDrive2转移完成并校验通过，已删除输出目录临时ISO: {target}，目标文件保留: {final_path}")
         if cfg.get("cd2_refresh_enabled") and cfg.get("cd2_refresh_after_transfer"):
+            mark_active_status("refreshing_cd2_dir", final_path, "refresh_cd2_dir")
             refresh = refresh_cd2_directory(cfg, str(final_path.parent), "transfer")
             if refresh.get("ok"):
                 log(f"CD2 目标目录刷新完成: {refresh.get('path')}")
@@ -2119,7 +2142,7 @@ def scan_once(cfg: Dict) -> None:
         with lock:
             item = state["items"].setdefault(key, {"first_seen": now(), "status": "watching"})
             item["pack_iso"] = True
-            active_statuses = {"running", "transferring"}
+            active_statuses = {"running", "transferring", "refreshing_cd2_dir"}
             if item.get("status") in TERMINAL_STATUSES | active_statuses | {"waiting_cd2_upload"}:
                 item.setdefault("last_size", size)
                 item["partial_files"] = partial

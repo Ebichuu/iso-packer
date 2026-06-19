@@ -856,6 +856,50 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn(f"目标文件保留: {result}", transfer_log)
         self.assertEqual(FakeCloudDriveClient.calls, [("/115/00-未整理/00-mkiso", True)])
 
+    def test_transfer_marks_active_refreshing_cd2_directory(self):
+        class FakeCloudDriveClient:
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                return []
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        source = str(self.watch / "RefreshStatus")
+        source_iso = self.output / "RefreshStatus.iso"
+        source_iso.write_bytes(b"iso")
+        app_module.state["items"][source] = {"status": "transferring"}
+        app_module.state["active"] = {
+            "source": source,
+            "target": str(source_iso),
+            "status": "transferring",
+            "progress": {"phase": "transfer", "percent": 100, "current": 3, "total": 3},
+        }
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_transfer_enabled=True,
+            cd2_require_mount=False,
+            cd2_refresh_enabled=True,
+            cd2_refresh_after_transfer=True,
+            cd2_path_aliases=[
+                {"local": str(self.data_dir / "CloudNAS" / "CloudDrive"), "remote": "/115"},
+            ],
+        )
+
+        result = app_module.transfer_iso_to_mount(source_iso, cfg)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(app_module.state["active"]["status"], "refreshing_cd2_dir")
+        self.assertEqual(app_module.state["active"]["progress"]["phase"], "refresh_cd2_dir")
+        self.assertEqual(app_module.state["items"][source]["status"], "refreshing_cd2_dir")
+
     def test_settings_saves_cd2_auth_mode(self):
         self.login()
         response = self.client.post("/settings", data={
