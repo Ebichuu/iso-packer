@@ -872,6 +872,7 @@ class AppRouteTests(unittest.TestCase):
             "cd2_api_username": "user",
             "cd2_api_password": "secret",
             "cd2_queue_poll_seconds": "10",
+            "cd2_upload_match_mode": "alias_only",
             "cd2_event_debounce_seconds": "5",
             "cd2_event_dedupe_ttl_seconds": "60",
             "cd2_confirm_delay_seconds": "15",
@@ -901,6 +902,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(cfg["cd2_auth_mode"], "password")
         self.assertEqual(cfg["cd2_api_addr"], "127.0.0.1:19798")
         self.assertEqual(cfg["cd2_path_aliases"][0]["remote"], "/115")
+        self.assertEqual(cfg["cd2_upload_match_mode"], "alias_only")
         self.assertTrue(cfg["cd2_wait_upload_complete"])
         self.assertTrue(cfg["cd2_webhook_enabled"])
         self.assertEqual(cfg["cd2_webhook_secret"], "webhook-secret")
@@ -1305,6 +1307,42 @@ class AppRouteTests(unittest.TestCase):
 
         self.assertIsNone(active)
         self.assertEqual(enriched[source_key]["cd2_upload"], upload)
+
+    def test_cd2_upload_match_mode_alias_only_rejects_suffix_fallback(self):
+        target = self.cd2 / "Movie.iso"
+        upload = {
+            "path": "/115/Other/Movie.iso",
+            "human": "42.0%",
+        }
+        cfg = self.scan_config(
+            cd2_upload_match_mode="alias_only",
+            cd2_mount_root=str(self.data_dir / "CloudNAS"),
+            cd2_target_dir=str(self.cd2),
+            cd2_path_aliases=[
+                {"local": str(self.data_dir / "CloudNAS" / "CloudDrive"), "remote": "/115"}
+            ],
+        )
+        upload_map = {app_module.normalize_upload_path(upload["path"]): upload}
+
+        self.assertIsNone(app_module.find_upload_for_path(upload_map, str(target), cfg))
+
+    def test_cd2_upload_match_mode_alias_then_suffix_keeps_existing_fallback(self):
+        target = self.cd2 / "Movie.iso"
+        upload = {
+            "path": "/115/Other/Movie.iso",
+            "human": "42.0%",
+        }
+        cfg = self.scan_config(
+            cd2_upload_match_mode="alias_then_suffix",
+            cd2_mount_root=str(self.data_dir / "CloudNAS"),
+            cd2_target_dir=str(self.cd2),
+            cd2_path_aliases=[
+                {"local": str(self.data_dir / "CloudNAS" / "CloudDrive"), "remote": "/115"}
+            ],
+        )
+        upload_map = {app_module.normalize_upload_path(upload["path"]): upload}
+
+        self.assertEqual(app_module.find_upload_for_path(upload_map, str(target), cfg), upload)
 
     def test_waiting_cd2_upload_stays_until_upload_done(self):
         key = str(self.watch / "UploadWait")

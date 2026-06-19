@@ -113,7 +113,7 @@ SA 式判定核心不是“看到目录就开工”，而是多路确认：
 - 配置 ISO 目标目录，保持 `/CloudNAS/CloudDrive/00-未整理/00-mkiso`
 - 明确路径映射：容器路径 `/CloudNAS/CloudDrive/...` 和 CD2 网盘路径 `/115/...` 建立别名关系
 - 上传进度展示继续读取 CD2 上传队列，并优先用路径别名匹配，例如 `/115/...` 对应 `/CloudNAS/CloudDrive/...`
-- 后缀兜底匹配只作为兼容策略，后续应可关闭，避免同名文件误匹配
+- 已支持配置上传队列匹配策略：默认兼容旧逻辑，优先路径别名匹配并允许同名后缀兜底；严格模式只允许路径别名 / 完整路径匹配，避免同名文件误匹配
 
 CD2 控制边界：
 
@@ -143,9 +143,9 @@ CD2 控制边界：
 - 已新增：`cd2_event_debounce_seconds`、`cd2_event_dedupe_ttl_seconds`
 - 已新增：`cd2_confirm_delay_seconds`、`cd2_confirm_stable_checks`
 - 已新增：`cd2_refresh_enabled`、`cd2_refresh_after_transfer`、`cd2_refresh_after_source_event`
-- `cd2_path_aliases`，例如 `{ "local": "/CloudNAS/CloudDrive", "remote": "/115" }`
-- `cd2_upload_match_mode`，优先别名匹配，再决定是否允许后缀兜底
-- `cd2_wait_upload_complete`，用于区分“本地已转移”和“云端已上传”
+- 已新增：`cd2_path_aliases`，例如 `{ "local": "/CloudNAS/CloudDrive", "remote": "/115" }`
+- 已新增：`cd2_upload_match_mode`，优先别名匹配，再决定是否允许后缀兜底
+- 已新增：`cd2_wait_upload_complete`，用于区分“本地已转移”和“云端已上传”
 - 已新增：`cd2_remote_source_dirs`，用于配置网盘原盘来源目录；默认只读扫描远程 BDMV / VIDEO_TS 候选，手动 / 自动拉取由独立开关控制
 - 已新增：`cd2_manual_pull_enabled`
 - 已新增：`cd2_auto_pull_enabled`
@@ -173,7 +173,7 @@ CD2 控制边界：
 - 已覆盖：手动拉取开关、源目录越权拦截、CD2 copy 任务创建、拉取进度优先显示为 `waiting_cd2_pull`
 - 已覆盖：自动拉取默认关闭、缺目标目录时不扫描、每轮只创建 1 个任务、已有同源记录时不重复创建
 - 已覆盖：远程候选列表展示拉取状态，避免只能从自动拉取跳过文案推断原因
-- 本地路径和 CD2 网盘路径别名匹配，避免同名文件误匹配
+- 已覆盖：本地路径和 CD2 网盘路径别名匹配，以及严格上传匹配模式下避免同名文件误匹配
 - 上传完成门禁不会把“本地已转移”或“未匹配到上传队列”误显示成“云端已上传”
 - 自动拉取只跟踪自己创建的 CD2 任务，不接管外部手动任务；默认关闭，开启后每轮最多创建 1 个任务
 - `sanitize_config` 不泄露 webhook secret 或 CD2 API Token

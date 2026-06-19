@@ -1264,6 +1264,14 @@ tr:hover td { background: #fff8f7; }
           <div class="settings-help">每行一组：本地挂载路径=CD2 网盘路径。用于匹配上传进度和任务门禁。</div>
         </div>
         <div class="form-group">
+          <label>上传队列匹配</label>
+          <select name="cd2_upload_match_mode">
+            <option value="alias_then_suffix" {% if cfg.cd2_upload_match_mode != 'alias_only' %}selected{% endif %}>路径别名优先，允许同名兜底</option>
+            <option value="alias_only" {% if cfg.cd2_upload_match_mode == 'alias_only' %}selected{% endif %}>仅路径别名 / 完整路径匹配</option>
+          </select>
+          <div class="settings-help">严格模式会关闭同名文件兜底，适合目标目录里可能存在同名 ISO 的情况。</div>
+        </div>
+        <div class="form-group">
           <label>CD2 远程源目录</label>
           <textarea name="cd2_remote_source_dirs_text" spellcheck="false" placeholder="/115/03-PT">{{cfg.cd2_remote_source_dirs_text}}</textarea>
           <div class="settings-help">每行一个 CD2 网盘目录，仅用于只读观察原盘候选。</div>

@@ -84,6 +84,7 @@ CD2_UPLOAD_QUEUE_GRACE_POLLS = 3
 CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS = 30
 CD2_WEBHOOK_EVENT_LIMIT = 50
 CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS = 600
+CD2_UPLOAD_MATCH_MODES = {"alias_then_suffix", "alias_only"}
 DIRECTORY_PICKER_ROOT = "@roots"
 DIRECTORY_PICKER_SCOPES = {
     "watch_dir": ("watch_dir",),
@@ -1007,6 +1008,13 @@ def upload_lookup_keys(path: str, cfg: Optional[Dict] = None):
     return result
 
 
+def cd2_upload_match_mode_from_cfg(cfg: Optional[Dict] = None) -> str:
+    mode = str((cfg or {}).get("cd2_upload_match_mode") or DEFAULT_CONFIG["cd2_upload_match_mode"]).strip()
+    if mode not in CD2_UPLOAD_MATCH_MODES:
+        return DEFAULT_CONFIG["cd2_upload_match_mode"]
+    return mode
+
+
 def find_upload_for_path(upload_map: Dict, path: str, cfg: Optional[Dict] = None):
     if not upload_map:
         return None
@@ -1015,6 +1023,8 @@ def find_upload_for_path(upload_map: Dict, path: str, cfg: Optional[Dict] = None
         upload = direct.get(key)
         if upload:
             return upload
+    if cd2_upload_match_mode_from_cfg(cfg) == "alias_only":
+        return None
     candidates = [(normalize_upload_path(key).lower(), value) for key, value in direct.items()]
     for key in upload_lookup_keys(path, cfg):
         lowered = key.lower().strip("/")
@@ -2382,6 +2392,9 @@ def settings():
     aliases = parse_cd2_path_alias_lines(request.form.get("cd2_path_aliases_text", cfg.get("cd2_path_aliases_text", "")))
     cfg["cd2_path_aliases"] = aliases or cd2_path_aliases_from_cfg(DEFAULT_CONFIG)
     cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
+    cfg["cd2_upload_match_mode"] = cd2_upload_match_mode_from_cfg({
+        "cd2_upload_match_mode": request.form.get("cd2_upload_match_mode", cfg.get("cd2_upload_match_mode"))
+    })
     cfg["cd2_remote_source_dirs"] = parse_cd2_remote_source_dirs(request.form.get("cd2_remote_source_dirs_text", cfg.get("cd2_remote_source_dirs_text", "")))
     cfg["cd2_remote_source_dirs_text"] = cd2_remote_source_dirs_to_text(cfg)
     cfg["cd2_manual_pull_enabled"] = "cd2_manual_pull_enabled" in request.form

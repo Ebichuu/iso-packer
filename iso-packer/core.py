@@ -24,6 +24,7 @@ DEFAULT_CONFIG = {
     "cd2_api_username": "",
     "cd2_api_password": "",
     "cd2_queue_poll_seconds": 10,
+    "cd2_upload_match_mode": "alias_then_suffix",
     "cd2_webhook_enabled": False,
     "cd2_webhook_secret": "",
     "cd2_event_source": "cd2",
