@@ -553,11 +553,13 @@ def cd2_disc_type_for_remote_path(client, path: str) -> str:
 def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
     roots = parse_cd2_remote_source_dirs(cfg.get("cd2_remote_source_dirs"))
     remote_roots = cd2_remote_source_roots(cfg)
+    scan_depth = int_config(cfg, "cd2_remote_scan_depth", DEFAULT_CONFIG["cd2_remote_scan_depth"], minimum=1)
     payload = {
         "ok": True,
         "checked_at": now(),
         "roots": roots,
         "remote_roots": remote_roots,
+        "scan_depth": scan_depth,
         "manual_pull_enabled": bool(cfg.get("cd2_manual_pull_enabled")),
         "auto_pull_enabled": bool(cfg.get("cd2_auto_pull_enabled")),
         "pull_dest_dir": cd2_pull_dest_dir_from_cfg(cfg),
@@ -581,34 +583,41 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
         payload["message"] = "当前 clouddrive2-client 不支持远程目录扫描"
         return payload
     for root, remote_root in zip(roots, remote_roots):
-        try:
-            children = list_cd2_sub_files(client, remote_root, force_refresh=force_refresh)
-        except Exception as exc:
-            payload["errors"].append({"root": remote_root, "message": cd2_error_message(exc)})
-            continue
-        for child in children:
-            if not cd2_file_is_dir(child):
-                continue
-            child_path = cd2_file_path(child, remote_root)
+        stack = [(remote_root, 0, bool(force_refresh))]
+        while stack:
+            current_root, current_depth, current_force_refresh = stack.pop()
             try:
-                sub_files = list_cd2_sub_files(client, child_path, force_refresh=False)
+                children = list_cd2_sub_files(client, current_root, force_refresh=current_force_refresh)
             except Exception as exc:
-                payload["errors"].append({"root": child_path, "message": cd2_error_message(exc)})
+                payload["errors"].append({"root": current_root, "message": cd2_error_message(exc)})
                 continue
-            names = {cd2_file_name(item).lower() for item in sub_files if cd2_file_is_dir(item)}
-            disc_type = "BDMV" if "bdmv" in names else ("VIDEO_TS" if "video_ts" in names else "")
-            if not disc_type:
-                continue
-            pull_status = cd2_remote_candidate_status(cfg, child_path)
-            payload["candidates"].append({
-                "name": cd2_file_name(child) or child_path.rsplit("/", 1)[-1],
-                "path": child_path,
-                "root": remote_root,
-                "disc_type": disc_type,
-                "size": cd2_file_size(child),
-                "modified": cd2_file_mtime(child),
-                **pull_status,
-            })
+            for child in children:
+                if not cd2_file_is_dir(child):
+                    continue
+                child_path = cd2_file_path(child, current_root)
+                child_depth = current_depth + 1
+                try:
+                    sub_files = list_cd2_sub_files(client, child_path, force_refresh=False)
+                except Exception as exc:
+                    payload["errors"].append({"root": child_path, "message": cd2_error_message(exc)})
+                    continue
+                names = {cd2_file_name(item).lower() for item in sub_files if cd2_file_is_dir(item)}
+                disc_type = "BDMV" if "bdmv" in names else ("VIDEO_TS" if "video_ts" in names else "")
+                if disc_type:
+                    pull_status = cd2_remote_candidate_status(cfg, child_path)
+                    payload["candidates"].append({
+                        "name": cd2_file_name(child) or child_path.rsplit("/", 1)[-1],
+                        "path": child_path,
+                        "root": remote_root,
+                        "depth": child_depth,
+                        "disc_type": disc_type,
+                        "size": cd2_file_size(child),
+                        "modified": cd2_file_mtime(child),
+                        **pull_status,
+                    })
+                    continue
+                if child_depth < scan_depth:
+                    stack.append((child_path, child_depth, False))
     payload["candidate_count"] = len(payload["candidates"])
     payload["message"] = f"发现 {payload['candidate_count']} 个远程原盘候选"
     if payload["errors"] and not payload["candidates"]:
@@ -2452,6 +2461,7 @@ def settings():
         cfg["cd2_event_dedupe_ttl_seconds"] = parse_int_form("cd2_event_dedupe_ttl_seconds", cfg.get("cd2_event_dedupe_ttl_seconds", 600), minimum=0)
         cfg["cd2_confirm_delay_seconds"] = parse_int_form("cd2_confirm_delay_seconds", cfg.get("cd2_confirm_delay_seconds", 30), minimum=0)
         cfg["cd2_confirm_stable_checks"] = parse_int_form("cd2_confirm_stable_checks", cfg.get("cd2_confirm_stable_checks", 1), minimum=1)
+        cfg["cd2_remote_scan_depth"] = parse_int_form("cd2_remote_scan_depth", cfg.get("cd2_remote_scan_depth", 1), minimum=1)
         cfg["cd2_auto_pull_max_tasks_per_scan"] = parse_int_form("cd2_auto_pull_max_tasks_per_scan", cfg.get("cd2_auto_pull_max_tasks_per_scan", 1), minimum=1)
         cfg["cd2_auto_pull_failure_cooldown_seconds"] = parse_int_form("cd2_auto_pull_failure_cooldown_seconds", cfg.get("cd2_auto_pull_failure_cooldown_seconds", CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS), minimum=0)
     except ValueError as exc:

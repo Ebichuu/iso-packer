@@ -374,6 +374,46 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn(("/115/03-PT", True), FakeCloudDriveClient.calls)
         self.assertFalse(payload["auto_pull_enabled"])
 
+    def test_cd2_remote_candidates_respects_scan_depth(self):
+        class FakeFile:
+            def __init__(self, name, full_path, is_dir=True):
+                self.name = name
+                self.fullPathName = full_path
+                self.isDirectory = is_dir
+
+        class FakeCloudDriveClient:
+            def __init__(self, addr):
+                self.jwt_token = None
+
+            def get_sub_files(self, path, force_refresh=False):
+                data = {
+                    "/115/03-PT": [FakeFile("UHD", "/115/03-PT/UHD")],
+                    "/115/03-PT/UHD": [FakeFile("NestedMovie", "/115/03-PT/UHD/NestedMovie")],
+                    "/115/03-PT/UHD/NestedMovie": [FakeFile("BDMV", "/115/03-PT/UHD/NestedMovie/BDMV")],
+                }
+                return data.get(path, [])
+
+            def close(self):
+                pass
+
+        self.original_cd2_client = app_module.CloudDriveClient
+        app_module.CloudDriveClient = FakeCloudDriveClient
+        cfg = self.scan_config(
+            cd2_api_enabled=True,
+            cd2_auth_mode="api_token",
+            cd2_api_addr="127.0.0.1:19798",
+            cd2_api_password="dummy-token",
+            cd2_remote_source_dirs=["/115/03-PT"],
+        )
+
+        shallow = app_module.scan_cd2_remote_candidates(cfg, force_refresh=True)
+        deep = app_module.scan_cd2_remote_candidates({**cfg, "cd2_remote_scan_depth": 2}, force_refresh=True)
+
+        self.assertEqual(shallow["candidate_count"], 0)
+        self.assertEqual(deep["candidate_count"], 1)
+        self.assertEqual(deep["candidates"][0]["path"], "/115/03-PT/UHD/NestedMovie")
+        self.assertEqual(deep["candidates"][0]["depth"], 2)
+
     def test_cd2_remote_candidates_include_pull_status(self):
         class FakeFile:
             def __init__(self, name, full_path, is_dir=True):
@@ -1061,6 +1101,7 @@ class AppRouteTests(unittest.TestCase):
             "cd2_refresh_after_transfer": "on",
             "cd2_path_aliases_text": f"{self.data_dir / 'CloudNAS' / 'CloudDrive'}=/115",
             "cd2_remote_source_dirs_text": "/115/03-PT\n/115/04-BDMV",
+            "cd2_remote_scan_depth": "2",
             "cd2_manual_pull_enabled": "on",
             "cd2_auto_pull_enabled": "on",
             "cd2_auto_pull_include_keywords": "UHD\nCHDBits",
@@ -1097,6 +1138,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertTrue(cfg["cd2_refresh_after_source_event"])
         self.assertTrue(cfg["cd2_refresh_after_transfer"])
         self.assertEqual(cfg["cd2_remote_source_dirs"], ["/115/03-PT", "/115/04-BDMV"])
+        self.assertEqual(cfg["cd2_remote_scan_depth"], 2)
         self.assertTrue(cfg["cd2_manual_pull_enabled"])
         self.assertTrue(cfg["cd2_auto_pull_enabled"])
         self.assertEqual(cfg["cd2_auto_pull_include_keywords"], "UHD\nCHDBits")

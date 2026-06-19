@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
     "cd2_refresh_after_source_event": True,
     "cd2_refresh_after_transfer": True,
     "cd2_remote_source_dirs": [],
+    "cd2_remote_scan_depth": 1,
     "cd2_manual_pull_enabled": False,
     "cd2_auto_pull_enabled": False,
     "cd2_auto_pull_max_tasks_per_scan": 1,

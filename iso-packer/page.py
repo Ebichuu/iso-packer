@@ -1276,6 +1276,11 @@ tr:hover td { background: #fff8f7; }
           <textarea name="cd2_remote_source_dirs_text" spellcheck="false" placeholder="/115/03-PT">{{cfg.cd2_remote_source_dirs_text}}</textarea>
           <div class="settings-help">类似 SA 的监控路径，每行一个 CD2 网盘源目录；自动拉取开启后，会从这里发现原盘候选并拉到本地 watch。</div>
         </div>
+        <div class="form-group">
+          <label>归档监控递归层级</label>
+          <input name="cd2_remote_scan_depth" type="number" min="1" value="{{cfg.cd2_remote_scan_depth}}">
+          <div class="settings-help">默认 1，只看监控路径下一级目录；填 2 可识别分类目录下的影片原盘。</div>
+        </div>
         <label class="checkbox-group">
           <input name="cd2_manual_pull_enabled" type="checkbox" {% if cfg.cd2_manual_pull_enabled %}checked{% endif %}>
           <span>启用 CD2 手动拉取</span>
