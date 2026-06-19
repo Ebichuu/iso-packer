@@ -1212,7 +1212,7 @@ tr:hover td { background: #fff8f7; }
           </div>
         </div>
         <div class="form-group">
-          <label>CloudDrive2 目标目录</label>
+          <label>CD2 最终 ISO 目标路径</label>
           <div class="path-picker-row">
             <input name="cd2_target_dir" type="text" value="{{cfg.cd2_target_dir}}">
             <button class="path-picker-btn" type="button" data-pick-dir="cd2_target_dir">选择</button>

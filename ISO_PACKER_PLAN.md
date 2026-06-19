@@ -194,7 +194,7 @@ CD2 控制边界：
 与 SA/Symedia 归档配置的对应关系：
 
 - SA 的“监控路径”：iso-packer 对应 `cd2_remote_source_dirs`，也就是 CD2 网盘里的原盘来源目录，例如 `/115/00-待整理`。
-- SA 的“目标路径”：iso-packer 对应最终 ISO 目标目录 `cd2_target_dir`，例如 `/CloudNAS/CloudDrive/00-未整理/00-mkiso`；中间拉取目录仍是 `/watch`。
+- SA 的“目标路径”：iso-packer 对应“CD2 最终 ISO 目标路径”，例如 `/CloudNAS/CloudDrive/00-未整理/00-mkiso`；中间拉取目录仍是 `/watch`。
 - SA 的“引用规则”：iso-packer 对应固定的“原盘封装规则”，只识别 BDMV / VIDEO_TS，拉取完成后封装 ISO，再交给 CD2 上传。
 - 这里不做 TMDB 刮削、重命名入库或媒体库整理；只做个人用途的原盘到 ISO 自动化归档。
 
