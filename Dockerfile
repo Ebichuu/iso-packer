@@ -2,7 +2,7 @@
 FROM python:3.11-slim
 
 LABEL maintainer="iso-packer"
-LABEL version="1.1.8"
+LABEL version="1.1.9"
 LABEL description="Automatic Blu-ray ISO packing and CloudDrive2 transfer tool"
 
 WORKDIR /app
@@ -17,6 +17,8 @@ RUN apt-get update && \
 COPY iso-packer/app.py /app/
 COPY iso-packer/page.py /app/
 COPY iso-packer/core.py /app/
+COPY scripts/integration_smoke.py /app/scripts/
+COPY scripts/cd2_readonly_probe.py /app/scripts/
 
 RUN pip install --no-cache-dir \
     flask==3.0.0 \

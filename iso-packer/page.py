@@ -1629,6 +1629,7 @@ tr:hover td { background: #fff8f7; }
         <div class="remote-selection">
           <span class="remote-selection-count" id="remote-selection-count">已选 0</span>
           <button class="browser-btn" type="button" id="remote-pull-selected" disabled>拉取选中</button>
+          <button class="browser-btn" type="button" id="remote-clear-selected" disabled>清除选中记录</button>
         </div>
       </div>
       <div class="remote-batch-result" id="remote-batch-result"></div>
@@ -2479,11 +2480,24 @@ function selectedVisibleRemotePaths(items) {
   return (items || []).map(item => item.path || "").filter(path => path && remoteSelectedPaths.has(path));
 }
 
+function selectedVisibleRemoteCandidates(items) {
+  return (items || []).filter(item => {
+    const path = item && item.path || "";
+    return path && remoteSelectedPaths.has(path);
+  });
+}
+
+function remoteCandidateCanClear(item) {
+  return ["done", "failed", "finished", "recent_failure"].includes(item && item.pull_state || "");
+}
+
 function updateRemoteSelectionBar(items, pullEnabled=false) {
   const paths = (items || []).map(item => item.path || "").filter(Boolean);
   const selectedPaths = selectedVisibleRemotePaths(items);
+  const selectedClearableCount = selectedVisibleRemoteCandidates(items).filter(remoteCandidateCanClear).length;
   const count = $("remote-selection-count");
   const pullButton = $("remote-pull-selected");
+  const clearButton = $("remote-clear-selected");
   const selectVisible = $("remote-select-visible");
   if(selectedPaths.length === 0) remoteBatchHasFailures = false;
   if(count) count.textContent = "已选 " + selectedPaths.length;
@@ -2491,6 +2505,7 @@ function updateRemoteSelectionBar(items, pullEnabled=false) {
     pullButton.disabled = !pullEnabled || selectedPaths.length === 0;
     pullButton.textContent = remoteBatchHasFailures && selectedPaths.length > 0 ? "重试选中" : "拉取选中";
   }
+  if(clearButton) clearButton.disabled = selectedClearableCount === 0;
   if(selectVisible) {
     selectVisible.disabled = !pullEnabled || paths.length === 0;
     selectVisible.checked = paths.length > 0 && selectedPaths.length === paths.length;
@@ -2498,7 +2513,7 @@ function updateRemoteSelectionBar(items, pullEnabled=false) {
   }
 }
 
-function setRemoteBatchResult(okCount=0, errors=[]) {
+function setRemoteBatchResult(okCount=0, errors=[], actionLabel="批量拉取", successVerb="已提交", failureHint="失败项已保留选中，可重试") {
   const box = $("remote-batch-result");
   if(!box) return;
   if(!okCount && (!errors || !errors.length)) {
@@ -2507,10 +2522,10 @@ function setRemoteBatchResult(okCount=0, errors=[]) {
     return;
   }
   const hasErrors = errors && errors.length > 0;
-  const parts = ["批量拉取：已提交 " + okCount + " 个"];
+  const parts = [actionLabel + "：" + successVerb + " " + okCount + " 个"];
   if(hasErrors) {
     parts.push("失败 " + errors.length + " 个");
-    parts.push("失败项已保留选中，可重试");
+    if(failureHint) parts.push(failureHint);
     parts.push(errors.slice(0, 5).join("；"));
   }
   box.className = "remote-batch-result show" + (hasErrors ? " error" : "");
@@ -2598,6 +2613,12 @@ async function submitRemotePull(path) {
   return fetchJson("/api/cd2/pull", { method: "POST", body: data });
 }
 
+async function submitRemoteClearRecord(path) {
+  const data = new FormData();
+  data.set("path", path);
+  return fetchJson("/api/cd2/pull-record", { method: "POST", body: data });
+}
+
 async function pullRemoteCandidate(button) {
   const path = button.dataset.remotePullPath || "";
   if(!path) return;
@@ -2664,9 +2685,8 @@ async function clearRemoteCandidateRecord(button) {
   button.disabled = true;
   button.textContent = "清除中...";
   try {
-    const data = new FormData();
-    data.set("path", path);
-    const payload = await fetchJson("/api/cd2/pull-record", { method: "POST", body: data });
+    const payload = await submitRemoteClearRecord(path);
+    remoteSelectedPaths.delete(path);
     showSettingsAlert(payload.message || "候选记录已清除");
     loadRemoteCandidates(true);
     refresh();
@@ -2676,6 +2696,39 @@ async function clearRemoteCandidateRecord(button) {
     button.disabled = false;
     button.textContent = originalText;
   }
+}
+
+async function clearSelectedRemoteRecords() {
+  const visibleCandidates = filteredRemoteCandidates(lastRemoteCandidates);
+  const selectedCandidates = selectedVisibleRemoteCandidates(visibleCandidates);
+  const clearableCandidates = selectedCandidates.filter(remoteCandidateCanClear);
+  if(!clearableCandidates.length) return;
+  if(!confirm("确认清除选中的 " + clearableCandidates.length + " 条候选记录？清除后自动拉取可以重新处理它们。")) return;
+  const button = $("remote-clear-selected");
+  const originalText = button ? button.textContent : "";
+  if(button) {
+    button.disabled = true;
+    button.textContent = "清除中...";
+  }
+  setRemoteBatchResult();
+  const errors = [];
+  let okCount = 0;
+  for(const item of clearableCandidates) {
+    const path = item.path || "";
+    try {
+      await submitRemoteClearRecord(path);
+      okCount += 1;
+      remoteSelectedPaths.delete(path);
+    } catch(e) {
+      errors.push((item.name || path.split("/").pop() || path) + ": " + (e.message || "清除失败"));
+    }
+  }
+  setRemoteBatchResult(okCount, errors, "批量清除", "已清除", "失败项已保留选中，可重试");
+  showSettingsAlert("已清除 " + okCount + " 条候选记录" + (errors.length ? "，失败 " + errors.length + " 条" : ""), errors.length > 0);
+  renderRemoteCandidates();
+  loadRemoteCandidates(true);
+  refresh();
+  if(button) button.textContent = originalText;
 }
 
 async function loadRemoteCandidates(force=false) {
@@ -2730,6 +2783,8 @@ function setupBrowser() {
   }
   const pullSelectedButton = $("remote-pull-selected");
   if(pullSelectedButton) pullSelectedButton.addEventListener("click", pullSelectedRemoteCandidates);
+  const clearSelectedButton = $("remote-clear-selected");
+  if(clearSelectedButton) clearSelectedButton.addEventListener("click", clearSelectedRemoteRecords);
   const selectVisible = $("remote-select-visible");
   if(selectVisible) {
     selectVisible.addEventListener("change", () => {

@@ -162,6 +162,11 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("清除记录", script)
         self.assertIn("data-remote-clear-path", script)
         self.assertIn("/api/cd2/pull-record", script)
+        self.assertIn('id="remote-clear-selected"', page_module.PAGE)
+        self.assertIn("function clearSelectedRemoteRecords", script)
+        self.assertIn("submitRemoteClearRecord", script)
+        self.assertIn("批量清除", script)
+        self.assertIn("清除选中的", script)
 
     def test_remote_candidates_table_filters_by_process_state(self):
         match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)

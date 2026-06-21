@@ -1657,8 +1657,7 @@ def fetch_cd2_copy_tasks(client):
     return tasks
 
 
-def fetch_cd2_uploads(cfg: Dict):
-    poll_seconds = max(1, int(cfg.get("cd2_queue_poll_seconds", 10) or 10))
+def cached_cd2_upload_status(cfg: Dict, poll_seconds: int):
     with cd2_lock:
         cached_status = cd2_client_cache.get("upload_status")
         cached_map = cd2_client_cache.get("upload_map") or {}
@@ -1667,7 +1666,11 @@ def fetch_cd2_uploads(cfg: Dict):
             status = dict(cached_status)
             status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=True))
             return dict(cached_map), status
-    status = {
+    return None
+
+
+def base_cd2_upload_status(cfg: Dict) -> Dict:
+    return {
         "enabled": bool(cfg.get("cd2_api_enabled")),
         "available": CloudDriveClient is not None,
         "connected": False,
@@ -1679,42 +1682,102 @@ def fetch_cd2_uploads(cfg: Dict):
         "downloads": [],
         "copy_tasks": [],
     }
+
+
+def cd2_error_status(cfg: Dict, status: Dict, message: str):
+    status["last_error"] = message
+    status["human"] = message
+    status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
+    return {}, status
+
+
+def cd2_disconnected_status(cfg: Dict, status: Dict, message: str):
+    status["checked_at"] = cd2_client_cache.get("checked_at")
+    status["auth_mode"] = cd2_client_cache.get("auth_mode")
+    status["last_success_at"] = cd2_client_cache.get("last_success_at")
+    return cd2_error_status(cfg, status, message)
+
+
+def record_cd2_upload_queue_failure(message: str) -> None:
+    with cd2_lock:
+        cd2_client_cache["last_error"] = message
+        cd2_client_cache["checked_at"] = now()
+        cd2_client_cache["upload_map"] = {}
+        cd2_client_cache["upload_status"] = None
+
+
+def build_cd2_upload_info(upload) -> Dict:
+    current = int(getattr(upload, "transferedBytes", 0) or 0)
+    total = int(getattr(upload, "size", 0) or 0)
+    percent = 100.0 if total <= 0 else min(100.0, max(0.0, current * 100 / total))
+    return {
+        "key": getattr(upload, "key", "") or "",
+        "path": getattr(upload, "destPath", "") or "",
+        "status": extract_upload_status(upload),
+        "current": current,
+        "total": total,
+        "percent": percent,
+        "summary": f"{format_size(current)} / {format_size(total)}",
+        "human": f"{percent:.1f}% ({format_size(current)} / {format_size(total)})" if total > 0 else format_size(current),
+        "error": getattr(upload, "errorMessage", "") or "",
+    }
+
+
+def attach_cd2_upload_entries(status: Dict, result) -> Dict:
+    upload_map = {}
+    for upload in getattr(result, "uploadFiles", []) or []:
+        info = build_cd2_upload_info(upload)
+        upload_map[normalize_upload_path(info["path"])] = info
+        status["uploads"].append(info)
+    return upload_map
+
+
+def summarize_cd2_queue_status(status: Dict, queue_errors: list[str]) -> None:
+    parts = []
+    if status["upload_count"]:
+        parts.append(f"{status['upload_count']} 项上传")
+    if status["download_count"]:
+        parts.append(f"{status['download_count']} 项下载")
+    if status["copy_task_count"]:
+        parts.append(f"{status['copy_task_count']} 项复制")
+    status["human"] = " / ".join(parts) if parts else "未发现传输任务"
+    if queue_errors:
+        status["human"] = f"{status['human']}，部分队列读取失败"
+
+
+def cache_cd2_upload_status(upload_map: Dict, status: Dict) -> None:
+    with cd2_lock:
+        cd2_client_cache["checked_at"] = status["checked_at"]
+        cd2_client_cache["last_success_at"] = status["last_success_at"]
+        cd2_client_cache["last_error"] = status["last_error"]
+        cd2_client_cache["upload_map"] = dict(upload_map)
+        cd2_client_cache["upload_status"] = dict(status)
+
+
+def fetch_cd2_uploads(cfg: Dict):
+    poll_seconds = max(1, int(cfg.get("cd2_queue_poll_seconds", 10) or 10))
+    cached = cached_cd2_upload_status(cfg, poll_seconds)
+    if cached:
+        return cached
+    status = base_cd2_upload_status(cfg)
     if not status["enabled"]:
-        status["last_error"] = "CD2 API 未启用"
-        status["human"] = "CD2 API 未启用"
-        status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
-        return {}, status
+        return cd2_error_status(cfg, status, "CD2 API 未启用")
     if not status["available"]:
-        status["last_error"] = "缺少 clouddrive2-client 依赖"
-        status["human"] = "缺少 clouddrive2-client 依赖"
-        status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
-        return {}, status
+        return cd2_error_status(cfg, status, "缺少 clouddrive2-client 依赖")
     client = get_cd2_client(cfg)
     if client is None:
-        status["checked_at"] = cd2_client_cache.get("checked_at")
-        status["auth_mode"] = cd2_client_cache.get("auth_mode")
-        status["last_success_at"] = cd2_client_cache.get("last_success_at")
-        status["last_error"] = cd2_client_cache.get("last_error") or "CD2 API 未连接"
-        status["human"] = status["last_error"]
-        status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
-        return {}, status
+        return cd2_disconnected_status(
+            cfg,
+            status,
+            cd2_client_cache.get("last_error") or "CD2 API 未连接",
+        )
     queue_errors = []
     try:
         result = client.get_upload_file_list(get_all=True)
     except Exception as exc:
         message = cd2_error_message(exc)
-        with cd2_lock:
-            cd2_client_cache["last_error"] = message
-            cd2_client_cache["checked_at"] = now()
-            cd2_client_cache["upload_map"] = {}
-            cd2_client_cache["upload_status"] = None
-        status["checked_at"] = cd2_client_cache.get("checked_at")
-        status["auth_mode"] = cd2_client_cache.get("auth_mode")
-        status["last_success_at"] = cd2_client_cache.get("last_success_at")
-        status["last_error"] = message
-        status["human"] = message
-        status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
-        return {}, status
+        record_cd2_upload_queue_failure(message)
+        return cd2_disconnected_status(cfg, status, message)
     try:
         downloads = fetch_cd2_downloads(client)
     except Exception as exc:
@@ -1727,7 +1790,6 @@ def fetch_cd2_uploads(cfg: Dict):
         queue_errors.append(f"复制任务读取失败：{cd2_error_message(exc)}")
 
     checked_at = now()
-    upload_map = {}
     status.update({
         "connected": True,
         "auth_mode": cd2_client_cache.get("auth_mode"),
@@ -1743,40 +1805,10 @@ def fetch_cd2_uploads(cfg: Dict):
         "downloads": downloads,
         "copy_tasks": copy_tasks,
     })
-    for upload in getattr(result, "uploadFiles", []) or []:
-        current = int(getattr(upload, "transferedBytes", 0) or 0)
-        total = int(getattr(upload, "size", 0) or 0)
-        percent = 100.0 if total <= 0 else min(100.0, max(0.0, current * 100 / total))
-        info = {
-            "key": getattr(upload, "key", "") or "",
-            "path": getattr(upload, "destPath", "") or "",
-            "status": extract_upload_status(upload),
-            "current": current,
-            "total": total,
-            "percent": percent,
-            "summary": f"{format_size(current)} / {format_size(total)}",
-            "human": f"{percent:.1f}% ({format_size(current)} / {format_size(total)})" if total > 0 else format_size(current),
-            "error": getattr(upload, "errorMessage", "") or "",
-        }
-        upload_map[normalize_upload_path(info["path"])] = info
-        status["uploads"].append(info)
-    parts = []
-    if status["upload_count"]:
-        parts.append(f"{status['upload_count']} 项上传")
-    if status["download_count"]:
-        parts.append(f"{status['download_count']} 项下载")
-    if status["copy_task_count"]:
-        parts.append(f"{status['copy_task_count']} 项复制")
-    status["human"] = " / ".join(parts) if parts else "未发现传输任务"
-    if queue_errors:
-        status["human"] = f"{status['human']}，部分队列读取失败"
+    upload_map = attach_cd2_upload_entries(status, result)
+    summarize_cd2_queue_status(status, queue_errors)
     status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
-    with cd2_lock:
-        cd2_client_cache["checked_at"] = status["checked_at"]
-        cd2_client_cache["last_success_at"] = status["last_success_at"]
-        cd2_client_cache["last_error"] = status["last_error"]
-        cd2_client_cache["upload_map"] = dict(upload_map)
-        cd2_client_cache["upload_status"] = dict(status)
+    cache_cd2_upload_status(upload_map, status)
     return upload_map, status
 
 
@@ -2131,6 +2163,63 @@ def resolve_cd2_target_dir(cfg: Dict) -> Optional[Path]:
     return target_dir
 
 
+def prepare_cd2_transfer_paths(target: Path, target_dir: Path) -> Optional[tuple[Path, Path]]:
+    final_path = unique_destination_path(target_dir / target.name)
+    tmp_path = final_path.with_name(final_path.name + ".partial")
+    if tmp_path.exists():
+        try:
+            tmp_path.unlink()
+        except Exception as exc:
+            log(f"删除旧转移临时文件失败 {tmp_path}: {exc}")
+            return None
+    return final_path, tmp_path
+
+
+def copy_iso_to_partial(source: Path, tmp_path: Path, final_path: Path, total: int) -> bool:
+    copied = 0
+    last_update = 0.0
+    with source.open("rb") as src, tmp_path.open("wb") as dst:
+        while True:
+            chunk = src.read(16 * 1024 * 1024)
+            if not chunk:
+                break
+            dst.write(chunk)
+            copied += len(chunk)
+            current_time = time.time()
+            if current_time - last_update >= 2:
+                percent = 100.0 if total <= 0 else copied * 100 / total
+                update_active_progress("transfer", final_path, {"percent": min(percent, 99.9), "current": copied, "total": total})
+                last_update = current_time
+        dst.flush()
+        os.fsync(dst.fileno())
+    if tmp_path.stat().st_size != total:
+        log(f"CloudDrive2转移大小校验失败: {tmp_path.stat().st_size} != {total}")
+        return False
+    return True
+
+
+def finalize_cd2_transfer(target: Path, tmp_path: Path, final_path: Path, total: int) -> bool:
+    tmp_path.replace(final_path)
+    if final_path.stat().st_size != total:
+        log(f"CloudDrive2最终文件大小校验失败: {final_path.stat().st_size} != {total}")
+        return False
+    update_active_progress("transfer", final_path, {"percent": 100.0, "current": total, "total": total, "verified": True})
+    target.unlink()
+    log(f"CloudDrive2转移完成并校验通过，已删除输出目录临时ISO: {target}，目标文件保留: {final_path}")
+    return True
+
+
+def maybe_refresh_cd2_after_transfer(cfg: Dict, final_path: Path) -> None:
+    if not (cfg.get("cd2_refresh_enabled") and cfg.get("cd2_refresh_after_transfer")):
+        return
+    mark_active_status("refreshing_cd2_dir", final_path, "refresh_cd2_dir")
+    refresh = refresh_cd2_directory(cfg, str(final_path.parent), "transfer")
+    if refresh.get("ok"):
+        log(f"CD2 目标目录刷新完成: {refresh.get('path')}")
+    else:
+        log(f"CD2 目标目录刷新失败: {refresh.get('message')}")
+
+
 def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
     if not cfg.get("cd2_transfer_enabled"):
         return target
@@ -2142,50 +2231,18 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
         return None
 
     total = target.stat().st_size
-    final_path = unique_destination_path(target_dir / target.name)
-    tmp_path = final_path.with_name(final_path.name + ".partial")
-    if tmp_path.exists():
-        try:
-            tmp_path.unlink()
-        except Exception as exc:
-            log(f"删除旧转移临时文件失败 {tmp_path}: {exc}")
-            return None
+    prepared = prepare_cd2_transfer_paths(target, target_dir)
+    if not prepared:
+        return None
+    final_path, tmp_path = prepared
 
     log(f"开始转移到CloudDrive2挂载目录: {target} -> {final_path}")
-    copied = 0
-    last_update = 0.0
     try:
-        with target.open("rb") as src, tmp_path.open("wb") as dst:
-            while True:
-                chunk = src.read(16 * 1024 * 1024)
-                if not chunk:
-                    break
-                dst.write(chunk)
-                copied += len(chunk)
-                current_time = time.time()
-                if current_time - last_update >= 2:
-                    percent = 100.0 if total <= 0 else copied * 100 / total
-                    update_active_progress("transfer", final_path, {"percent": min(percent, 99.9), "current": copied, "total": total})
-                    last_update = current_time
-            dst.flush()
-            os.fsync(dst.fileno())
-        if tmp_path.stat().st_size != total:
-            log(f"CloudDrive2转移大小校验失败: {tmp_path.stat().st_size} != {total}")
+        if not copy_iso_to_partial(target, tmp_path, final_path, total):
             return None
-        tmp_path.replace(final_path)
-        if final_path.stat().st_size != total:
-            log(f"CloudDrive2最终文件大小校验失败: {final_path.stat().st_size} != {total}")
+        if not finalize_cd2_transfer(target, tmp_path, final_path, total):
             return None
-        update_active_progress("transfer", final_path, {"percent": 100.0, "current": total, "total": total, "verified": True})
-        target.unlink()
-        log(f"CloudDrive2转移完成并校验通过，已删除输出目录临时ISO: {target}，目标文件保留: {final_path}")
-        if cfg.get("cd2_refresh_enabled") and cfg.get("cd2_refresh_after_transfer"):
-            mark_active_status("refreshing_cd2_dir", final_path, "refresh_cd2_dir")
-            refresh = refresh_cd2_directory(cfg, str(final_path.parent), "transfer")
-            if refresh.get("ok"):
-                log(f"CD2 目标目录刷新完成: {refresh.get('path')}")
-            else:
-                log(f"CD2 目标目录刷新失败: {refresh.get('message')}")
+        maybe_refresh_cd2_after_transfer(cfg, final_path)
         return final_path
     except Exception as exc:
         log(f"CloudDrive2转移失败: {exc}")
@@ -2195,6 +2252,195 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
         except Exception:
             pass
         return None
+
+
+def remove_non_iso_task(source: Path) -> None:
+    with lock:
+        state.get("items", {}).pop(str(source), None)
+        state["active"] = None
+        save_state_locked()
+
+
+def record_insufficient_space(source: Path) -> None:
+    with lock:
+        item = state["items"].setdefault(str(source), {})
+        set_failure(item, "insufficient_space", "空间不足，暂停处理")
+        item["last_changed"] = now()
+        save_state_locked()
+
+
+def start_process_item_task(source: Path, target: Path, source_size: int, task_started_at: str) -> Optional[str]:
+    with lock:
+        active_task = state.get("active")
+        if active_task is not None:
+            active_source = active_task.get("source") or "unknown"
+            if active_source == str(source):
+                return f"跳过重复启动任务: {source}"
+            return f"已有任务执行中，跳过 {source}: {active_source}"
+
+        item = state["items"].setdefault(str(source), {})
+        item.update({
+            "task_started_at": task_started_at,
+            "pack_started_at": task_started_at,
+            "status": "running",
+            "target": str(target),
+        })
+        item.pop("error", None)
+        item.pop("reason", None)
+        item.pop("last_error", None)
+        clear_failure(item)
+        clear_warning(item)
+        item.pop("cd2_source_task", None)
+        state["active"] = {
+            "source": str(source),
+            "target": str(target),
+            "started_at": task_started_at,
+            "task_started_at": task_started_at,
+            "pack_started_at": task_started_at,
+            "status": "running",
+            "progress": {"phase": "packing", "percent": 0, "current": 0, "total": source_size, "updated_at": now()},
+        }
+        save_state_locked()
+    return None
+
+
+def record_pack_failure(source: Path, error: str) -> None:
+    with lock:
+        state["active"] = None
+        item = state["items"].setdefault(str(source), {})
+        item["status"] = "failed"
+        set_failure(item, "pack_failed", error)
+        item["pack_finished_at"] = now()
+        item["finished_at"] = now()
+        item["last_changed"] = now()
+        save_state_locked()
+
+
+def record_verify_failure(source: Path) -> None:
+    with lock:
+        state["active"] = None
+        item = state["items"].setdefault(str(source), {})
+        item["status"] = "verify_failed"
+        set_failure(item, "verify_failed", "xorriso 校验失败")
+        item["pack_finished_at"] = now()
+        item["finished_at"] = now()
+        item["last_changed"] = now()
+        save_state_locked()
+
+
+def mark_transfer_started(source: Path, target: Path, task_started_at: str) -> str:
+    transfer_started_at = now()
+    with lock:
+        item = state["items"].setdefault(str(source), {})
+        item["status"] = "transferring"
+        item["pack_finished_at"] = now()
+        item["transfer_started_at"] = transfer_started_at
+        state["active"] = {
+            "source": str(source),
+            "target": str(target),
+            "started_at": task_started_at,
+            "task_started_at": task_started_at,
+            "pack_started_at": task_started_at,
+            "pack_finished_at": item["pack_finished_at"],
+            "transfer_started_at": transfer_started_at,
+            "status": "transferring",
+            "progress": {"phase": "transfer", "percent": 0, "current": 0, "total": target.stat().st_size if target.exists() else 0, "updated_at": now()},
+        }
+        save_state_locked()
+    return transfer_started_at
+
+
+def record_transfer_failure(source: Path, target: Path, source_size: int, transfer_finished_at: str) -> None:
+    with lock:
+        item = state["items"].setdefault(str(source), {})
+        item.update({
+            "status": "transfer_failed",
+            "target": str(target),
+            "done_at": transfer_finished_at,
+            "finished_at": transfer_finished_at,
+            "pack_finished_at": item.get("pack_finished_at") or transfer_finished_at,
+            "transfer_finished_at": transfer_finished_at,
+            "size": source_size,
+        })
+        set_failure(item, "transfer_failed", "移动到 CD2 挂载目录失败")
+        item["last_changed"] = now()
+        state["active"] = None
+        save_state_locked()
+
+
+def delete_source_if_configured(source: Path, cfg: Dict) -> Optional[str]:
+    if not cfg.get("delete_source_after_success"):
+        return None
+    try:
+        if source.is_dir():
+            shutil.rmtree(source)
+        else:
+            source.unlink()
+        log(f"已删除源文件: {source}")
+        return None
+    except Exception as exc:
+        log(f"删除源文件失败 {source}: {exc}")
+        return str(exc)
+
+
+def finish_process_item_success(source: Path, final_target: Path, source_size: int, cfg: Dict, transfer_started_at, transfer_finished_at, delete_source_error: Optional[str]) -> None:
+    with lock:
+        item = state["items"].setdefault(str(source), {})
+        if cfg.get("cd2_transfer_enabled"):
+            status = "transfer_done"
+            if cfg.get("cd2_wait_upload_complete"):
+                status = "waiting_cd2_upload"
+        else:
+            status = "done"
+        finished_at = now()
+        update = {
+            "status": status,
+            "target": str(final_target),
+            "pack_finished_at": item.get("pack_finished_at") or finished_at,
+            "transfer_started_at": transfer_started_at,
+            "transfer_finished_at": transfer_finished_at,
+            "size": source_size,
+        }
+        if status == "waiting_cd2_upload":
+            update["cd2_upload_wait_started_at"] = finished_at
+            item.pop("cd2_upload_seen_at", None)
+            item.pop("cd2_upload_done_at", None)
+            item.pop("cd2_upload_queue_missing_at", None)
+            update["error"] = "等待 CD2 上传完成"
+            item.pop("done_at", None)
+            item.pop("finished_at", None)
+        else:
+            update["done_at"] = finished_at
+            update["finished_at"] = finished_at
+            item.pop("error", None)
+        item.update(update)
+        clear_failure(item)
+        if delete_source_error:
+            set_warning(item, "delete_source_failed", delete_source_error)
+        else:
+            clear_warning(item)
+        state["active"] = None
+        save_state_locked()
+
+
+def record_unexpected_process_error(source: Path, partial: Path, exc: Exception) -> None:
+    log(f"处理任务异常 {source}: {exc}")
+    try:
+        if partial.exists():
+            partial.unlink()
+    except Exception:
+        pass
+    with lock:
+        state["active"] = None
+        item = state["items"].setdefault(str(source), {})
+        if item.get("status") not in TERMINAL_STATUSES:
+            failed_at = now()
+            item["status"] = "failed"
+            set_failure(item, "unexpected_error", str(exc))
+            item["pack_finished_at"] = item.get("pack_finished_at") or failed_at
+            item["finished_at"] = failed_at
+            item["last_changed"] = failed_at
+        save_state_locked()
 
 
 def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> None:
@@ -2212,57 +2458,18 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
     if not pack_iso:
         log(f"跳过ISO封装 {source}: {pack_reason}")
         log(f"普通媒体内容不加入任务列表，保留源路径: {source}")
-        with lock:
-            state.get("items", {}).pop(str(source), None)
-            state["active"] = None
-            save_state_locked()
+        remove_non_iso_task(source)
         return
 
     if not enough_space(output_dir, source_size, float(cfg["min_free_space_gb"])):
         log(f"空间不足，暂停处理 {source}")
-        with lock:
-            item = state["items"].setdefault(str(source), {})
-            set_failure(item, "insufficient_space", "空间不足，暂停处理")
-            item["last_changed"] = now()
-            save_state_locked()
+        record_insufficient_space(source)
         return
 
     target = iso_path_for(source, output_dir)
     partial = target.with_suffix(target.suffix + ".partial")
     task_started_at = now()
-    skip_message = None
-    with lock:
-        active_task = state.get("active")
-        if active_task is not None:
-            active_source = active_task.get("source") or "unknown"
-            if active_source == str(source):
-                skip_message = f"跳过重复启动任务: {source}"
-            else:
-                skip_message = f"已有任务执行中，跳过 {source}: {active_source}"
-        else:
-            item = state["items"].setdefault(str(source), {})
-            item.update({
-                "task_started_at": task_started_at,
-                "pack_started_at": task_started_at,
-                "status": "running",
-                "target": str(target),
-            })
-            item.pop("error", None)
-            item.pop("reason", None)
-            item.pop("last_error", None)
-            clear_failure(item)
-            clear_warning(item)
-            item.pop("cd2_source_task", None)
-            state["active"] = {
-                "source": str(source),
-                "target": str(target),
-                "started_at": task_started_at,
-                "task_started_at": task_started_at,
-                "pack_started_at": task_started_at,
-                "status": "running",
-                "progress": {"phase": "packing", "percent": 0, "current": 0, "total": source_size, "updated_at": now()},
-            }
-            save_state_locked()
+    skip_message = start_process_item_task(source, target, source_size, task_started_at)
     if skip_message:
         log(skip_message)
         return
@@ -2278,145 +2485,33 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
                 partial.unlink()
             except FileNotFoundError:
                 pass
-            with lock:
-                state["active"] = None
-                item = state["items"].setdefault(str(source), {})
-                item["status"] = "failed"
-                set_failure(item, "pack_failed", error)
-                item["pack_finished_at"] = now()
-                item["finished_at"] = now()
-                item["last_changed"] = now()
-                save_state_locked()
+            record_pack_failure(source, error)
             return
 
         partial.replace(target)
         if not validate_iso(target):
             log(f"ISO 验证失败，保留源文件: {target}")
-            with lock:
-                state["active"] = None
-                item = state["items"].setdefault(str(source), {})
-                item["status"] = "verify_failed"
-                set_failure(item, "verify_failed", "xorriso 校验失败")
-                item["pack_finished_at"] = now()
-                item["finished_at"] = now()
-                item["last_changed"] = now()
-                save_state_locked()
+            record_verify_failure(source)
             return
 
         log(f"ISO 完成并验证通过: {target}")
         final_target = target
         if cfg.get("cd2_transfer_enabled"):
-            transfer_started_at = now()
-            with lock:
-                item = state["items"].setdefault(str(source), {})
-                item["status"] = "transferring"
-                item["pack_finished_at"] = now()
-                item["transfer_started_at"] = transfer_started_at
-                state["active"] = {
-                    "source": str(source),
-                    "target": str(target),
-                    "started_at": task_started_at,
-                    "task_started_at": task_started_at,
-                    "pack_started_at": task_started_at,
-                    "pack_finished_at": item["pack_finished_at"],
-                    "transfer_started_at": transfer_started_at,
-                    "status": "transferring",
-                    "progress": {"phase": "transfer", "percent": 0, "current": 0, "total": target.stat().st_size if target.exists() else 0, "updated_at": now()},
-                }
-                save_state_locked()
+            transfer_started_at = mark_transfer_started(source, target, task_started_at)
             moved_target = transfer_iso_to_mount(target, cfg)
             transfer_finished_at = now()
             if not moved_target:
-                with lock:
-                    item = state["items"].setdefault(str(source), {})
-                    item.update({
-                        "status": "transfer_failed",
-                        "target": str(target),
-                        "done_at": transfer_finished_at,
-                        "finished_at": transfer_finished_at,
-                        "pack_finished_at": item.get("pack_finished_at") or transfer_finished_at,
-                        "transfer_finished_at": transfer_finished_at,
-                        "size": source_size,
-                    })
-                    set_failure(item, "transfer_failed", "移动到 CD2 挂载目录失败")
-                    item["last_changed"] = now()
-                    state["active"] = None
-                    save_state_locked()
+                record_transfer_failure(source, target, source_size, transfer_finished_at)
                 return
             final_target = moved_target
         else:
             transfer_started_at = None
             transfer_finished_at = None
 
-        if cfg.get("delete_source_after_success"):
-            delete_source_error = None
-            try:
-                if source.is_dir():
-                    shutil.rmtree(source)
-                else:
-                    source.unlink()
-                log(f"已删除源文件: {source}")
-            except Exception as exc:
-                delete_source_error = str(exc)
-                log(f"删除源文件失败 {source}: {exc}")
-        else:
-            delete_source_error = None
-
-        with lock:
-            item = state["items"].setdefault(str(source), {})
-            if cfg.get("cd2_transfer_enabled"):
-                status = "transfer_done"
-                if cfg.get("cd2_wait_upload_complete"):
-                    status = "waiting_cd2_upload"
-            else:
-                status = "done"
-            finished_at = now()
-            update = {
-                "status": status,
-                "target": str(final_target),
-                "pack_finished_at": item.get("pack_finished_at") or finished_at,
-                "transfer_started_at": transfer_started_at,
-                "transfer_finished_at": transfer_finished_at,
-                "size": source_size,
-            }
-            if status == "waiting_cd2_upload":
-                update["cd2_upload_wait_started_at"] = finished_at
-                item.pop("cd2_upload_seen_at", None)
-                item.pop("cd2_upload_done_at", None)
-                item.pop("cd2_upload_queue_missing_at", None)
-                update["error"] = "等待 CD2 上传完成"
-                item.pop("done_at", None)
-                item.pop("finished_at", None)
-            else:
-                update["done_at"] = finished_at
-                update["finished_at"] = finished_at
-                item.pop("error", None)
-            item.update(update)
-            clear_failure(item)
-            if delete_source_error:
-                set_warning(item, "delete_source_failed", delete_source_error)
-            else:
-                clear_warning(item)
-            state["active"] = None
-            save_state_locked()
+        delete_source_error = delete_source_if_configured(source, cfg)
+        finish_process_item_success(source, final_target, source_size, cfg, transfer_started_at, transfer_finished_at, delete_source_error)
     except Exception as exc:
-        log(f"处理任务异常 {source}: {exc}")
-        try:
-            if partial.exists():
-                partial.unlink()
-        except Exception:
-            pass
-        with lock:
-            state["active"] = None
-            item = state["items"].setdefault(str(source), {})
-            if item.get("status") not in TERMINAL_STATUSES:
-                failed_at = now()
-                item["status"] = "failed"
-                set_failure(item, "unexpected_error", str(exc))
-                item["pack_finished_at"] = item.get("pack_finished_at") or failed_at
-                item["finished_at"] = failed_at
-                item["last_changed"] = failed_at
-            save_state_locked()
+        record_unexpected_process_error(source, partial, exc)
 
 
 def scanner_loop() -> None:
