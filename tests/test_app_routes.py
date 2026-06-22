@@ -1753,6 +1753,96 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("手动检查源目录", item["warning_suggestion"])
         self.assertIn("denied", item["warning_message"])
 
+    def test_recover_interrupted_task_transfers_completed_iso(self):
+        source = self.make_bdmv("RecoverCompletedIso", complete=True)
+        source_size = app_module.size_of(source)
+        target = self.output / "RecoverCompletedIso.iso"
+        target.write_bytes(b"iso")
+        key = str(source)
+        app_module.state["items"][key] = {
+            "status": "running",
+            "target": str(target),
+            "pack_iso": True,
+        }
+        app_module.state["active"] = {
+            "source": key,
+            "target": str(target),
+            "status": "running",
+            "task_started_at": app_module.now(),
+            "progress": {"phase": "packing", "percent": 100, "current": source_size, "total": source_size},
+        }
+        cfg = self.scan_config(cd2_transfer_enabled=True, cd2_require_mount=False)
+
+        with mock.patch.object(app_module, "validate_iso", return_value=True):
+            app_module.recover_interrupted_task(cfg)
+
+        item = app_module.state["items"][key]
+        self.assertIsNone(app_module.state["active"])
+        self.assertEqual(item["status"], "transfer_done")
+        self.assertFalse(target.exists())
+        self.assertTrue((self.cd2 / "RecoverCompletedIso.iso").exists())
+
+    def test_recover_interrupted_task_finishes_already_transferred_iso(self):
+        source = self.make_bdmv("RecoverTransferredIso", complete=True)
+        target = self.output / "RecoverTransferredIso.iso"
+        final_target = self.cd2 / "RecoverTransferredIso.iso"
+        final_target.write_bytes(b"iso")
+        key = str(source)
+        app_module.state["items"][key] = {
+            "status": "transferring",
+            "target": str(target),
+            "pack_iso": True,
+        }
+        app_module.state["active"] = {
+            "source": key,
+            "target": str(target),
+            "status": "transferring",
+            "task_started_at": app_module.now(),
+        }
+        cfg = self.scan_config(cd2_transfer_enabled=True, cd2_require_mount=False)
+
+        with mock.patch.object(app_module, "validate_iso", return_value=True):
+            app_module.recover_interrupted_task(cfg)
+
+        item = app_module.state["items"][key]
+        self.assertIsNone(app_module.state["active"])
+        self.assertEqual(item["status"], "transfer_done")
+        self.assertEqual(item["target"], str(final_target))
+        self.assertTrue(final_target.exists())
+
+    def test_recover_interrupted_task_cleans_partial_and_requeues_source(self):
+        source = self.make_bdmv("RecoverPartialIso", complete=True)
+        target = self.output / "RecoverPartialIso.iso"
+        partial = target.with_suffix(target.suffix + ".partial")
+        partial.write_bytes(b"partial")
+        key = str(source)
+        app_module.state["items"][key] = {
+            "status": "running",
+            "target": str(target),
+            "pack_iso": True,
+        }
+        app_module.state["active"] = {
+            "source": key,
+            "target": str(target),
+            "status": "running",
+        }
+
+        app_module.recover_interrupted_task(self.scan_config())
+
+        item = app_module.state["items"][key]
+        self.assertIsNone(app_module.state["active"])
+        self.assertFalse(partial.exists())
+        self.assertEqual(item["status"], "waiting_stable")
+
+    def test_cleanup_interrupted_output_partials_removes_orphan_iso_partials(self):
+        partial = self.output / "Orphan.iso.partial"
+        partial.write_bytes(b"partial")
+
+        removed = app_module.cleanup_interrupted_output_partials(self.scan_config())
+
+        self.assertEqual(removed, 1)
+        self.assertFalse(partial.exists())
+
     def test_scan_once_waits_when_cd2_copy_or_download_task_matches_candidate(self):
         source = self.make_bdmv("PendingFromCD2", complete=True)
         key = self.mark_candidate_stable(source)

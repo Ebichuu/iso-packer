@@ -2,7 +2,7 @@
 
 ## 基线
 
-- 主线版本：`ebichu/iso-packer:latest` / `ebichu/iso-packer:1.1.9.3`
+- 主线版本：`ebichu/iso-packer:latest` / `ebichu/iso-packer:1.1.9.4`
 - 使用方式：单 VPS、单容器、个人自用
 - 固定流程：
 

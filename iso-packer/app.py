@@ -2689,31 +2689,134 @@ def ordered_visible_items(items: Dict, active: Optional[Dict] = None):
     return [(source, active_item)] + entries
 
 
-def recover_interrupted_task() -> None:
+def cleanup_interrupted_output_partials(cfg: Dict) -> int:
+    output_dir = Path(cfg["output_dir"]).expanduser()
+    removed = 0
+    try:
+        partials = list(output_dir.glob("*.iso.partial"))
+    except Exception as exc:
+        log(f"扫描输出目录临时ISO失败: {exc}")
+        return 0
+    for partial in partials:
+        try:
+            partial.unlink()
+            removed += 1
+            log(f"清理上次中断残留临时ISO: {partial}")
+        except Exception as exc:
+            log(f"清理上次中断残留临时ISO失败 {partial}: {exc}")
+    return removed
+
+
+def interrupted_partial_path(target: Path) -> Path:
+    return target.with_suffix(target.suffix + ".partial")
+
+
+def interrupted_cd2_final_path(target: Path, cfg: Dict) -> Optional[Path]:
+    if not cfg.get("cd2_transfer_enabled"):
+        return None
+    target_dir = resolve_cd2_target_dir(cfg)
+    if not target_dir:
+        return None
+    final_path = target_dir / target.name
+    return final_path if final_path.exists() else None
+
+
+def recovered_source_size(source: Optional[Path], target: Path) -> int:
+    if source and source.exists():
+        return size_of(source)
+    return target.stat().st_size if target.exists() else 0
+
+
+def finish_recovered_iso(source: Optional[Path], target: Path, cfg: Dict, active: Dict) -> bool:
+    if not target.exists():
+        return False
+    if not validate_iso(target):
+        try:
+            target.unlink()
+            log(f"上次中断留下的ISO校验失败，已删除并等待重新封装: {target}")
+        except Exception as exc:
+            log(f"上次中断留下的ISO校验失败但删除失败 {target}: {exc}")
+        return False
+
+    if not source:
+        log(f"检测到上次中断留下的完整ISO，但缺少源任务记录，保留文件等待人工处理: {target}")
+        return False
+
+    source_size = recovered_source_size(source, target)
+    task_started_at = active.get("task_started_at") or active.get("started_at") or now()
+    transfer_started_at = active.get("transfer_started_at")
+    transfer_finished_at = active.get("transfer_finished_at")
+    final_target = target
+
+    if cfg.get("cd2_transfer_enabled"):
+        target_dir = resolve_cd2_target_dir(cfg)
+        if target_dir and path_in_root(target, target_dir):
+            transfer_started_at = transfer_started_at or active.get("pack_finished_at") or now()
+            transfer_finished_at = transfer_finished_at or now()
+        else:
+            transfer_started_at = mark_transfer_started(source, target, task_started_at)
+            moved_target = transfer_iso_to_mount(target, cfg)
+            transfer_finished_at = now()
+            if not moved_target:
+                if source:
+                    record_transfer_failure(source, target, source_size, transfer_finished_at)
+                return True
+            final_target = moved_target
+
+    delete_source_error = delete_source_if_configured(source, cfg) if source.exists() else None
+    finish_process_item_success(source, final_target, source_size, cfg, transfer_started_at, transfer_finished_at, delete_source_error)
+    log(f"检测到上次中断时ISO已生成，已从中断点恢复: {final_target}")
+    return True
+
+
+def mark_interrupted_source_for_rescan(source: Optional[str]) -> bool:
+    if not source or not Path(source).exists():
+        return False
     with lock:
-        active = state.get("active")
+        item = state.setdefault("items", {}).setdefault(source, {})
+        if item.get("status") in TERMINAL_STATUSES:
+            state["active"] = None
+            save_state_locked()
+            return False
+        item["status"] = "waiting_stable"
+        item["last_changed"] = now()
+        state["active"] = None
+        state["events"] = state.get("events", [])[-199:] + [f"[{now()}] 检测到上次任务中断，已恢复等待重新扫描"]
+        save_state_locked()
+    return True
+
+
+def recover_interrupted_task(cfg: Optional[Dict] = None) -> None:
+    cfg = cfg or load_config()
+    with lock:
+        active = dict(state.get("active") or {})
         if not active:
             return
-        source = active.get("source")
-        target = active.get("target")
-        recovered = False
-        if target:
-            try:
-                Path(str(target) + ".partial").unlink()
-            except FileNotFoundError:
-                pass
-            except Exception:
-                pass
-        if source and Path(source).exists():
-            item = state.setdefault("items", {}).setdefault(source, {})
-            if item.get("status") not in TERMINAL_STATUSES:
-                item["status"] = "waiting_stable"
-                item["last_changed"] = now()
-                recovered = True
-        if recovered:
-            state["events"] = state.get("events", [])[-199:] + [f"[{now()}] 检测到上次任务中断，已恢复等待重新扫描"]
         state["active"] = None
         save_state_locked()
+
+    source_text = active.get("source")
+    target_text = active.get("target")
+    source = Path(source_text) if source_text else None
+    target = Path(target_text).expanduser() if target_text else None
+
+    if target:
+        try:
+            interrupted_partial_path(target).unlink()
+            log(f"清理上次中断任务临时ISO: {interrupted_partial_path(target)}")
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            log(f"清理上次中断任务临时ISO失败 {interrupted_partial_path(target)}: {exc}")
+
+        if target.exists() and finish_recovered_iso(source, target, cfg, active):
+            return
+
+        final_path = interrupted_cd2_final_path(target, cfg)
+        if final_path and finish_recovered_iso(source, final_path, cfg, active):
+            return
+
+    mark_interrupted_source_for_rescan(source_text)
 
 
 def start_worker_once():
@@ -2726,7 +2829,8 @@ def start_worker_once():
         cfg = load_config()
         set_app_secret(cfg)
         load_state()
-        recover_interrupted_task()
+        cleanup_interrupted_output_partials(cfg)
+        recover_interrupted_task(cfg)
         t = threading.Thread(target=scanner_loop, daemon=True)
         t.start()
         worker_started = True
