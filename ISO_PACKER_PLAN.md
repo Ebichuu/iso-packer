@@ -2,7 +2,7 @@
 
 ## 基线
 
-- 主线版本：`ebichu/iso-packer:latest` / `ebichu/iso-packer:1.1.9`
+- 主线版本：`ebichu/iso-packer:latest` / `ebichu/iso-packer:1.1.9.1`
 - 使用方式：单 VPS、单容器、个人自用
 - 固定流程：
 
@@ -109,7 +109,7 @@ SA 式判定核心不是“看到目录就开工”，而是多路确认：
 
 - 配置 CD2 云端源目录，例如 `/115/03-PT`，用于发现远程原盘候选
 - 配置本地拉取目录，保持 `/watch`
-- 配置 CD2 拉取目标目录，建议指向 `/watch` 对应的网盘路径；如果留空，则通过路径别名把本地拉取目录转换为 CD2 网盘路径
+- 配置 CD2 拉取到 `/watch` 的目标路径，建议指向 `/watch` 对应的 CD2 网盘路径；如果留空，则通过路径别名把本地拉取目录转换为 CD2 网盘路径
 - 配置 ISO 目标目录，保持 `/CloudNAS/CloudDrive/00-未整理/00-mkiso`
 - 明确路径映射：容器路径 `/CloudNAS/CloudDrive/...` 和 CD2 网盘路径 `/115/...` 建立别名关系
 - 上传进度展示继续读取 CD2 上传队列，并优先用路径别名匹配，例如 `/115/...` 对应 `/CloudNAS/CloudDrive/...`

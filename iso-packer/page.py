@@ -1318,9 +1318,9 @@ tr:hover td { background: #fff8f7; }
           <div class="settings-help">严格模式会关闭同名文件兜底，适合目标目录里可能存在同名 ISO 的情况。</div>
         </div>
         <div class="form-group">
-          <label>CD2 归档监控路径</label>
-          <textarea name="cd2_remote_source_dirs_text" spellcheck="false" placeholder="/115/03-PT">{{cfg.cd2_remote_source_dirs_text}}</textarea>
-          <div class="settings-help">类似 SA 的监控路径，每行一个 CD2 网盘源目录；自动拉取开启后，会从这里发现原盘候选并拉到本地 watch。</div>
+          <label>CD2 原盘监控路径</label>
+          <textarea name="cd2_remote_source_dirs_text" spellcheck="false" placeholder="/CloudNAS/CloudDrive/00-未整理/01-BDMV">{{cfg.cd2_remote_source_dirs_text}}</textarea>
+          <div class="settings-help">类似 SA 的监控路径，每行一个原盘来源目录；右侧远程候选只扫描这里。可以填 CD2 网盘路径，也可以填会被路径别名转换的 /CloudNAS 挂载路径。</div>
         </div>
         <div class="form-group">
           <label>归档监控递归层级</label>
@@ -1372,9 +1372,9 @@ tr:hover td { background: #fff8f7; }
           </div>
         </div>
         <div class="form-group">
-          <label>CD2 拉取目标路径</label>
+          <label>CD2 拉取到 /watch 的目标路径</label>
           <input name="cd2_remote_pull_dest_dir" type="text" value="{{cfg.cd2_remote_pull_dest_dir}}" placeholder="/115/Download">
-          <div class="settings-help">CD2 网盘路径；留空时尝试用路径别名把本地拉取目录转换为网盘路径。</div>
+          <div class="settings-help">这是 CD2 把远程原盘复制到本地 watch 前对应的网盘目标路径，不是原盘来源目录，也不是最终 ISO 目录；留空时尝试用路径别名把本地拉取目录转换为网盘路径。</div>
         </div>
         <div class="settings-section-title">CD2 事件</div>
         <label class="checkbox-group" style="margin-top: 0;">

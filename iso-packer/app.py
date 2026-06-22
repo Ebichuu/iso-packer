@@ -79,7 +79,7 @@ worker_started = False
 last_log_prune = 0.0
 BDMV_REQUIRED_FILES = ("index.bdmv", "MovieObject.bdmv")
 BDMV_REQUIRED_DIRS = ("PLAYLIST", "STREAM", "CLIPINF")
-COPY_TASK_DONE_STATUSES = {"3", "completed", "complete", "done", "finish", "finished"}
+COPY_TASK_DONE_STATUSES = {"3", "completed", "complete", "done", "finish", "finished", "success", "succeeded", "已完成"}
 CD2_UPLOAD_QUEUE_GRACE_POLLS = 3
 CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS = 30
 CD2_WEBHOOK_EVENT_LIMIT = 50
@@ -168,6 +168,7 @@ def load_config() -> Dict:
         data = {}
     cfg = DEFAULT_CONFIG.copy()
     cfg.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
+    migrate_legacy_cd2_pull_config(cfg, data)
     cfg["cd2_path_aliases"] = cd2_path_aliases_from_cfg(cfg)
     cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
     cfg["cd2_remote_source_dirs"] = parse_cd2_remote_source_dirs(cfg.get("cd2_remote_source_dirs"))
@@ -176,6 +177,25 @@ def load_config() -> Dict:
         cfg["web_secret_key"] = secrets.token_urlsafe(32)
         save_config(cfg)
     return cfg
+
+
+def migrate_legacy_cd2_pull_config(cfg: Dict, raw: Dict) -> None:
+    if parse_cd2_remote_source_dirs(cfg.get("cd2_remote_source_dirs")):
+        return
+    legacy_sources = parse_cd2_remote_source_dirs(
+        raw.get("cd2_remote_source_dir") or raw.get("cd2_remote_scan_dir") or raw.get("cd2_remote_source_dirs_text")
+    )
+    if legacy_sources:
+        cfg["cd2_remote_source_dirs"] = legacy_sources
+        return
+    legacy_dest = normalize_path_text(raw.get("cd2_remote_pull_dest_dir"))
+    if not legacy_dest:
+        return
+    lowered = legacy_dest.lower()
+    looks_like_source_dir = any(marker in lowered for marker in ("bdmv", "原盘", "01-bdmv"))
+    if looks_like_source_dir:
+        cfg["cd2_remote_source_dirs"] = [legacy_dest]
+        cfg["cd2_remote_pull_dest_dir"] = ""
 
 
 def save_config(cfg: Dict) -> None:
@@ -668,7 +688,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
         "errors": [],
     }
     if not roots:
-        payload["message"] = "未配置 CD2 远程源目录"
+        payload["message"] = "未配置 CD2 原盘监控路径（原盘来源目录）"
         return payload
     if not cfg.get("cd2_api_enabled"):
         payload["ok"] = False
@@ -1002,7 +1022,7 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
         return {"ok": False, "message": "远程源路径不在已配置的 CD2 源目录内"}, 403
     dest_dir = cd2_pull_dest_dir_from_cfg(cfg)
     if not dest_dir:
-        return {"ok": False, "message": "请先配置 CD2 拉取目标目录，或在路径别名里配置本地拉取目录到网盘路径的映射"}, 400
+        return {"ok": False, "message": "请先配置 CD2 拉取到 /watch 的目标路径，或在路径别名里配置本地拉取目录到网盘路径的映射"}, 400
     if remote_path_under(dest_dir, source_path):
         return {"ok": False, "message": "CD2 拉取目标不能位于源目录内部"}, 400
 
@@ -1090,7 +1110,7 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
             auto_state = cd2_state.setdefault("auto_pull", {})
             auto_state["last_result"] = {
                 "ok": False,
-                "message": "未配置 CD2 拉取目标目录",
+                "message": "未配置 CD2 拉取到 /watch 的目标路径",
                 "checked_at": now(),
             }
             save_state_locked()
@@ -2533,10 +2553,7 @@ def scan_once(cfg: Dict) -> None:
     current = set()
     with lock:
         state["last_scan"] = now()
-        active = state.get("active")
         save_state_locked()
-    if active:
-        return
 
     upload_map, cd2_status = fetch_cd2_uploads(cfg)
     check_waiting_cd2_uploads(cfg, upload_map, cd2_status)

@@ -1475,6 +1475,24 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(cfg["cd2_local_pull_dir"], str(self.watch))
         self.assertEqual(cfg["cd2_remote_pull_dest_dir"], "/115/Downloads")
 
+    def test_load_config_migrates_legacy_cd2_source_path_from_pull_dest(self):
+        legacy_source = "/CloudNAS/CloudDrive/00-未整理/01-BDMV"
+        raw = app_module.DEFAULT_CONFIG.copy()
+        raw.update({
+            "watch_dir": str(self.watch),
+            "output_dir": str(self.output),
+            "cd2_remote_source_dirs": [],
+            "cd2_remote_pull_dest_dir": legacy_source,
+            "web_secret_key": "test",
+        })
+        app_module.CONFIG_PATH.write_text(app_module.json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+        cfg = app_module.load_config()
+
+        self.assertEqual(cfg["cd2_remote_source_dirs"], [legacy_source])
+        self.assertEqual(cfg["cd2_remote_pull_dest_dir"], "")
+        self.assertEqual(cfg["cd2_remote_source_dirs_text"], legacy_source)
+
     def test_has_partial_files_detects_cd2_temp_files(self):
         source = self.watch / "Disc"
         stream_dir = source / "BDMV" / "STREAM"
@@ -1510,6 +1528,24 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(app_module.state["items"][key]["status"], "ready")
         process_item.assert_called_once()
         self.assertEqual(process_item.call_args.args[0].resolve(), source.resolve())
+
+    def test_scan_refreshes_waiting_items_while_task_is_active_without_starting_new_pack(self):
+        source = self.make_bdmv("ReadyWhileActive", complete=True)
+        key = self.mark_candidate_stable(source)
+        app_module.state["items"][key]["status"] = "waiting_partial"
+        app_module.state["items"][key]["error"] = "检测到未完成临时文件"
+        app_module.state["active"] = {
+            "source": str(self.watch / "OtherDisc"),
+            "status": "running",
+        }
+
+        with mock.patch.object(app_module, "process_item") as process_item:
+            app_module.scan_once(self.scan_config())
+
+        process_item.assert_not_called()
+        self.assertEqual(app_module.state["items"][key]["status"], "ready")
+        self.assertNotIn("error", app_module.state["items"][key])
+        self.assertIsNotNone(app_module.state.get("active"))
 
     def test_cd2_webhook_candidate_waits_for_confirm_before_ready(self):
         source = self.make_bdmv("WebhookConfirmBDMV", complete=True)
@@ -1810,6 +1846,26 @@ class AppRouteTests(unittest.TestCase):
             "copy_tasks": [task],
         })
 
+        self.assertIsNone(pending)
+
+    def test_completed_cd2_copy_chinese_status_does_not_block_candidate(self):
+        source = self.make_bdmv("CompletedChineseCopy", complete=True)
+        task = {
+            "kind": "copy",
+            "source": str(source),
+            "target": str(source),
+            "status": "已完成",
+            "done": app_module.is_copy_task_done({"status": "已完成"}),
+            "human": "CD2 复制完成",
+        }
+
+        pending = app_module.cd2_pending_source_task(source, {
+            "connected": True,
+            "downloads": [],
+            "copy_tasks": [task],
+        })
+
+        self.assertTrue(task["done"])
         self.assertIsNone(pending)
 
     def test_rerun_can_force_past_cd2_pending_task(self):
