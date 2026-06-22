@@ -209,6 +209,7 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("function setRemoteBatchResult", script)
         self.assertIn("失败项已保留选中，可重试", script)
         self.assertIn("重试选中", script)
+        self.assertIn("payload.pull_enabled", script)
 
     def test_dashboard_shows_failure_suggestions(self):
         match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
@@ -656,6 +657,20 @@ class AppRouteTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["candidates"], [])
 
+    def test_cd2_remote_candidates_reports_pull_enabled_when_auto_pull_is_on(self):
+        cfg = app_module.load_config()
+        cfg.update({"cd2_auto_pull_enabled": True, "cd2_manual_pull_enabled": False})
+        app_module.save_config(cfg)
+        self.login()
+
+        response = self.client.get("/api/cd2/remote-candidates")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["pull_enabled"])
+        self.assertFalse(payload["manual_pull_enabled"])
+        self.assertTrue(payload["auto_pull_enabled"])
+
     def test_cd2_manual_pull_creates_copy_task(self):
         class FakeFile:
             def __init__(self, name, full_path, is_dir=True):
@@ -752,6 +767,22 @@ class AppRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("未启用", response.get_json()["message"])
+
+    def test_cd2_pull_allows_auto_pull_enabled(self):
+        cfg = app_module.load_config()
+        cfg.update({
+            "cd2_manual_pull_enabled": False,
+            "cd2_auto_pull_enabled": True,
+            "cd2_remote_source_dirs": ["/115/03-PT"],
+            "cd2_remote_pull_dest_dir": "/115/Downloads",
+        })
+        app_module.save_config(cfg)
+        self.login()
+
+        response = self.client.post("/api/cd2/pull", data={"path": "/115/Other/MovieBD"})
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("源目录", response.get_json()["message"])
 
     def test_cd2_manual_pull_rejects_outside_source_dir(self):
         cfg = app_module.load_config()

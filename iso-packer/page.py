@@ -2739,7 +2739,7 @@ async function loadRemoteCandidates(force=false) {
     lastRemotePayload = payload;
     lastRemoteCandidates = payload.candidates || [];
     pruneRemoteSelection(lastRemoteCandidates);
-    lastRemoteManualPullEnabled = payload.manual_pull_enabled === true;
+    lastRemoteManualPullEnabled = payload.pull_enabled === true || payload.manual_pull_enabled === true || payload.auto_pull_enabled === true;
     renderRemoteCandidates();
   } catch(e) {
     lastRemotePayload = null;

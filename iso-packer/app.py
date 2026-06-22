@@ -672,6 +672,7 @@ def cd2_disc_type_for_remote_path(client, path: str) -> str:
 
 
 def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
+    pull_enabled = bool(cfg.get("cd2_manual_pull_enabled") or cfg.get("cd2_auto_pull_enabled"))
     roots = parse_cd2_remote_source_dirs(cfg.get("cd2_remote_source_dirs"))
     remote_roots = cd2_remote_source_roots(cfg)
     scan_depth = int_config(cfg, "cd2_remote_scan_depth", DEFAULT_CONFIG["cd2_remote_scan_depth"], minimum=1)
@@ -683,6 +684,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
         "scan_depth": scan_depth,
         "manual_pull_enabled": bool(cfg.get("cd2_manual_pull_enabled")),
         "auto_pull_enabled": bool(cfg.get("cd2_auto_pull_enabled")),
+        "pull_enabled": pull_enabled,
         "pull_dest_dir": cd2_pull_dest_dir_from_cfg(cfg),
         "candidates": [],
         "errors": [],
@@ -2963,8 +2965,8 @@ def api_cd2_pull():
     cfg = load_config()
     payload = request.get_json(silent=True) if request.is_json else request.form
     source_path = normalize_path_text((payload or {}).get("path"))
-    if not cfg.get("cd2_manual_pull_enabled"):
-        return jsonify({"ok": False, "message": "CD2 手动拉取未启用"}), 400
+    if not (cfg.get("cd2_manual_pull_enabled") or cfg.get("cd2_auto_pull_enabled")):
+        return jsonify({"ok": False, "message": "CD2 拉取未启用，请先开启手动拉取或自动拉取"}), 400
     result, status_code = create_cd2_pull_task(cfg, source_path, mode="manual")
     if result.get("ok"):
         log(f"CD2 手动拉取已创建: {source_path} -> {result.get('dest_dir')}")
