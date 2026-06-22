@@ -155,6 +155,18 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn('colspan="7"', page_module.PAGE)
         self.assertIn("item.pull_status_label", script)
 
+    def test_settings_uses_plain_path_labels(self):
+        self.assertIn("监控目录（本地监控目录）", page_module.PAGE)
+        self.assertIn("输出目录（本地输出目录）", page_module.PAGE)
+        self.assertIn("上传目录", page_module.PAGE)
+        self.assertIn("网盘监控目录", page_module.PAGE)
+        self.assertIn("下载目录", page_module.PAGE)
+        self.assertIn("路径别名（高级，可选）", page_module.PAGE)
+        self.assertIn("CD2 事件（高级，可选）", page_module.PAGE)
+        self.assertNotIn("CD2 本地拉取目录", page_module.PAGE)
+        self.assertNotIn("CD2 拉取到 /watch 的目标路径", page_module.PAGE)
+        self.assertNotIn("CD2 最终 ISO 目标路径", page_module.PAGE)
+
     def test_remote_candidates_table_can_clear_pull_record(self):
         match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
         self.assertIsNotNone(match)

@@ -690,7 +690,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
         "errors": [],
     }
     if not roots:
-        payload["message"] = "未配置 CD2 原盘监控路径（原盘来源目录）"
+        payload["message"] = "未配置网盘监控目录"
         return payload
     if not cfg.get("cd2_api_enabled"):
         payload["ok"] = False
@@ -1024,7 +1024,7 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
         return {"ok": False, "message": "远程源路径不在已配置的 CD2 源目录内"}, 403
     dest_dir = cd2_pull_dest_dir_from_cfg(cfg)
     if not dest_dir:
-        return {"ok": False, "message": "请先配置 CD2 拉取到 /watch 的目标路径，或在路径别名里配置本地拉取目录到网盘路径的映射"}, 400
+        return {"ok": False, "message": "请先配置下载目录"}, 400
     if remote_path_under(dest_dir, source_path):
         return {"ok": False, "message": "CD2 拉取目标不能位于源目录内部"}, 400
 
@@ -1112,7 +1112,7 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
             auto_state = cd2_state.setdefault("auto_pull", {})
             auto_state["last_result"] = {
                 "ok": False,
-                "message": "未配置 CD2 拉取到 /watch 的目标路径",
+                "message": "未配置下载目录",
                 "checked_at": now(),
             }
             save_state_locked()

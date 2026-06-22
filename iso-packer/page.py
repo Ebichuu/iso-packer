@@ -1225,18 +1225,20 @@ tr:hover td { background: #fff8f7; }
       </div>
       <form method="post" action="/settings" id="settings-form">
         <div class="form-group">
-          <label>监控目录</label>
+          <label>监控目录（本地监控目录）</label>
           <div class="path-picker-row">
             <input name="watch_dir" type="text" value="{{cfg.watch_dir}}" required>
             <button class="path-picker-btn" type="button" data-pick-dir="watch_dir">选择</button>
           </div>
+          <div class="settings-help">放准备封装的 BDMV / VIDEO_TS；自动下载完成后也从这里读取。</div>
         </div>
         <div class="form-group">
-          <label>输出目录</label>
+          <label>输出目录（本地输出目录）</label>
           <div class="path-picker-row">
             <input name="output_dir" type="text" value="{{cfg.output_dir}}" required>
             <button class="path-picker-btn" type="button" data-pick-dir="output_dir">选择</button>
           </div>
+          <div class="settings-help">临时生成 ISO 的本地目录。</div>
         </div>
         <div class="form-group">
           <label>扫描间隔 (秒)</label>
@@ -1258,11 +1260,12 @@ tr:hover td { background: #fff8f7; }
           </div>
         </div>
         <div class="form-group">
-          <label>CD2 最终 ISO 目标路径</label>
+          <label>上传目录</label>
           <div class="path-picker-row">
             <input name="cd2_target_dir" type="text" value="{{cfg.cd2_target_dir}}">
             <button class="path-picker-btn" type="button" data-pick-dir="cd2_target_dir">选择</button>
           </div>
+          <div class="settings-help">ISO 完成后移动到这里，再由 CD2 上传。</div>
         </div>
 
         <div class="settings-section-title">Web 访问</div>
@@ -1305,9 +1308,9 @@ tr:hover td { background: #fff8f7; }
           <input name="cd2_queue_poll_seconds" type="number" min="1" value="{{cfg.cd2_queue_poll_seconds}}">
         </div>
         <div class="form-group">
-          <label>CD2 路径别名</label>
+          <label>路径别名（高级，可选）</label>
           <textarea name="cd2_path_aliases_text" spellcheck="false" placeholder="/CloudNAS/CloudDrive=/115">{{cfg.cd2_path_aliases_text}}</textarea>
-          <div class="settings-help">每行一组：本地挂载路径=CD2 网盘路径。用于匹配上传进度和任务门禁。</div>
+          <div class="settings-help">路径翻译表，例如 /CloudNAS/CloudDrive=/115；只有上传进度或网盘路径匹配不上时才需要调整。</div>
         </div>
         <div class="form-group">
           <label>上传队列匹配</label>
@@ -1318,9 +1321,9 @@ tr:hover td { background: #fff8f7; }
           <div class="settings-help">严格模式会关闭同名文件兜底，适合目标目录里可能存在同名 ISO 的情况。</div>
         </div>
         <div class="form-group">
-          <label>CD2 原盘监控路径</label>
+          <label>网盘监控目录</label>
           <textarea name="cd2_remote_source_dirs_text" spellcheck="false" placeholder="/CloudNAS/CloudDrive/00-未整理/01-BDMV">{{cfg.cd2_remote_source_dirs_text}}</textarea>
-          <div class="settings-help">类似 SA 的监控路径，每行一个原盘来源目录；右侧远程候选只扫描这里。可以填 CD2 网盘路径，也可以填会被路径别名转换的 /CloudNAS 挂载路径。</div>
+          <div class="settings-help">监控网盘里哪里有 BDMV；发现后 CD2 会下载到下面的下载目录。</div>
         </div>
         <div class="form-group">
           <label>归档监控递归层级</label>
@@ -1329,57 +1332,51 @@ tr:hover td { background: #fff8f7; }
         </div>
         <label class="checkbox-group">
           <input name="cd2_manual_pull_enabled" type="checkbox" {% if cfg.cd2_manual_pull_enabled %}checked{% endif %}>
-          <span>启用 CD2 手动拉取</span>
+          <span>启用手动下载</span>
         </label>
         <label class="checkbox-group">
           <input name="cd2_auto_pull_enabled" type="checkbox" {% if cfg.cd2_auto_pull_enabled %}checked{% endif %}>
-          <span>启用 CD2 自动拉取</span>
+          <span>启用自动下载</span>
         </label>
         <div class="form-group">
-          <label>每轮自动拉取任务数</label>
+          <label>每轮自动下载任务数</label>
           <input name="cd2_auto_pull_max_tasks_per_scan" type="number" min="1" value="{{cfg.cd2_auto_pull_max_tasks_per_scan}}">
-          <div class="settings-help">默认 1，调大后每次扫描可连续创建多个 CD2 拉取任务。</div>
+          <div class="settings-help">默认 1，调大后每次扫描可连续创建多个 CD2 下载任务。</div>
         </div>
         <div class="form-group">
-          <label>同时自动拉取任务数</label>
+          <label>同时自动下载任务数</label>
           <input name="cd2_auto_pull_max_active_tasks" type="number" min="1" value="{{cfg.cd2_auto_pull_max_active_tasks}}">
-          <div class="settings-help">默认 1，已有自动拉取任务未完成时暂停创建新的自动拉取任务。</div>
+          <div class="settings-help">默认 1，已有自动下载任务未完成时暂停创建新的自动下载任务。</div>
         </div>
         <div class="form-group">
-          <label>自动拉取最小体积 GB</label>
+          <label>自动下载最小体积 GB</label>
           <input name="cd2_auto_pull_min_size_gb" type="number" min="0" value="{{cfg.cd2_auto_pull_min_size_gb}}">
           <div class="settings-help">默认 0 表示不过滤；仅当 CD2 返回目录大小时生效。</div>
         </div>
         <div class="form-group">
-          <label>自动拉取包含关键词</label>
+          <label>自动下载包含关键词</label>
           <textarea name="cd2_auto_pull_include_keywords" spellcheck="false" placeholder="CHDBits&#10;UHD">{{cfg.cd2_auto_pull_include_keywords}}</textarea>
-          <div class="settings-help">留空表示不过滤；每行或逗号分隔一个关键词，名称或路径命中才会自动拉取。</div>
+          <div class="settings-help">留空表示不过滤；每行或逗号分隔一个关键词，名称或路径命中才会自动下载。</div>
         </div>
         <div class="form-group">
-          <label>自动拉取排除关键词</label>
+          <label>自动下载排除关键词</label>
           <textarea name="cd2_auto_pull_exclude_keywords" spellcheck="false" placeholder="sample&#10;trailer">{{cfg.cd2_auto_pull_exclude_keywords}}</textarea>
-          <div class="settings-help">名称或路径命中时跳过自动拉取；手动拉取不受影响。</div>
+          <div class="settings-help">名称或路径命中时跳过自动下载；手动下载不受影响。</div>
         </div>
         <div class="form-group">
-          <label>自动拉取失败冷却秒数</label>
+          <label>自动下载失败冷却秒数</label>
           <input name="cd2_auto_pull_failure_cooldown_seconds" type="number" min="0" value="{{cfg.cd2_auto_pull_failure_cooldown_seconds}}">
         </div>
+        <input name="cd2_local_pull_dir" type="hidden" value="{{cfg.watch_dir}}">
         <div class="form-group">
-          <label>CD2 本地拉取目录</label>
-          <div class="path-picker-row">
-            <input name="cd2_local_pull_dir" type="text" value="{{cfg.cd2_local_pull_dir}}">
-            <button class="path-picker-btn" type="button" data-pick-dir="cd2_local_pull_dir">选择</button>
-          </div>
+          <label>下载目录</label>
+          <input name="cd2_remote_pull_dest_dir" type="text" value="{{cfg.cd2_remote_pull_dest_dir}}" placeholder="/mnt/115Download">
+          <div class="settings-help">CD2 把网盘监控目录里的 BDMV 下载到这里；通常是 VPS/CD2 能看到的本地目录。若 Docker 使用同路径映射，可与监控目录相同。</div>
         </div>
-        <div class="form-group">
-          <label>CD2 拉取到 /watch 的目标路径</label>
-          <input name="cd2_remote_pull_dest_dir" type="text" value="{{cfg.cd2_remote_pull_dest_dir}}" placeholder="/115/Download">
-          <div class="settings-help">这是 CD2 把远程原盘复制到本地 watch 前对应的网盘目标路径，不是原盘来源目录，也不是最终 ISO 目录；留空时尝试用路径别名把本地拉取目录转换为网盘路径。</div>
-        </div>
-        <div class="settings-section-title">CD2 事件</div>
+        <div class="settings-section-title">CD2 事件（高级，可选）</div>
         <label class="checkbox-group" style="margin-top: 0;">
           <input name="cd2_webhook_enabled" type="checkbox" {% if cfg.cd2_webhook_enabled %}checked{% endif %}>
-          <span>启用 CD2 Webhook</span>
+          <span>启用 Webhook</span>
         </label>
         <div class="form-group">
           <label>Webhook 共享密钥</label>
@@ -1420,7 +1417,7 @@ tr:hover td { background: #fff8f7; }
           <input name="cd2_refresh_after_transfer" type="checkbox" {% if cfg.cd2_refresh_after_transfer %}checked{% endif %}>
           <span>转移后刷新目标目录</span>
         </label>
-        <div class="settings-help">Webhook 只触发重新检查，不能直接证明文件已经下载完成。</div>
+        <div class="settings-help">不配置也能用；系统会按扫描间隔轮询。Webhook 只是让 CD2/SA 主动通知有变化，减少等待时间，不能直接证明文件已经下载完成。</div>
         
         <div class="settings-options">
           <label class="checkbox-group">
