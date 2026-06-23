@@ -139,6 +139,20 @@ class AppRouteTests(unittest.TestCase):
         self.assertIn("function renderTableProgress", script)
         self.assertIn("cells[3].innerHTML = renderTableProgress", script)
 
+    def test_dashboard_refresh_is_serialized(self):
+        match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
+        self.assertIsNotNone(match)
+        script = match.group(1)
+        self.assertIn("let refreshInFlight = false", script)
+        self.assertIn("const REFRESH_TIMEOUT_MS = 15000", script)
+        self.assertIn("function scheduleRefresh", script)
+        self.assertIn("AbortController", script)
+        self.assertIn("timeoutMs: REFRESH_TIMEOUT_MS", script)
+        self.assertIn("refreshInFlight = true", script)
+        self.assertIn("refreshInFlight = false", script)
+        self.assertIn("setTimeout(refresh, delay)", script)
+        self.assertNotIn("setInterval(refresh", script)
+
     def test_dashboard_shows_cd2_auto_pull_status(self):
         match = re.search(r"<script>\s*\(function\(\)\{([\s\S]*?)\}\)\(\);\s*</script>", page_module.PAGE)
         self.assertIsNotNone(match)
@@ -1518,6 +1532,22 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(cfg["cd2_local_pull_dir"], str(self.watch))
         self.assertEqual(cfg["cd2_remote_pull_dest_dir"], "/115/Downloads")
 
+    def test_settings_ignores_stale_hidden_cd2_local_pull_dir(self):
+        self.login()
+        new_watch = self.data_dir / "new-watch"
+        old_watch = self.data_dir / "old-watch"
+
+        response = self.client.post("/settings", data={
+            "watch_dir": str(new_watch),
+            "output_dir": str(self.output),
+            "cd2_local_pull_dir": str(old_watch),
+        })
+
+        self.assertEqual(response.status_code, 302)
+        cfg = app_module.load_config()
+        self.assertEqual(cfg["watch_dir"], str(new_watch))
+        self.assertEqual(cfg["cd2_local_pull_dir"], str(new_watch))
+
     def test_load_config_migrates_legacy_cd2_source_path_from_pull_dest(self):
         legacy_source = "/CloudNAS/CloudDrive/00-未整理/01-BDMV"
         raw = app_module.DEFAULT_CONFIG.copy()
@@ -1719,6 +1749,61 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(item["failure_label"], "CD2 转移失败")
         self.assertIn("CD2 挂载目录", item["failure_suggestion"])
 
+    def test_process_item_removes_incomplete_existing_output_iso_before_repack(self):
+        source = self.make_bdmv("RepackIncompleteOutput", complete=True)
+        target = self.output / "RepackIncompleteOutput.iso"
+        target.write_bytes(b"old")
+
+        def fake_run_iso(_source, target_path, _size):
+            target_path.write_bytes(b"fresh-iso")
+            return app_module.subprocess.CompletedProcess(["genisoimage"], 0, "", "")
+
+        with mock.patch.object(app_module, "run_iso", side_effect=fake_run_iso), \
+             mock.patch.object(app_module, "validate_iso", return_value=True):
+            app_module.process_item(source, self.scan_config(cd2_transfer_enabled=False))
+
+        item = app_module.state["items"][str(source)]
+        self.assertEqual(item["status"], "done")
+        self.assertEqual(target.read_bytes(), b"fresh-iso")
+        self.assertEqual(list(self.output.glob("RepackIncompleteOutput-*.iso")), [])
+
+    def test_process_item_keeps_complete_existing_output_iso_without_timestamp_suffix(self):
+        source = self.make_bdmv("KeepCompleteOutput", complete=True)
+        target = self.output / "KeepCompleteOutput.iso"
+        target.write_bytes(b"x" * (app_module.size_of(source) + 1024))
+
+        with mock.patch.object(app_module, "run_iso") as run_iso, \
+             mock.patch.object(app_module, "validate_iso", return_value=True):
+            app_module.process_item(source, self.scan_config(cd2_transfer_enabled=False))
+
+        run_iso.assert_not_called()
+        item = app_module.state["items"][str(source)]
+        self.assertEqual(item["status"], "failed")
+        self.assertEqual(item["failure_code"], "output_exists")
+        self.assertEqual(target.read_bytes(), b"x" * (app_module.size_of(source) + 1024))
+        self.assertEqual(list(self.output.glob("KeepCompleteOutput-*.iso")), [])
+
+    def test_process_item_rejects_existing_cd2_target_without_timestamp_suffix(self):
+        source = self.make_bdmv("UploadTargetExists", complete=True)
+        existing = self.cd2 / "UploadTargetExists.iso"
+        existing.write_bytes(b"existing")
+
+        def fake_run_iso(_source, target_path, _size):
+            target_path.write_bytes(b"fresh-iso")
+            return app_module.subprocess.CompletedProcess(["genisoimage"], 0, "", "")
+
+        cfg = self.scan_config(cd2_transfer_enabled=True, cd2_require_mount=False)
+        with mock.patch.object(app_module, "run_iso", side_effect=fake_run_iso), \
+             mock.patch.object(app_module, "validate_iso", return_value=True):
+            app_module.process_item(source, cfg)
+
+        item = app_module.state["items"][str(source)]
+        self.assertEqual(item["status"], "transfer_failed")
+        self.assertEqual(item["failure_code"], "target_exists")
+        self.assertEqual(existing.read_bytes(), b"existing")
+        self.assertEqual((self.output / "UploadTargetExists.iso").read_bytes(), b"fresh-iso")
+        self.assertEqual(list(self.cd2.glob("UploadTargetExists-*.iso")), [])
+
     def test_process_item_records_insufficient_space_code_without_terminal_failure(self):
         source = self.make_bdmv("SpaceFailure", complete=True)
         key = str(source)
@@ -1809,6 +1894,100 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(item["status"], "transfer_done")
         self.assertEqual(item["target"], str(final_target))
         self.assertTrue(final_target.exists())
+
+    def test_recover_interrupted_task_uses_completed_output_when_active_target_is_partial(self):
+        source = self.make_bdmv("RecoverPartialTargetCompletedIso", complete=True)
+        target = self.output / "RecoverPartialTargetCompletedIso.iso"
+        partial = target.with_suffix(target.suffix + ".partial")
+        target.write_bytes(b"iso")
+        key = str(source)
+        app_module.state["items"][key] = {
+            "status": "running",
+            "target": str(target),
+            "pack_iso": True,
+        }
+        app_module.state["active"] = {
+            "source": key,
+            "target": str(partial),
+            "status": "running",
+            "task_started_at": app_module.now(),
+            "progress": {"phase": "packing", "percent": 100},
+        }
+        cfg = self.scan_config(cd2_transfer_enabled=True, cd2_require_mount=False)
+
+        with mock.patch.object(app_module, "validate_iso", return_value=True):
+            app_module.recover_interrupted_task(cfg)
+
+        item = app_module.state["items"][key]
+        self.assertIsNone(app_module.state["active"])
+        self.assertEqual(item["status"], "transfer_done")
+        self.assertFalse(target.exists())
+        self.assertTrue((self.cd2 / "RecoverPartialTargetCompletedIso.iso").exists())
+
+    def test_recover_interrupted_task_uses_output_iso_when_active_target_is_cd2_path(self):
+        source = self.make_bdmv("RecoverTransferProgressIso", complete=True)
+        target = self.output / "RecoverTransferProgressIso.iso"
+        final_target = self.cd2 / "RecoverTransferProgressIso.iso"
+        final_partial = final_target.with_name(final_target.name + ".partial")
+        target.write_bytes(b"iso")
+        final_partial.write_bytes(b"partial")
+        key = str(source)
+        app_module.state["items"][key] = {
+            "status": "transferring",
+            "target": str(target),
+            "pack_iso": True,
+        }
+        app_module.state["active"] = {
+            "source": key,
+            "target": str(final_target),
+            "status": "transferring",
+            "task_started_at": app_module.now(),
+            "progress": {"phase": "transfer", "percent": 50},
+        }
+        cfg = self.scan_config(cd2_transfer_enabled=True, cd2_require_mount=False)
+
+        with mock.patch.object(app_module, "validate_iso", return_value=True):
+            app_module.recover_interrupted_task(cfg)
+
+        item = app_module.state["items"][key]
+        self.assertIsNone(app_module.state["active"])
+        self.assertEqual(item["status"], "transfer_done")
+        self.assertFalse(target.exists())
+        self.assertFalse(final_partial.exists())
+        self.assertTrue(final_target.exists())
+
+    def test_recover_interrupted_task_prefers_existing_cd2_final_over_output_copy(self):
+        source = self.make_bdmv("RecoverFinalAndOutputIso", complete=True)
+        target = self.output / "RecoverFinalAndOutputIso.iso"
+        final_target = self.cd2 / "RecoverFinalAndOutputIso.iso"
+        target.write_bytes(b"output iso")
+        final_target.write_bytes(b"final iso")
+        key = str(source)
+        app_module.state["items"][key] = {
+            "status": "transferring",
+            "target": str(target),
+            "pack_iso": True,
+        }
+        app_module.state["active"] = {
+            "source": key,
+            "target": str(final_target),
+            "output_target": str(target),
+            "status": "transferring",
+            "task_started_at": app_module.now(),
+            "progress": {"phase": "transfer", "percent": 100},
+        }
+        cfg = self.scan_config(cd2_transfer_enabled=True, cd2_require_mount=False)
+
+        with mock.patch.object(app_module, "validate_iso", return_value=True):
+            app_module.recover_interrupted_task(cfg)
+
+        item = app_module.state["items"][key]
+        self.assertIsNone(app_module.state["active"])
+        self.assertEqual(item["status"], "transfer_done")
+        self.assertEqual(item["target"], str(final_target))
+        self.assertFalse(target.exists())
+        self.assertTrue(final_target.exists())
+        self.assertEqual(list(self.cd2.glob("RecoverFinalAndOutputIso-*.iso")), [])
 
     def test_recover_interrupted_task_cleans_partial_and_requeues_source(self):
         source = self.make_bdmv("RecoverPartialIso", complete=True)

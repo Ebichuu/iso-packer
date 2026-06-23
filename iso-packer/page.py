@@ -1712,6 +1712,10 @@ let lastRemoteManualPullEnabled = false;
 let lastRemotePayload = null;
 let remoteSelectedPaths = new Set();
 let remoteBatchHasFailures = false;
+const REFRESH_INTERVAL_MS = 2000;
+const REFRESH_TIMEOUT_MS = 15000;
+let refreshTimer = null;
+let refreshInFlight = false;
 function browseRootPath(root) {
   if(root === "watch") return document.querySelector('[name="watch_dir"]')?.value || "/";
   if(root === "output") return document.querySelector('[name="output_dir"]')?.value || "/";
@@ -1741,14 +1745,28 @@ function goLogin() {
 }
 
 async function fetchJson(url, options) {
-  const res = await fetch(url, options);
-  const payload = await res.json().catch(() => ({}));
-  if(isAuthFailure(res, payload)) {
-    goLogin();
-    throw new Error("unauthorized");
+  options = options || {};
+  const timeoutMs = Number(options.timeoutMs || 0);
+  const fetchOptions = {...options};
+  delete fetchOptions.timeoutMs;
+  let timer = null;
+  if(timeoutMs > 0 && !fetchOptions.signal) {
+    const controller = new AbortController();
+    fetchOptions.signal = controller.signal;
+    timer = setTimeout(() => controller.abort(), timeoutMs);
   }
-  if(!res.ok || payload.ok === false) throw new Error(payload.message || ("HTTP " + res.status));
-  return payload;
+  try {
+    const res = await fetch(url, fetchOptions);
+    const payload = await res.json().catch(() => ({}));
+    if(isAuthFailure(res, payload)) {
+      goLogin();
+      throw new Error("unauthorized");
+    }
+    if(!res.ok || payload.ok === false) throw new Error(payload.message || ("HTTP " + res.status));
+    return payload;
+  } finally {
+    if(timer) clearTimeout(timer);
+  }
 }
 
 function setupTaskActions(){
@@ -2844,9 +2862,16 @@ function setupBrowser() {
   if(remoteRefreshButton) remoteRefreshButton.addEventListener("click", () => loadRemoteCandidates(true));
 }
 
+function scheduleRefresh(delay=REFRESH_INTERVAL_MS) {
+  if(refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(refresh, delay);
+}
+
 async function refresh(){
+  if(refreshInFlight) return;
+  refreshInFlight = true;
   try{
-    const data = await fetchJson("/api/status?_="+Date.now());
+    const data = await fetchJson("/api/status?_="+Date.now(), {timeoutMs: REFRESH_TIMEOUT_MS});
     const state = data.state || data;
     
     $("last-scan").textContent = state.last_scan || "尚未扫描";
@@ -2874,6 +2899,9 @@ async function refresh(){
     $("refresh-state").textContent = "最后同步：" + new Date().toLocaleTimeString();
   }catch(e){
     $("refresh-state").textContent = "同步失败";
+  }finally{
+    refreshInFlight = false;
+    scheduleRefresh();
   }
 }
 
@@ -2883,7 +2911,6 @@ setupDirectoryPicker();
 setupBrowser();
 const initialLogText = $("events") ? $("events").textContent : "";
 if(initialLogText.trim()) renderEvents(initialLogText);
-setInterval(refresh, 2000);
 loadBrowser();
 loadRemoteCandidates();
 refresh();

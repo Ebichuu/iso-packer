@@ -8,6 +8,7 @@ import secrets
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
@@ -87,16 +88,20 @@ CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS = 600
 CD2_UPLOAD_MATCH_MODES = {"alias_then_suffix", "alias_only"}
 FAILURE_LABELS = {
     "insufficient_space": "空间不足",
+    "output_exists": "输出ISO已存在",
     "pack_failed": "封装失败",
     "verify_failed": "校验失败",
     "transfer_failed": "CD2 转移失败",
+    "target_exists": "上传目录已有同名ISO",
     "unexpected_error": "任务异常",
 }
 FAILURE_SUGGESTIONS = {
     "insufficient_space": "清理输出目录或降低最小空间阈值后等待下轮扫描。",
+    "output_exists": "输出目录已经有同名 ISO，且看起来不是中断残留；请手动删除、移动或改名后再重新封装。",
     "pack_failed": "查看系统日志里的 genisoimage 错误，确认原盘结构完整且路径可读。",
     "verify_failed": "保留源目录和 ISO，优先检查 xorriso 是否可用以及输出文件是否完整。",
     "transfer_failed": "检查 CD2 挂载目录、目标路径权限和磁盘空间后重新封装。",
+    "target_exists": "上传目录已经有同名 ISO；请手动删除、移动或改名后再重新封装。",
     "unexpected_error": "查看系统日志里的异常堆栈，确认后可手动重新封装。",
 }
 WARNING_LABELS = {
@@ -2070,11 +2075,7 @@ def enough_space(output_dir: Path, source_size: int, min_free_gb: float) -> bool
 
 def iso_path_for(source: Path, output_dir: Path) -> Path:
     base = safe_filename(source.name)
-    target = output_dir / f"{base}.iso"
-    if not target.exists():
-        return target
-    suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return output_dir / f"{base}-{suffix}.iso"
+    return output_dir / f"{base}.iso"
 
 
 def update_active_progress(phase: str, target: Path, progress: Dict) -> None:
@@ -2164,13 +2165,6 @@ def validate_iso(target: Path) -> bool:
 
 
 
-def unique_destination_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return path.with_name(f"{path.stem}-{suffix}{path.suffix}")
-
-
 def resolve_cd2_target_dir(cfg: Dict) -> Optional[Path]:
     mount_root = Path(str(cfg.get("cd2_mount_root") or "/CloudNAS")).expanduser()
     target_dir = Path(str(cfg.get("cd2_target_dir") or str(mount_root / "CloudDrive" / "00-未整理" / "00-mkiso"))).expanduser()
@@ -2186,7 +2180,10 @@ def resolve_cd2_target_dir(cfg: Dict) -> Optional[Path]:
 
 
 def prepare_cd2_transfer_paths(target: Path, target_dir: Path) -> Optional[tuple[Path, Path]]:
-    final_path = unique_destination_path(target_dir / target.name)
+    final_path = target_dir / target.name
+    if final_path.exists():
+        log(f"上传目录已存在同名ISO，停止转移，等待手动处理: {final_path}")
+        return None
     tmp_path = final_path.with_name(final_path.name + ".partial")
     if tmp_path.exists():
         try:
@@ -2291,6 +2288,59 @@ def record_insufficient_space(source: Path) -> None:
         save_state_locked()
 
 
+def classify_existing_output_iso(target: Path, source_size: int) -> tuple[str, str]:
+    if not target.exists():
+        return "missing", ""
+    try:
+        output_size = target.stat().st_size
+    except OSError as exc:
+        return "unknown", f"读取文件大小失败: {exc}"
+    if output_size <= 0:
+        return "incomplete", "文件大小为 0"
+    if source_size > 0 and output_size < int(source_size * 0.95):
+        return "incomplete", f"文件大小明显小于源目录: {output_size} < {source_size}"
+    try:
+        if validate_iso(target):
+            return "complete", "ISO 校验通过"
+    except Exception as exc:
+        return "unknown", f"ISO 校验无法完成: {exc}"
+    return "incomplete", "ISO 校验未通过"
+
+
+def cleanup_existing_output_iso(target: Path, source_size: int) -> Optional[str]:
+    status, reason = classify_existing_output_iso(target, source_size)
+    if status == "missing":
+        return None
+    if status != "incomplete":
+        message = f"输出目录已存在同名 ISO，{reason}，等待手动处理: {target}"
+        log(message)
+        return message
+    try:
+        target.unlink()
+    except Exception as exc:
+        message = f"输出目录中断残留 ISO 删除失败，等待手动处理: {target} ({exc})"
+        log(message)
+        return message
+    log(f"清理输出目录中断残留 ISO，准备重新封装: {target} ({reason})")
+    return None
+
+
+def record_output_conflict(source: Path, target: Path, message: Optional[str] = None) -> None:
+    with lock:
+        state["active"] = None
+        item = state["items"].setdefault(str(source), {})
+        failed_at = now()
+        item.update({
+            "status": "failed",
+            "target": str(target),
+            "pack_finished_at": failed_at,
+            "finished_at": failed_at,
+            "last_changed": failed_at,
+        })
+        set_failure(item, "output_exists", message or f"输出目录已存在同名 ISO，请手动处理后重新封装: {target}")
+        save_state_locked()
+
+
 def start_process_item_task(source: Path, target: Path, source_size: int, task_started_at: str) -> Optional[str]:
     with lock:
         active_task = state.get("active")
@@ -2316,6 +2366,7 @@ def start_process_item_task(source: Path, target: Path, source_size: int, task_s
         state["active"] = {
             "source": str(source),
             "target": str(target),
+            "output_target": str(target),
             "started_at": task_started_at,
             "task_started_at": task_started_at,
             "pack_started_at": task_started_at,
@@ -2360,6 +2411,7 @@ def mark_transfer_started(source: Path, target: Path, task_started_at: str) -> s
         state["active"] = {
             "source": str(source),
             "target": str(target),
+            "output_target": str(target),
             "started_at": task_started_at,
             "task_started_at": task_started_at,
             "pack_started_at": task_started_at,
@@ -2372,7 +2424,14 @@ def mark_transfer_started(source: Path, target: Path, task_started_at: str) -> s
     return transfer_started_at
 
 
-def record_transfer_failure(source: Path, target: Path, source_size: int, transfer_finished_at: str) -> None:
+def record_transfer_failure(
+    source: Path,
+    target: Path,
+    source_size: int,
+    transfer_finished_at: str,
+    code: str = "transfer_failed",
+    message: str = "移动到 CD2 挂载目录失败",
+) -> None:
     with lock:
         item = state["items"].setdefault(str(source), {})
         item.update({
@@ -2384,7 +2443,7 @@ def record_transfer_failure(source: Path, target: Path, source_size: int, transf
             "transfer_finished_at": transfer_finished_at,
             "size": source_size,
         })
-        set_failure(item, "transfer_failed", "移动到 CD2 挂载目录失败")
+        set_failure(item, code, message)
         item["last_changed"] = now()
         state["active"] = None
         save_state_locked()
@@ -2489,6 +2548,11 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
         return
 
     target = iso_path_for(source, output_dir)
+    if target.exists():
+        output_conflict = cleanup_existing_output_iso(target, source_size)
+        if output_conflict:
+            record_output_conflict(source, target, output_conflict)
+            return
     partial = target.with_suffix(target.suffix + ".partial")
     task_started_at = now()
     skip_message = start_process_item_task(source, target, source_size, task_started_at)
@@ -2519,6 +2583,14 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
         log(f"ISO 完成并验证通过: {target}")
         final_target = target
         if cfg.get("cd2_transfer_enabled"):
+            target_dir = resolve_cd2_target_dir(cfg)
+            existing_target = target_dir / target.name if target_dir else None
+            if existing_target and existing_target.exists():
+                transfer_finished_at = now()
+                message = f"上传目录已存在同名 ISO，请手动处理后重新封装: {existing_target}"
+                record_transfer_failure(source, target, source_size, transfer_finished_at, "target_exists", message)
+                log(message)
+                return
             transfer_started_at = mark_transfer_started(source, target, task_started_at)
             moved_target = transfer_iso_to_mount(target, cfg)
             transfer_finished_at = now()
@@ -2727,45 +2799,83 @@ def recovered_source_size(source: Optional[Path], target: Path) -> int:
     return target.stat().st_size if target.exists() else 0
 
 
-def finish_recovered_iso(source: Optional[Path], target: Path, cfg: Dict, active: Dict) -> bool:
+def remove_invalid_recovered_iso(target: Path) -> None:
+    try:
+        target.unlink()
+        log(f"上次中断留下的ISO校验失败，已删除并等待重新封装: {target}")
+    except Exception as exc:
+        log(f"上次中断留下的ISO校验失败但删除失败 {target}: {exc}")
+
+
+def recovered_iso_is_usable(target: Path) -> bool:
     if not target.exists():
         return False
     if not validate_iso(target):
-        try:
-            target.unlink()
-            log(f"上次中断留下的ISO校验失败，已删除并等待重新封装: {target}")
-        except Exception as exc:
-            log(f"上次中断留下的ISO校验失败但删除失败 {target}: {exc}")
+        remove_invalid_recovered_iso(target)
         return False
+    return True
 
+
+@dataclass
+class RecoveredTransfer:
+    target: Path
+    started_at: Optional[str]
+    finished_at: Optional[str]
+    ok: bool
+
+
+def recover_iso_transfer(
+    source: Path,
+    target: Path,
+    cfg: Dict,
+    active: Dict,
+    source_size: int,
+) -> RecoveredTransfer:
+    transfer_started_at = active.get("transfer_started_at")
+    transfer_finished_at = active.get("transfer_finished_at")
+    if not cfg.get("cd2_transfer_enabled"):
+        return RecoveredTransfer(target, transfer_started_at, transfer_finished_at, True)
+
+    target_dir = resolve_cd2_target_dir(cfg)
+    if target_dir and path_in_root(target, target_dir):
+        transfer_started_at = transfer_started_at or active.get("pack_finished_at") or now()
+        transfer_finished_at = transfer_finished_at or now()
+        return RecoveredTransfer(target, transfer_started_at, transfer_finished_at, True)
+
+    task_started_at = active.get("task_started_at") or active.get("started_at") or now()
+    transfer_started_at = mark_transfer_started(source, target, task_started_at)
+    moved_target = transfer_iso_to_mount(target, cfg)
+    transfer_finished_at = now()
+    if not moved_target:
+        record_transfer_failure(source, target, source_size, transfer_finished_at)
+        return RecoveredTransfer(target, transfer_started_at, transfer_finished_at, False)
+    return RecoveredTransfer(moved_target, transfer_started_at, transfer_finished_at, True)
+
+
+def finish_recovered_iso(source: Optional[Path], target: Path, cfg: Dict, active: Dict) -> bool:
+    if not recovered_iso_is_usable(target):
+        return False
     if not source:
         log(f"检测到上次中断留下的完整ISO，但缺少源任务记录，保留文件等待人工处理: {target}")
         return False
 
     source_size = recovered_source_size(source, target)
-    task_started_at = active.get("task_started_at") or active.get("started_at") or now()
-    transfer_started_at = active.get("transfer_started_at")
-    transfer_finished_at = active.get("transfer_finished_at")
-    final_target = target
-
-    if cfg.get("cd2_transfer_enabled"):
-        target_dir = resolve_cd2_target_dir(cfg)
-        if target_dir and path_in_root(target, target_dir):
-            transfer_started_at = transfer_started_at or active.get("pack_finished_at") or now()
-            transfer_finished_at = transfer_finished_at or now()
-        else:
-            transfer_started_at = mark_transfer_started(source, target, task_started_at)
-            moved_target = transfer_iso_to_mount(target, cfg)
-            transfer_finished_at = now()
-            if not moved_target:
-                if source:
-                    record_transfer_failure(source, target, source_size, transfer_finished_at)
-                return True
-            final_target = moved_target
+    transfer = recover_iso_transfer(source, target, cfg, active, source_size)
+    if not transfer.ok:
+        return True
 
     delete_source_error = delete_source_if_configured(source, cfg) if source.exists() else None
-    finish_process_item_success(source, final_target, source_size, cfg, transfer_started_at, transfer_finished_at, delete_source_error)
-    log(f"检测到上次中断时ISO已生成，已从中断点恢复: {final_target}")
+    finish_process_item_success(
+        source,
+        transfer.target,
+        source_size,
+        cfg,
+        transfer.started_at,
+        transfer.finished_at,
+        delete_source_error,
+    )
+    cleanup_recovered_output_copy(active, source, target, transfer.target, cfg)
+    log(f"检测到上次中断时ISO已生成，已从中断点恢复: {transfer.target}")
     return True
 
 
@@ -2786,14 +2896,121 @@ def mark_interrupted_source_for_rescan(source: Optional[str]) -> bool:
     return True
 
 
-def recover_interrupted_task(cfg: Optional[Dict] = None) -> None:
-    cfg = cfg or load_config()
+def pop_interrupted_active() -> Dict:
     with lock:
         active = dict(state.get("active") or {})
         if not active:
-            return
+            return {}
         state["active"] = None
         save_state_locked()
+    return active
+
+
+def cleanup_interrupted_task_partial(target: Path) -> None:
+    partial = interrupted_partial_path(target)
+    try:
+        partial.unlink()
+        log(f"清理上次中断任务临时ISO: {partial}")
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        log(f"清理上次中断任务临时ISO失败 {partial}: {exc}")
+
+
+def interrupted_recovery_targets(target: Path, cfg: Dict):
+    yield target
+    final_path = interrupted_cd2_final_path(target, cfg)
+    if final_path and final_path != target:
+        yield final_path
+
+
+def interrupted_existing_cd2_target(path: Optional[Path], cfg: Dict) -> Optional[Path]:
+    if not path or not cfg.get("cd2_transfer_enabled"):
+        return None
+    target_dir = resolve_cd2_target_dir(cfg)
+    if not target_dir:
+        return None
+    path = path.expanduser()
+    if path_in_root(path, target_dir):
+        return path if path.exists() else None
+    final_path = target_dir / path.name
+    return final_path if final_path.exists() else None
+
+
+def add_recovery_target(targets: list[Path], seen: set[str], path: Optional[Path]) -> None:
+    if not path:
+        return
+    try:
+        resolved_key = str(path.expanduser().resolve())
+    except Exception:
+        resolved_key = str(path.expanduser())
+    if resolved_key in seen:
+        return
+    seen.add(resolved_key)
+    targets.append(path.expanduser())
+
+
+def interrupted_output_target(active: Dict, source: Optional[Path], target: Optional[Path], cfg: Dict) -> Optional[Path]:
+    output_target = active.get("output_target") or active.get("original_target")
+    if output_target:
+        return Path(output_target).expanduser()
+    if target and target.name.endswith(".partial"):
+        return Path(str(target)[:-len(".partial")]).expanduser()
+    if not source:
+        return None
+    output_dir = Path(cfg["output_dir"]).expanduser()
+    if target and target.suffix.lower() == ".iso":
+        inferred = output_dir / target.name
+        if inferred.exists():
+            return inferred
+    inferred = output_dir / f"{safe_filename(source.name)}.iso"
+    return inferred if inferred.exists() else None
+
+
+def interrupted_recovery_candidates(active: Dict, source: Optional[Path], target: Optional[Path], cfg: Dict) -> list[Path]:
+    targets: list[Path] = []
+    seen: set[str] = set()
+    output_target = interrupted_output_target(active, source, target, cfg)
+    add_recovery_target(targets, seen, interrupted_existing_cd2_target(target, cfg))
+    add_recovery_target(targets, seen, interrupted_existing_cd2_target(output_target, cfg))
+    add_recovery_target(targets, seen, output_target)
+    add_recovery_target(targets, seen, target)
+    for candidate in list(targets):
+        for recovery_target in interrupted_recovery_targets(candidate, cfg):
+            add_recovery_target(targets, seen, recovery_target)
+    return targets
+
+
+def cleanup_recovered_output_copy(
+    active: Dict,
+    source: Optional[Path],
+    recovery_target: Path,
+    final_target: Path,
+    cfg: Dict,
+) -> None:
+    if not cfg.get("cd2_transfer_enabled"):
+        return
+    target_dir = resolve_cd2_target_dir(cfg)
+    if not target_dir or not path_in_root(final_target, target_dir):
+        return
+    output_target = interrupted_output_target(active, source, recovery_target, cfg)
+    if not output_target or output_target == final_target or not output_target.exists():
+        return
+    output_dir = Path(cfg["output_dir"]).expanduser()
+    if output_target.suffix.lower() != ".iso" or not path_in_root(output_target, output_dir):
+        return
+    try:
+        output_target.unlink()
+        log(f"清理恢复后残留的输出目录ISO: {output_target}")
+    except Exception as exc:
+        log(f"清理恢复后残留的输出目录ISO失败 {output_target}: {exc}")
+
+
+def recover_interrupted_task(cfg: Optional[Dict] = None) -> None:
+    cfg = cfg or load_config()
+    active = pop_interrupted_active()
+    if not active:
+        return
 
     source_text = active.get("source")
     target_text = active.get("target")
@@ -2801,19 +3018,10 @@ def recover_interrupted_task(cfg: Optional[Dict] = None) -> None:
     target = Path(target_text).expanduser() if target_text else None
 
     if target:
-        try:
-            interrupted_partial_path(target).unlink()
-            log(f"清理上次中断任务临时ISO: {interrupted_partial_path(target)}")
-        except FileNotFoundError:
-            pass
-        except Exception as exc:
-            log(f"清理上次中断任务临时ISO失败 {interrupted_partial_path(target)}: {exc}")
-
-        if target.exists() and finish_recovered_iso(source, target, cfg, active):
-            return
-
-        final_path = interrupted_cd2_final_path(target, cfg)
-        if final_path and finish_recovered_iso(source, final_path, cfg, active):
+        cleanup_interrupted_task_partial(target)
+    for recovery_target in interrupted_recovery_candidates(active, source, target, cfg):
+        cleanup_interrupted_task_partial(recovery_target)
+        if finish_recovered_iso(source, recovery_target, cfg, active):
             return
 
     mark_interrupted_source_for_rescan(source_text)
@@ -2965,7 +3173,7 @@ def settings():
     cfg["cd2_auto_pull_enabled"] = "cd2_auto_pull_enabled" in request.form
     cfg["cd2_auto_pull_include_keywords"] = request.form.get("cd2_auto_pull_include_keywords", cfg.get("cd2_auto_pull_include_keywords", "")).strip()
     cfg["cd2_auto_pull_exclude_keywords"] = request.form.get("cd2_auto_pull_exclude_keywords", cfg.get("cd2_auto_pull_exclude_keywords", "")).strip()
-    cfg["cd2_local_pull_dir"] = request.form.get("cd2_local_pull_dir", cfg.get("cd2_local_pull_dir", cfg["watch_dir"])).strip() or cfg["watch_dir"]
+    cfg["cd2_local_pull_dir"] = cfg["watch_dir"]
     cfg["cd2_remote_pull_dest_dir"] = normalize_path_text(request.form.get("cd2_remote_pull_dest_dir", cfg.get("cd2_remote_pull_dest_dir", "")))
     cfg["cd2_api_enabled"] = "cd2_api_enabled" in request.form
     cfg["cd2_auth_mode"] = cd2_auth_mode_from_cfg({"cd2_auth_mode": request.form.get("cd2_auth_mode", cfg.get("cd2_auth_mode", "api_token"))})

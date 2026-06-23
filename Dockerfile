@@ -2,7 +2,7 @@
 FROM python:3.11-slim
 
 LABEL maintainer="iso-packer"
-LABEL version="1.1.9.4"
+LABEL version="1.1.9.9"
 LABEL description="Automatic Blu-ray ISO packing and CloudDrive2 transfer tool"
 
 WORKDIR /app
@@ -12,6 +12,7 @@ RUN apt-get update && \
     genisoimage \
     xorriso \
     curl \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 COPY iso-packer/app.py /app/
@@ -34,4 +35,5 @@ EXPOSE 15865
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:15865/healthz || exit 1
 
+ENTRYPOINT ["tini", "-g", "--"]
 CMD ["python", "-u", "app.py"]
