@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - ISO Packer</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style> body { background-color: #fbfbfa; } </style>
+</head>
+<body class="min-h-screen text-zinc-700 flex flex-col items-center justify-center font-sans antialiased p-4">
+
+    <!-- 登录中心精美铝合金质感卡片 -->
+    <div class="w-full max-w-sm bg-white border border-zinc-200 shadow-[0_16px_40px_rgba(0,0,0,0.02)] ring-1 ring-black/[0.01] rounded-2xl p-6 space-y-6">
+
+        <!-- 核心标识 -->
+        <div class="flex flex-col items-center text-center space-y-2">
+            <div class="h-10 w-10 rounded-xl bg-zinc-900 flex items-center justify-center font-bold text-white text-base shadow-sm">iP</div>
+            <h2 class="text-sm font-extrabold tracking-widest text-zinc-900 uppercase pt-2">验证您的凭据</h2>
+            <p class="text-[11px] text-zinc-400 font-medium">自用蓝光原盘自动化交付控制台 v2.0</p>
+        </div>
+
+        <!-- 登录表单 -->
+        <form action="/login" method="POST" class="space-y-4 text-xs">
+            <input type="hidden" name="next" value="{{ next_path or '' }}">
+
+            {% if first_setup %}
+            <!-- 首次设置密码 -->
+            <div class="bg-amber-50 border border-amber-200 rounded-lg p-2.5 text-[11px] text-amber-700 text-center font-medium">
+                首次使用，请先设置登录密码
+            </div>
+
+            <div class="space-y-1.5">
+                <label class="font-bold text-zinc-600 tracking-wide">设置新密码 / SET PASSWORD</label>
+                <input type="password" name="web_password" aria-label="设置新密码" required autofocus placeholder="请输入新密码"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.02] rounded-xl px-3 py-2.5 font-mono text-zinc-800 focus:outline-none shadow-inner text-center tracking-widest text-sm transition-all">
+            </div>
+
+            <div class="space-y-1.5">
+                <label class="font-bold text-zinc-600 tracking-wide">确认密码 / CONFIRM</label>
+                <input type="password" name="web_password_confirm" aria-label="确认密码" required placeholder="再次输入密码"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.02] rounded-xl px-3 py-2.5 font-mono text-zinc-800 focus:outline-none shadow-inner text-center tracking-widest text-sm transition-all">
+            </div>
+
+            <button type="submit"
+                    class="w-full text-xs font-bold bg-zinc-900 hover:bg-zinc-800 text-white py-2.5 rounded-xl shadow-md transition-all active:scale-[0.98]">
+                保存并进入控制台
+            </button>
+
+            {% else %}
+            <!-- 登录验证 -->
+            <div class="space-y-1.5">
+                <label class="font-bold text-zinc-600 tracking-wide">访问密码 / ACCESS PASSWORD</label>
+                <input type="password" name="web_password" aria-label="访问密码" required autofocus placeholder="请输入控制台系统密码"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.02] rounded-xl px-3 py-2.5 font-mono text-zinc-800 focus:outline-none shadow-inner text-center tracking-widest text-sm transition-all">
+            </div>
+
+            {% if message %}
+            <div class="bg-red-50 border border-red-100 rounded-lg p-2.5 text-[11px] text-red-600 text-center font-medium font-mono">
+                认证失败：{{ message }}
+            </div>
+            {% endif %}
+
+            <button type="submit"
+                    class="w-full text-xs font-bold bg-zinc-900 hover:bg-zinc-800 text-white py-2.5 rounded-xl shadow-md transition-all active:scale-[0.98]">
+                安全进入控制台
+            </button>
+            {% endif %}
+        </form>
+    </div>
+
+    <!-- 底部版权/容器基线 -->
+    <div class="text-[10px] text-zinc-400 font-mono mt-6 select-none">
+        SINGLE CONTAINER MODE · ebichu/iso-packer
+    </div>
+
+</body>
+</html>

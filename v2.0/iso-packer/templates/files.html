@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="border-b border-zinc-200 pb-4">
+    <h2 class="text-sm font-bold tracking-widest text-zinc-400 uppercase">文件浏览</h2>
+    <p class="text-xs text-zinc-500 mt-0.5">只读查看 watch / output / CD2 三个挂载点，辅助确认原盘结构、输出文件和临时锁过滤状态</p>
+</div>
+
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+    <div class="bg-white border border-zinc-200/80 shadow-[0_4px_12px_rgba(0,0,0,0.01)] rounded-xl p-3 ring-1 ring-black/[0.01]">
+        <div class="text-[10px] text-zinc-400 font-bold uppercase tracking-wider font-mono">当前根目录</div>
+        <div id="file-current-root" class="text-xs font-bold text-zinc-800 mt-0.5 font-mono">--</div>
+    </div>
+    <div class="bg-white border border-zinc-200/80 shadow-[0_4px_12px_rgba(0,0,0,0.01)] rounded-xl p-3 ring-1 ring-black/[0.01]">
+        <div class="text-[10px] text-zinc-400 font-bold uppercase tracking-wider font-mono">原盘线索</div>
+        <div id="file-disc-count" class="text-xs font-bold text-amber-600 mt-0.5 font-mono">0</div>
+    </div>
+    <div class="bg-white border border-zinc-200/80 shadow-[0_4px_12px_rgba(0,0,0,0.01)] rounded-xl p-3 ring-1 ring-black/[0.01]">
+        <div class="text-[10px] text-zinc-400 font-bold uppercase tracking-wider font-mono">目录数量</div>
+        <div id="file-dir-count" class="text-xs font-bold text-zinc-700 mt-0.5 font-mono">0</div>
+    </div>
+    <div class="bg-white border border-zinc-200/80 shadow-[0_4px_12px_rgba(0,0,0,0.01)] rounded-xl p-3 ring-1 ring-black/[0.01]">
+        <div class="text-[10px] text-zinc-400 font-bold uppercase tracking-wider font-mono">筛选结果</div>
+        <div id="file-entry-count" class="text-xs font-bold text-zinc-700 mt-0.5 font-mono">0</div>
+    </div>
+</div>
+
+<div class="bg-white border border-zinc-200 rounded-xl p-3 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs shadow-sm">
+    <div class="flex items-center gap-3 flex-1 max-w-md">
+        <input type="text" id="file-search" aria-label="搜索当前目录下的文件" placeholder="搜索当前目录下的文件..."
+               class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-1.5 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 shadow-inner">
+    </div>
+
+    <div class="flex items-center gap-2 flex-wrap text-[11px]">
+        <div id="file-filters" class="flex p-0.5 bg-zinc-100 rounded-lg border border-zinc-200/60 font-medium">
+            <button type="button" data-file-filter="all" data-active="true" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">全部</button>
+            <button type="button" data-file-filter="disc" data-active="false" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">原盘</button>
+            <button type="button" data-file-filter="dir" data-active="false" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">目录</button>
+            <button type="button" data-file-filter="file" data-active="false" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">文件</button>
+        </div>
+        <span class="text-zinc-300">|</span>
+        <div class="flex gap-1 font-mono root-switcher">
+            <button type="button" data-root="watch" data-active="true" class="bg-zinc-900 text-white font-medium px-2.5 py-1 rounded-lg shadow-sm transition">watch</button>
+            <button type="button" data-root="output" data-active="false" class="bg-white hover:bg-zinc-50 text-zinc-600 border border-zinc-200 px-2.5 py-1 rounded-lg shadow-inner transition">output</button>
+            <button type="button" data-root="cd2" data-active="false" class="bg-white hover:bg-zinc-50 text-zinc-600 border border-zinc-200 px-2.5 py-1 rounded-lg shadow-inner transition">cd2</button>
+        </div>
+        <span class="text-zinc-300">|</span>
+        <button type="button" id="file-up" class="p-1 text-zinc-500 hover:text-zinc-900 transition" title="返回上级">上级</button>
+        <button type="button" id="file-refresh" class="p-1 text-zinc-500 hover:text-zinc-900 transition" title="刷新当前目录">刷新</button>
+    </div>
+</div>
+
+<div class="flex items-center gap-2 font-mono text-xs text-zinc-500 px-1">
+        <span class="text-zinc-400 font-bold uppercase tracking-wider text-[10px]">路径:</span>
+    <div id="file-breadcrumb" class="flex items-center gap-1 text-zinc-700 font-bold">
+    </div>
+</div>
+
+<div class="border border-zinc-200 bg-white rounded-xl overflow-hidden font-mono text-xs shadow-[0_8px_30px_rgba(0,0,0,0.015)]">
+    <div class="bg-gradient-to-b from-zinc-50 to-zinc-100/30 p-3 text-zinc-400 flex justify-between border-b border-zinc-200 text-[10px] font-bold tracking-wider select-none">
+        <span>名称 / 结构</span>
+        <div class="flex gap-24 pr-8"><span class="w-16">属性</span><span class="w-20 text-right">大小</span></div>
+    </div>
+
+    <div id="file-browser-list" class="divide-y divide-zinc-100 text-zinc-700">
+    </div>
+</div>
+{% endblock %}
+
+{% block script %}
+<script src="{{ url_for('static', filename='js/files.js') }}"></script>
+<style>
+    /* 文件浏览页专用行样式，保持只读工程表格的密度。 */
+    .file-row { display: flex; align-items: center; justify-content: space-between; padding: 0.875rem; text-align: left; width: 100%; transition: all 0.2s; cursor: pointer; }
+    .file-row:hover { background-color: #fcfcfb; color: #3b82f6; }
+    .file-main { flex: 1; min-width: 0; padding-left: 0.75rem; padding-right: 2rem; }
+    .file-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #27272a; }
+    .file-meta { display: flex; gap: 1rem; font-size: 10px; color: #a1a1aa; margin-top: 0.125rem; }
+    .file-kind { font-size: 10px; font-weight: bold; border: 1px solid #e4e4e7; padding: 0.125rem 0.5rem; border-radius: 0.375rem; background-color: #f4f4f5; color: #71717a; min-width: 42px; text-align: center; }
+    .file-row[data-kind="disc"] .file-kind { background-color: #fef3c7; color: #d97706; border-color: #fde68a; }
+    .file-size { width: 5rem; text-align: right; color: #71717a; font-weight: 500; flex-shrink: 0; }
+    .root-switcher [data-root][data-active="true"] { background: #18181b !important; color: #fff !important; border-color: #18181b !important; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+    .root-switcher [data-root][data-active="false"] { background: #fff !important; color: #52525b !important; border-color: #e4e4e7 !important; }
+    #file-filters button:focus-visible,
+    .root-switcher button:focus-visible,
+    #file-up:focus-visible,
+    #file-refresh:focus-visible,
+    .file-row:focus-visible,
+    #file-breadcrumb button:focus-visible { outline: 2px solid #10b981; outline-offset: 2px; }
+    #file-breadcrumb button { font-weight: bold; color: #2563eb; transition: color 0.15s; cursor: pointer; background: none; border: none; padding: 0; }
+    #file-breadcrumb button:hover { color: #1d4ed8; text-decoration: underline; }
+    .breadcrumb-separator { color: #d4d4d8; padding: 0 0.25rem; font-weight: normal; }
+</style>
+{% endblock %}

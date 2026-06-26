@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ISO Packer{% endblock %}</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style>
+        body { background-color: #fbfbfa; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #e4e4e7; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #d4d4d8; }
+        #app-toast {
+            position: fixed;
+            right: 20px;
+            bottom: 20px;
+            z-index: 60;
+            max-width: min(360px, calc(100vw - 40px));
+            padding: 10px 14px;
+            border-radius: 12px;
+            background: #18181b;
+            color: #fff;
+            font-size: 12px;
+            font-weight: 700;
+            line-height: 1.5;
+            box-shadow: 0 18px 40px rgba(24, 24, 27, 0.18);
+            opacity: 0;
+            transform: translateY(8px);
+            pointer-events: none;
+            transition: opacity 160ms ease, transform 160ms ease, background-color 160ms ease;
+        }
+        #app-toast.is-visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        #app-toast.is-error {
+            background: #dc2626;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            #app-toast { transition: none; }
+        }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body class="min-h-screen text-zinc-700 flex font-sans antialiased selection:bg-blue-500/10">
+
+    <aside class="fixed bottom-0 top-0 left-0 z-30 flex flex-col justify-between w-64 -translate-x-full border-r border-zinc-200 bg-[#f4f4f2] transition-transform duration-200 md:sticky md:translate-x-0 shrink-0" id="sidebar">
+        <div class="p-6 space-y-7">
+            <div class="flex items-center gap-3 px-1">
+                <div class="h-8 w-8 rounded-lg bg-zinc-900 flex items-center justify-center font-bold text-white text-sm shadow-sm">iP</div>
+                <div>
+                    <h1 class="font-extrabold tracking-tight text-zinc-900 text-xs uppercase tracking-widest">ISO PACKER</h1>
+                    <p class="text-[10px] text-zinc-400 font-mono mt-0.5">v2.0 · Alabaster Edition</p>
+                </div>
+            </div>
+
+            <nav class="space-y-1.5">
+                <a href="{{ url_for('index') }}" class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all {% if request.endpoint == 'index' %}bg-white text-zinc-900 font-bold shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200{% else %}text-zinc-500 hover:text-zinc-900 hover:bg-white/60 font-semibold{% endif %}">
+                    <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-900 text-[10px] font-black text-white">H</span> 首页展示
+                </a>
+                <a href="{{ url_for('workspace') }}" class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all group {% if request.endpoint == 'workspace' %}bg-white text-zinc-900 font-bold shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200{% else %}text-zinc-500 hover:text-zinc-900 hover:bg-white/60 font-semibold{% endif %}">
+                    <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-200 text-[10px] font-black text-zinc-700">W</span> 封装工作台
+                    <span id="global-worker-badge" class="ml-auto bg-zinc-200/60 text-zinc-600 text-[9px] font-bold px-2 py-0.5 rounded-full tracking-wide">IDLE</span>
+                </a>
+                <a href="{{ url_for('files') }}" class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all {% if request.endpoint == 'files' %}bg-white text-zinc-900 font-bold shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200{% else %}text-zinc-500 hover:text-zinc-900 hover:bg-white/60 font-semibold{% endif %}">
+                    <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-200 text-[10px] font-black text-zinc-700">F</span> 文件浏览
+                </a>
+                <a href="{{ url_for('settings') }}" class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all {% if request.endpoint == 'settings' %}bg-white text-zinc-900 font-bold shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200{% else %}text-zinc-500 hover:text-zinc-900 hover:bg-white/60 font-semibold{% endif %}">
+                    <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-200 text-[10px] font-black text-zinc-700">S</span> 系统设置
+                </a>
+            </nav>
+        </div>
+
+        <div class="p-5 border-t border-zinc-200 bg-zinc-900/[0.01] text-[10px] text-zinc-400 font-mono space-y-1.5">
+            <div class="flex justify-between"><span>ENV_BASE</span><span class="text-zinc-600 font-medium">VPS / Docker</span></div>
+            <div class="flex justify-between"><span>SERIAL_LOOP</span><span class="text-emerald-600 font-bold">2s REFRESH</span></div>
+        </div>
+    </aside>
+
+    <main class="flex-1 w-full overflow-y-auto p-4 sm:p-5 lg:p-6 2xl:p-8 flex flex-col justify-start">
+        <!-- 移动端汉堡包菜单按钮 -->
+        <button id="mobile-menu-toggle" type="button" data-mobile-menu-toggle aria-controls="sidebar" aria-expanded="false" aria-label="打开导航菜单" class="md:hidden fixed top-4 left-4 z-40 bg-zinc-900 text-white p-2 rounded-lg shadow-lg">
+            <svg class="w-5 h-5" aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+            </svg>
+        </button>
+
+        <div class="w-full max-w-[1720px] mx-auto flex flex-col justify-start space-y-8">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    <div id="app-toast" role="status" aria-live="polite"></div>
+
+    <script src="{{ url_for('static', filename='js/shared.js') }}"></script>
+    {% block script %}{% endblock %}
+</body>
+</html>

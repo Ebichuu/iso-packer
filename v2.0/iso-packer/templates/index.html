@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+
+{% block title %}首页 · ISO Packer{% endblock %}
+
+{% block head %}
+<style>
+    .home-shell {
+        --home-ink: #18181b;
+        --home-muted: #71717a;
+        --home-line: #e4e4e7;
+        --home-panel: #ffffff;
+        --home-soft: #f4f4f5;
+    }
+    .home-hero {
+        background: #ffffff;
+    }
+    .home-poster-card {
+        background: #f4f4f5;
+        box-shadow: inset 0 0 0 1px rgba(24,24,27,0.08);
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .home-shell * {
+            transition-duration: 0.001ms !important;
+            animation-duration: 0.001ms !important;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="home-shell space-y-8">
+    <section class="home-hero relative overflow-hidden rounded-2xl border border-zinc-200 p-5 md:p-6 shadow-sm">
+        <div class="relative grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px] lg:items-center">
+            <div class="min-w-0 space-y-4">
+                <div class="flex flex-wrap items-center gap-2">
+                    <span class="inline-flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-[11px] font-black tracking-[0.08em] text-zinc-600">
+                        <span class="h-2 w-2 rounded-full bg-emerald-500"></span>
+                        ISO Packer v2.0
+                    </span>
+                    <span class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-mono text-[10px] font-black tracking-[0.08em] text-zinc-500">安全预览</span>
+                </div>
+                <div class="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                    <div>
+                        <h2 class="text-2xl font-black leading-tight tracking-[-0.025em] text-zinc-950 sm:text-3xl lg:text-[34px]">
+                            首页展示
+                        </h2>
+                        <p class="mt-2 max-w-2xl text-sm font-medium leading-6 text-zinc-600">
+                            归档成果、蓝光发行和当前系统状态放在这里；封装、拉取和异常恢复进入工作台处理。
+                        </p>
+                    </div>
+                    <div class="flex flex-col gap-3 sm:flex-row xl:shrink-0">
+                    <a href="{{ url_for('workspace') }}" class="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-zinc-950 px-5 py-2.5 text-xs font-black tracking-[0.08em] text-white shadow-lg shadow-zinc-900/10 transition hover:-translate-y-0.5 hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">
+                        <svg aria-hidden="true" class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 7h16M7 12h10M9 17h6" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.9"/></svg>
+                        进入封装工作台
+                    </a>
+                    <a href="{{ url_for('files') }}" class="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white/85 px-5 py-2.5 text-xs font-black tracking-[0.08em] text-zinc-800 shadow-sm transition hover:-translate-y-0.5 hover:border-zinc-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">
+                        <svg aria-hidden="true" class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-15v-13.5Z" stroke-linejoin="round" stroke-width="1.9"/></svg>
+                        浏览本地目录
+                    </a>
+                    </div>
+                </div>
+            </div>
+
+            <aside class="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                <div class="flex items-center justify-between border-b border-zinc-100 pb-3">
+                    <div>
+                        <p class="text-[10px] font-black tracking-[0.12em] text-zinc-400">运行状态</p>
+                        <h3 class="mt-1 text-sm font-black text-zinc-900">封装引擎状态</h3>
+                    </div>
+                    <div id="index-gateway-status" class="inline-flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[10px] font-black tracking-[0.08em] text-zinc-600">
+                        <span id="gateway-dot" class="h-2 w-2 rounded-full bg-zinc-400"></span>
+                        <span id="gateway-text">状态同步中</span>
+                    </div>
+                </div>
+                <div class="mt-4 grid grid-cols-2 gap-3 text-xs">
+                    <div class="rounded-2xl border border-zinc-200 bg-zinc-50 p-3">
+                        <div class="font-mono text-[10px] font-black uppercase tracking-[0.14em] text-zinc-400">今日完成</div>
+                        <div class="mt-2 font-mono text-3xl font-black tracking-[-0.04em] text-zinc-950">{{ stats.today_done or 0 }}</div>
+                    </div>
+                    <div class="rounded-2xl border border-zinc-200 bg-zinc-50 p-3">
+                        <div class="font-mono text-[10px] font-black uppercase tracking-[0.14em] text-zinc-400">当前执行</div>
+                        <div id="index-active-count" class="mt-2 font-mono text-3xl font-black tracking-[-0.04em] text-emerald-700">{{ stats.active or 0 }}</div>
+                    </div>
+                    <div class="col-span-2 rounded-xl border border-zinc-200 bg-white p-3">
+                        <div class="flex items-center justify-between gap-4">
+                            <span class="text-[11px] font-bold text-zinc-500">最近交付</span>
+                            <span class="font-mono text-[11px] font-bold text-zinc-700">{{ stats.last_done_at or "暂无记录" }}</span>
+                        </div>
+                        <div id="index-worker-note" class="mt-3 truncate font-mono text-[11px] text-zinc-500">等待任务流进入工作台</div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </section>
+
+    <section class="grid overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm md:grid-cols-3 md:divide-x md:divide-zinc-200">
+        <div class="p-5">
+            <div class="font-mono text-[10px] font-black tracking-[0.12em] text-zinc-400">昨日完成</div>
+            <div class="mt-2 flex items-end justify-between gap-3">
+                <div class="font-mono text-4xl font-black tracking-[-0.05em] text-zinc-950">{{ stats.yesterday_count or 0 }}</div>
+                <div class="rounded-lg bg-blue-50 px-2.5 py-1 font-mono text-[10px] font-black text-blue-700">+{{ stats.yesterday_gb or 0 }} GB</div>
+            </div>
+            <p class="mt-3 text-xs font-medium text-zinc-500">昨日完成的本地 ISO 归档量。</p>
+        </div>
+        <div class="p-5">
+            <div class="font-mono text-[10px] font-black tracking-[0.12em] text-zinc-400">本周归档</div>
+            <div class="mt-2 flex items-end justify-between gap-3">
+                <div class="font-mono text-4xl font-black tracking-[-0.05em] text-emerald-700">{{ stats.this_week_count or 0 }}</div>
+                <div class="rounded-lg bg-emerald-50 px-2.5 py-1 font-mono text-[10px] font-black text-emerald-700">~{{ stats.this_week_gb or 0 }} GB</div>
+            </div>
+            <p class="mt-3 text-xs font-medium text-zinc-500">本周吞吐和输出目录节奏。</p>
+        </div>
+        <div class="p-5">
+            <div class="font-mono text-[10px] font-black tracking-[0.12em] text-zinc-400">本月容量</div>
+            <div class="mt-2 flex items-end justify-between gap-3">
+                <div class="font-mono text-4xl font-black tracking-[-0.05em] text-zinc-950">{{ stats.this_month_count or 0 }}</div>
+                <div class="rounded-lg bg-zinc-100 px-2.5 py-1 font-mono text-[10px] font-black text-zinc-700">{{ stats.this_month_tb or 0 }} TB</div>
+            </div>
+            <p class="mt-3 text-xs font-medium text-zinc-500">本月累计归档规模。</p>
+        </div>
+    </section>
+
+    <section class="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm md:p-6">
+        <div class="flex flex-col gap-3 border-b border-zinc-100 pb-5 md:flex-row md:items-end md:justify-between">
+            <div>
+                <p class="font-mono text-[10px] font-black tracking-[0.12em] text-emerald-700">本地归档</p>
+                <h3 class="mt-1 text-2xl font-black tracking-[-0.035em] text-zinc-950">已交付原盘资产</h3>
+            </div>
+            <p class="max-w-md text-xs font-medium leading-6 text-zinc-500">当前只展示真实本地任务记录；发行日历已接入 Blu-ray.com 与 TMDB，归档墙的影片海报后续按本地任务元数据补齐。</p>
+        </div>
+
+        <div class="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+            {% for movie in cached_movies %}
+            <article class="group overflow-hidden rounded-xl border border-zinc-200 bg-white transition hover:-translate-y-0.5 hover:border-zinc-300">
+                <div class="relative aspect-[2/3] overflow-hidden bg-zinc-100 bg-cover bg-center" {% if movie.poster_path %}style="background-image: url('{{ movie.poster_path }}');"{% endif %}>
+                    {% if movie.poster_path %}
+                    <div class="absolute inset-0 bg-gradient-to-t from-zinc-950/86 via-zinc-950/12 to-transparent"></div>
+                    {% else %}
+                    <div class="home-poster-card absolute inset-0"></div>
+                    <div class="absolute inset-x-4 bottom-4 top-4 rounded-xl border border-zinc-200 bg-white/55"></div>
+                    <div class="absolute inset-0 flex items-center justify-center">
+                        <div class="grid h-16 w-16 place-items-center rounded-xl border border-zinc-200 bg-white font-mono text-3xl font-black text-zinc-700 shadow-sm">{{ movie.initial }}</div>
+                    </div>
+                    {% endif %}
+                    <div class="absolute left-3 top-3 flex flex-wrap gap-1.5">
+                        <span class="rounded-md bg-zinc-950 px-2 py-1 font-mono text-[9px] font-black tracking-[0.08em] text-white">{{ movie.resolution or "4K UHD" }}</span>
+                        {% if movie.is_dv %}
+                        <span class="rounded-md bg-emerald-500 px-2 py-1 font-mono text-[9px] font-black tracking-[0.08em] text-emerald-950">DV</span>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="space-y-1.5 border-t border-zinc-100 p-3">
+                    <h4 class="truncate text-xs font-black tracking-[-0.01em] text-zinc-900" title="{{ movie.title or movie.raw_name }}">{{ movie.title or movie.raw_name }}</h4>
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="truncate text-[10px] font-bold text-zinc-500">{{ movie.size }}</span>
+                        <span class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[9px] font-black text-emerald-700">
+                            <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                            {{ movie.match_status }}
+                        </span>
+                    </div>
+                </div>
+            </article>
+            {% else %}
+            <div class="col-span-full rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 p-8 text-center">
+                <div class="mx-auto flex h-14 w-14 items-center justify-center rounded-xl border border-zinc-200 bg-white shadow-sm">
+                    <svg aria-hidden="true" class="h-7 w-7 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 6.5h16v11H4zM8 6.5V4h8v2.5" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg>
+                </div>
+                <h4 class="mt-4 text-sm font-black text-zinc-900">暂无完成归档记录</h4>
+                <p class="mx-auto mt-2 max-w-md text-xs font-medium leading-6 text-zinc-500">走完一次封装后，首页会自动展示真实交付结果；执行和异常处理请进入封装工作台。</p>
+                <a href="{{ url_for('workspace') }}" class="mt-4 inline-flex min-h-10 items-center justify-center rounded-xl bg-zinc-950 px-4 py-2 text-xs font-black tracking-[0.08em] text-white hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">去工作台检查</a>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section>
+        <div class="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm md:p-6">
+            <div class="flex items-center justify-between gap-4 border-b border-zinc-100 pb-4">
+                <div>
+                    <p class="font-mono text-[10px] font-black tracking-[0.12em] text-zinc-400">今日起发行</p>
+                    <h3 class="mt-1 text-lg font-black tracking-[-0.025em] text-zinc-950">蓝光发行日历</h3>
+                </div>
+                <button type="button" id="release-calendar-refresh" class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-mono text-[10px] font-black tracking-[0.08em] text-zinc-700 transition hover:border-zinc-300 hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">刷新外网</button>
+            </div>
+            <div class="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                <span class="font-mono text-[10px] font-black tracking-[0.08em] text-zinc-700">{{ calendar_source.window.label or '今日起发行' }}</span>
+                <span id="release-calendar-status" class="text-[11px] font-bold leading-5 text-zinc-600">
+                    {% if calendar_source.fetched_at %}已缓存 {{ calendar_source.fetched_at }}{% else %}等待首次外网刷新{% endif %}
+                    · {{ calendar_source.tmdb.message or 'TMDB 待配置' }}
+                </span>
+            </div>
+            <div class="mt-3 flex items-center justify-between gap-3">
+                <p id="release-calendar-filter-label" class="text-[11px] font-bold leading-5 text-zinc-500">当前显示全部发行条目</p>
+                <button type="button" data-release-filter="all" class="rounded-lg border border-zinc-200 bg-white px-3 py-1 font-mono text-[10px] font-black tracking-[0.08em] text-zinc-600 transition hover:border-zinc-300 hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">全部发行</button>
+            </div>
+            <div id="release-calendar-list" class="mt-3 grid gap-3 lg:grid-cols-2">
+                {% for item in calendar_releases %}
+                <article class="release-calendar-row group relative cursor-pointer overflow-hidden rounded-xl border border-zinc-200 bg-white transition hover:-translate-y-0.5 hover:border-zinc-300 hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2" data-release-date="{{ item.sort_date[:10] }}" data-release-title="{{ item.title_zh or item.title }}" data-release-link="{{ item.source_url or item.url }}" role="link" tabindex="0" aria-label="打开 {{ item.title_zh or item.title }} 的蓝光发行页面">
+                    <div class="grid grid-cols-[64px_minmax(0,1fr)] gap-3 p-3 sm:grid-cols-[72px_minmax(0,1fr)]">
+                        <div class="release-calendar-poster relative aspect-[2/3] overflow-hidden rounded-lg border border-zinc-200 bg-zinc-100">
+                            {% if item.poster_url %}
+                            <img src="{{ item.poster_url }}" alt="{{ item.title_zh or item.title }} 海报" class="h-full w-full object-cover transition duration-500 group-hover:scale-[1.035]" loading="lazy">
+                            {% else %}
+                            <div class="grid h-full w-full place-items-center bg-zinc-100 px-4 text-center">
+                                <div>
+                                    <span class="block font-mono text-3xl font-black tracking-[-0.04em] text-zinc-700">{{ item.poster_initials }}</span>
+                                    <span class="mt-2 block font-mono text-[9px] font-black tracking-[0.14em] text-zinc-500">暂无封面</span>
+                                </div>
+                            </div>
+                            {% endif %}
+                            <span class="absolute left-1.5 top-1.5 rounded-full bg-zinc-950/78 px-1.5 py-0.5 font-mono text-[8px] font-black tracking-[0.08em] text-white">{{ item.release_label }}</span>
+                        </div>
+                        <div class="relative min-w-0 pr-1">
+                            <div class="flex flex-wrap items-center gap-1.5">
+                                <span class="rounded-md bg-zinc-100 px-2 py-1 font-mono text-[9px] font-black uppercase tracking-[0.08em] text-zinc-700">{{ item.studio }}</span>
+                                <span class="rounded-md border border-zinc-200 bg-white px-2 py-1 font-mono text-[9px] font-black uppercase tracking-[0.08em] text-zinc-500">{{ item.region }}</span>
+                                {% if item.tmdb_id %}
+                                <a class="release-tmdb-link relative z-30 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 font-mono text-[9px] font-black uppercase tracking-[0.08em] text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2" href="https://www.themoviedb.org/movie/{{ item.tmdb_id }}" target="_blank" rel="noreferrer" aria-label="打开 {{ item.title_zh or item.title }} 的 TMDB 页面">TMDB #{{ item.tmdb_id }}</a>
+                                {% else %}
+                                <span class="rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 font-mono text-[9px] font-black uppercase tracking-[0.08em] text-zinc-500">TMDB 未匹配</span>
+                                {% endif %}
+                            </div>
+                            <h4 class="mt-1.5 line-clamp-1 text-sm font-black leading-snug tracking-[-0.012em] text-zinc-950 sm:text-base" title="{{ item.title_zh or item.title }}">
+                                    {{ item.title_zh or item.title }}
+                            </h4>
+                            <p class="mt-1 truncate text-[11px] font-bold leading-5 text-zinc-500" title="{{ item.specs }}">{{ item.specs }}</p>
+                            <p class="mt-2 line-clamp-1 border-t border-zinc-100 pt-2 font-mono text-[10px] font-bold leading-5 text-zinc-500">发售 {{ item.release_label }} · {{ item.specs }}</p>
+                        </div>
+                    </div>
+                </article>
+                {% else %}
+                <div class="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 p-5">
+                    <h4 class="text-sm font-black text-zinc-900">预留展示位，不造假档期</h4>
+                    <p class="mt-2 text-xs font-medium leading-6 text-zinc-500">发行日历数据源为空时会显示这里；请维护 data/release_calendar.json。</p>
+                </div>
+                {% endfor %}
+            </div>
+            <div id="release-calendar-empty" class="mt-3 hidden rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 p-4">
+                <p class="text-xs font-bold leading-6 text-zinc-500">这一天暂无可显示的发行条目。</p>
+            </div>
+            <div class="mt-4 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                <div class="grid gap-2 md:grid-cols-[1fr_auto] md:items-center">
+                    <span class="text-[11px] font-bold leading-5 text-zinc-500">
+                        基础源：{{ calendar_source.primary_source.name }}；TMDB 补全中文名与海报。首页读取本地缓存，手动刷新才访问外网。
+                        {{ calendar_source.window.note or '' }}
+                        {% if calendar_source.updated_at %}更新：{{ calendar_source.updated_at }}。{% endif %}
+                    </span>
+                    <span class="font-mono text-[10px] font-black uppercase tracking-[0.08em] text-zinc-400">{{ calendar_releases|length }} items · {{ calendar_source.generated_by or 'manual cache' }}</span>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block script %}
+<script src="{{ url_for('static', filename='js/index.js') }}"></script>
+{% endblock %}

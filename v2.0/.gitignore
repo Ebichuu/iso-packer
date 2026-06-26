@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.log
+
+/data/
+test-output/
+test-watch/
+iso-packer/test-output/
+iso-packer/data/*
+!iso-packer/data/
+!iso-packer/data/release_calendar.json
+
+*/1782324980447.png

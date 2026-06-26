@@ -1,0 +1,512 @@
+{% extends "base.html" %}
+
+{% block head %}
+<style>
+    .settings-card { background: #fff; border: 1px solid #e4e4e7; border-radius: 1rem; padding: 1.5rem; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
+    .settings-card h3 { display: flex; align-items: center; gap: 0.5rem; padding-bottom: 0.5rem; border-bottom: 1px solid #f4f4f5; color: #18181b; font-size: 11px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+    .settings-card summary { list-style: none; }
+    .settings-card summary::-webkit-details-marker { display: none; }
+    .settings-card-summary { display: flex; cursor: pointer; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+    .settings-card-summary h3 { border-bottom: 0; padding-bottom: 0; }
+    .settings-card-body { border-top: 1px solid #f4f4f5; padding-top: 1rem; }
+    .settings-toggle { border: 1px solid #e4e4e7; border-radius: 999px; background: #fff; color: #71717a; font-size: 10px; font-weight: 900; letter-spacing: 0.12em; padding: 0.25rem 0.7rem; white-space: nowrap; transition: border-color .15s ease, background .15s ease, color .15s ease; }
+    .settings-card[open] .settings-toggle { border-color: #d4d4d8; background: #f4f4f5; color: #3f3f46; }
+    .settings-toggle .when-open { display: none; }
+    .settings-card[open] .settings-toggle .when-open { display: inline; }
+    .settings-card[open] .settings-toggle .when-closed { display: none; }
+    .field-control { display: flex; gap: 0.5rem; }
+    .field-control input { min-width: 0; flex: 1; }
+    .directory-row { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0.75rem; align-items: center; padding: 0.75rem; border: 1px solid #e4e4e7; border-radius: 0.75rem; background: #fff; text-align: left; transition: border-color .15s ease, background .15s ease; }
+    .directory-row:hover { border-color: #a1a1aa; background: #fafafa; }
+    .directory-row:focus-visible, .settings-action:focus-visible { outline: 2px solid #18181b; outline-offset: 2px; }
+    .directory-row:disabled { opacity: .55; cursor: not-allowed; }
+    .file-kind { font-size: 10px; font-weight: 800; border: 1px solid #e4e4e7; padding: 0.125rem 0.5rem; border-radius: 0.375rem; background-color: #f4f4f5; color: #71717a; min-width: 42px; text-align: center; }
+    .directory-main { min-width: 0; display: grid; gap: 0.15rem; }
+    .directory-main strong { color: #27272a; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .directory-main small { color: #71717a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .soft-pill { border: 1px solid #e4e4e7; border-radius: 999px; color: #52525b; font-size: 10px; font-weight: 800; padding: 0.2rem 0.55rem; white-space: nowrap; }
+    .empty-state.slim { border: 1px dashed #d4d4d8; border-radius: 0.75rem; color: #71717a; padding: 1rem; text-align: center; font-size: 12px; }
+    body.has-modal { overflow: hidden; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="border-b border-zinc-200 pb-4 mb-6">
+    <h2 class="text-sm font-bold tracking-widest text-zinc-400 uppercase flex items-center gap-1.5">
+        <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-900 text-[10px] font-black text-white">S</span> 系统设置
+    </h2>
+    <span id="settings-dirty-state" class="inline-flex mt-2 text-[10px] font-bold text-zinc-400 uppercase tracking-widest">未修改</span>
+    <p class="text-xs text-zinc-500 mt-0.5">完整的系统配置管理，所有设置立即生效</p>
+</div>
+
+{% if request.args.get('saved') %}
+<div class="bg-emerald-500/[0.01] border border-emerald-200 rounded-xl p-4 mb-6 text-xs text-emerald-700 flex items-center gap-3">
+    <span class="grid h-6 w-6 place-items-center rounded-full bg-emerald-100 text-[10px] font-black text-emerald-700">OK</span>
+    <div>
+        <div class="font-bold">设置已保存</div>
+        <div class="text-emerald-600">新配置已生效，后台服务正在使用最新设置。</div>
+    </div>
+</div>
+{% endif %}
+
+<form id="system-config-form" action="{{ url_for('settings') }}" method="POST" class="w-full space-y-6 text-xs">
+
+    <!-- 本地目录 -->
+    <details class="settings-card space-y-4" open>
+        <summary class="settings-card-summary">
+            <div>
+                <h3>本地目录</h3>
+                <p class="mt-2 text-[11px] font-medium text-zinc-500">先配置程序在 Windows 本机读写文件的位置。</p>
+            </div>
+            <span class="settings-toggle"><span class="when-closed">展开</span><span class="when-open">收起</span></span>
+        </summary>
+        <div class="settings-card-body space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="space-y-1.5 field">
+                <label class="font-semibold text-zinc-700">监控目录</label>
+                <div class="field-control">
+                    <input id="watch_dir" type="text" name="watch_dir" aria-label="本地监控目录" value="{{ config.watch_dir }}"
+                           class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                    <button type="button" data-dir-picker data-dir-target="watch_dir" data-dir-scope="watch_dir"
+                            class="settings-action shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] font-bold text-zinc-700 hover:border-zinc-400 hover:text-zinc-900">选择</button>
+                </div>
+                <p class="text-[10px] text-zinc-400">扫描器会监控此目录下的原盘结构</p>
+            </div>
+            <div class="space-y-1.5 field">
+                <label class="font-semibold text-zinc-700">输出目录</label>
+                <div class="field-control">
+                    <input id="output_dir" type="text" name="output_dir" aria-label="本地输出目录" value="{{ config.output_dir }}"
+                           class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                    <button type="button" data-dir-picker data-dir-target="output_dir" data-dir-scope="output_dir"
+                            class="settings-action shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] font-bold text-zinc-700 hover:border-zinc-400 hover:text-zinc-900">选择</button>
+                </div>
+                <p class="text-[10px] text-zinc-400">封装后的 ISO 文件临时存放位置</p>
+            </div>
+        </div>
+        <div class="border-t border-zinc-100 pt-4">
+            <p class="mb-3 text-[11px] font-bold uppercase tracking-[0.12em] text-zinc-400">扫描参数</p>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="space-y-1.5">
+                    <label class="font-semibold text-zinc-700">扫描间隔（秒）</label>
+                    <input type="number" name="scan_interval_seconds" aria-label="扫描间隔秒数" value="{{ config.scan_interval_seconds }}" min="5"
+                           class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                </div>
+                <div class="space-y-1.5">
+                    <label class="font-semibold text-zinc-700">稳定观察时长（秒）</label>
+                    <input type="number" name="stable_seconds" aria-label="稳定观察时长秒数" value="{{ config.stable_seconds }}" min="30"
+                           class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                </div>
+                <div class="space-y-1.5">
+                    <label class="font-semibold text-zinc-700">最小预留空间（GB）</label>
+                    <input type="number" name="min_free_space_gb" aria-label="最小预留空间 GB" value="{{ config.min_free_space_gb }}" min="0"
+                           class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                </div>
+            </div>
+            <div class="flex gap-4 pt-2">
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" name="enabled" aria-label="启用自动扫描" {% if config.enabled %}checked{% endif %}
+                           class="rounded bg-zinc-50 border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                    <span class="font-semibold text-zinc-700">启用自动扫描</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" name="delete_source_after_success" aria-label="成功后删除源目录" {% if config.delete_source_after_success %}checked{% endif %}
+                           class="rounded bg-zinc-50 border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                    <span class="font-semibold text-zinc-700">成功后删除源目录</span>
+                </label>
+            </div>
+        </div>
+        </div>
+    </details>
+
+    <!-- CD2 登录信息 -->
+    <details class="settings-card space-y-4 border-zinc-300 bg-zinc-50/30">
+        <summary class="settings-card-summary">
+            <div>
+                <h3 class="!border-b-0 !pb-0">CD2 登录信息</h3>
+                <p class="mt-2 max-w-2xl text-[11px] font-medium leading-5 text-zinc-500">
+                    先在这里填写 CloudDrive2 局域网地址和登录凭据。API Token 模式下，把 Token 填到“CD2 API Token”里，用户名可以留空。
+                </p>
+            </div>
+            <span class="settings-toggle"><span class="when-closed">展开</span><span class="when-open">收起</span></span>
+        </summary>
+        <div class="settings-card-body space-y-4">
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <label class="flex min-h-11 items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 cursor-pointer">
+                <input type="checkbox" name="cd2_api_enabled" aria-label="启用 CD2 API" {% if config.cd2_api_enabled %}checked{% endif %}
+                       class="rounded bg-zinc-50 border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                <span class="font-semibold text-zinc-700">启用 CD2 API</span>
+            </label>
+            <label class="flex min-h-11 items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 cursor-pointer">
+                <input type="checkbox" name="cd2_refresh_enabled" aria-label="启用目录刷新" {% if config.cd2_refresh_enabled %}checked{% endif %}
+                       class="rounded bg-zinc-50 border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                <span class="font-semibold text-zinc-700">启用目录刷新</span>
+            </label>
+            <label class="flex min-h-11 items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 cursor-pointer">
+                <input type="checkbox" name="cd2_webhook_enabled" aria-label="启用 Webhook" {% if config.cd2_webhook_enabled %}checked{% endif %}
+                       class="rounded bg-zinc-50 border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                <span class="font-semibold text-zinc-700">启用 Webhook</span>
+            </label>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="space-y-1.5 md:col-span-2">
+                <label class="font-semibold text-zinc-700">CD2 API 地址</label>
+                <input type="text" name="cd2_api_addr" aria-label="CD2 API 地址" value="{{ config.cd2_api_addr }}" placeholder="例如：http://192.168.50.126:19798/"
+                       class="w-full bg-white border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                <p class="text-[10px] text-zinc-400">填写 CloudDrive2 的 Web/API 地址，保留 http:// 和端口。</p>
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">认证方式</label>
+                <select id="cd2_auth_mode" name="cd2_auth_mode" aria-label="认证方式"
+                        class="w-full bg-white border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                    <option value="api_token" {% if config.cd2_auth_mode == "api_token" %}selected{% endif %}>API Token</option>
+                    <option value="password" {% if config.cd2_auth_mode == "password" %}selected{% endif %}>账号密码</option>
+                </select>
+            </div>
+            <div class="space-y-1.5">
+                <label id="cd2-identity-label" class="font-semibold text-zinc-700">Token 备注 / 用户名（可空）</label>
+                <input type="text" name="cd2_api_username" aria-label="Token 备注或用户名" value="{{ config.cd2_api_username }}" spellcheck="false"
+                       class="w-full bg-white border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                <p id="cd2-identity-help" class="text-[10px] text-zinc-400">API Token 模式下这里可留空；账号密码模式下填写 CD2 用户名。</p>
+            </div>
+            <div class="space-y-1.5">
+                <label id="cd2-secret-label" class="font-semibold text-zinc-700">CD2 API Token</label>
+                <input type="password" name="cd2_api_password" aria-label="CD2 API Token 或密码" placeholder="粘贴 API Token；留空则不修改" autocomplete="new-password"
+                       class="w-full bg-white border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">Webhook 密钥</label>
+                <input type="password" name="cd2_webhook_secret" aria-label="Webhook 密钥" placeholder="可选；留空则不修改" autocomplete="new-password"
+                       class="w-full bg-white border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+        </div>
+        <div class="rounded-xl border border-zinc-200 bg-white p-3">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                    <div class="text-xs font-bold text-zinc-800">连接验收</div>
+                    <p class="mt-1 text-[10px] font-medium text-zinc-500">使用当前表单里的地址和凭据测试 CD2 连接；测试不会保存配置。</p>
+                </div>
+                <button type="button" id="cd2-test-btn"
+                        class="settings-action inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-300 bg-white px-4 py-2 text-[11px] font-bold text-zinc-700 shadow-sm transition hover:border-zinc-500 hover:text-zinc-950">
+                    测试 CD2 连接
+                </button>
+            </div>
+            <div id="cd2-test-result" class="mt-3 hidden rounded-lg border px-3 py-2 text-[11px] font-bold" role="status" aria-live="polite"></div>
+        </div>
+        </div>
+    </details>
+
+    <!-- CD2 转存目录 -->
+    <details class="settings-card space-y-4">
+        <summary class="settings-card-summary">
+            <div>
+                <h3>CD2 转存目录</h3>
+                <p class="mt-2 text-[11px] font-medium text-zinc-500">配置封装完成后的 CloudDrive 挂载转存位置。</p>
+            </div>
+            <span class="settings-toggle"><span class="when-closed">展开</span><span class="when-open">收起</span></span>
+        </summary>
+        <div class="settings-card-body space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="space-y-1.5 field">
+                <label class="font-semibold text-zinc-700">网盘挂载根目录</label>
+                <div class="field-control">
+                    <input id="cd2_mount_root" type="text" name="cd2_mount_root" aria-label="CD2 挂载根目录" value="{{ config.cd2_mount_root }}"
+                           class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                    <button type="button" data-dir-picker data-dir-target="cd2_mount_root" data-dir-scope="cd2_mount_root"
+                            class="settings-action shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] font-bold text-zinc-700 hover:border-zinc-400 hover:text-zinc-900">选择</button>
+                </div>
+            </div>
+            <div class="space-y-1.5 field">
+                <label class="font-semibold text-zinc-700">上传目录</label>
+                <div class="field-control">
+                    <input id="cd2_target_dir" type="text" name="cd2_target_dir" aria-label="上传目录" value="{{ config.cd2_target_dir }}"
+                           class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                    <button type="button" data-dir-picker data-dir-target="cd2_target_dir" data-dir-scope="cd2_target_dir"
+                            class="settings-action shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] font-bold text-zinc-700 hover:border-zinc-400 hover:text-zinc-900">本地选择</button>
+                </div>
+                <p class="text-[10px] text-zinc-400">选择 Windows 本机可见的 CloudDrive 挂载目录。</p>
+            </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label class="flex items-start gap-3 cursor-pointer rounded-xl border border-zinc-200 bg-zinc-50/70 p-3">
+                <input type="checkbox" name="cd2_transfer_enabled" aria-label="封装后转存到 CD2 目录" {% if config.cd2_transfer_enabled %}checked{% endif %}
+                       class="mt-1 rounded bg-white border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                <span>
+                    <span class="block font-semibold text-zinc-800">封装后转存到 CD2 目录</span>
+                    <span class="block mt-1 text-[10px] text-zinc-500">开启后，ISO 完成封装后会转存到上方配置的上传目录。</span>
+                </span>
+            </label>
+            <label class="flex items-start gap-3 cursor-pointer rounded-xl border border-zinc-200 bg-zinc-50/70 p-3">
+                <input type="checkbox" name="cd2_wait_upload_complete" aria-label="监控 CloudDrive 上传队列" {% if config.cd2_wait_upload_complete %}checked{% endif %}
+                       class="mt-1 rounded bg-white border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                <span>
+                    <span class="block font-semibold text-zinc-800">监控 CloudDrive 上传队列</span>
+                    <span class="block mt-1 text-[10px] text-zinc-500">开启后，转存完成后继续跟踪上传队列，确认完成后再结束任务。</span>
+                </span>
+            </label>
+            {% if config.cd2_require_mount %}
+            <input type="hidden" name="cd2_require_mount" value="1">
+            {% endif %}
+        </div>
+        <input type="hidden" name="cd2_path_aliases_text" value="{{ config.cd2_path_aliases_text }}">
+        <input type="hidden" name="cd2_upload_match_mode" value="{{ config.cd2_upload_match_mode or 'alias_then_suffix' }}">
+        </div>
+    </details>
+
+    <!-- CD2 高级同步参数 -->
+    <details class="settings-card space-y-4">
+        <summary class="settings-card-summary">
+            <div>
+                <h3 class="!border-b-0 !pb-0">高级同步参数</h3>
+                <p class="mt-2 text-[11px] font-medium text-zinc-500">默认不用调整；只有上传队列确认或 Webhook 刷新异常时再展开。</p>
+            </div>
+            <span class="settings-toggle"><span class="when-closed">展开</span><span class="when-open">收起</span></span>
+        </summary>
+        <div class="settings-card-body space-y-4">
+        <div class="flex gap-4 flex-wrap border-t border-zinc-100 pt-4">
+            <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" name="cd2_refresh_after_source_event" aria-label="源目录事件后刷新" {% if config.cd2_refresh_after_source_event %}checked{% endif %}
+                       class="rounded bg-zinc-50 border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                <span class="font-semibold text-zinc-700">源目录事件后刷新</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" name="cd2_refresh_after_transfer" aria-label="转移完成后刷新" {% if config.cd2_refresh_after_transfer %}checked{% endif %}
+                       class="rounded bg-zinc-50 border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                <span class="font-semibold text-zinc-700">转移完成后刷新</span>
+            </label>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">队列轮询（秒）</label>
+                <input type="number" name="cd2_queue_poll_seconds" aria-label="队列轮询秒数" value="{{ config.cd2_queue_poll_seconds }}" min="1"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">事件来源</label>
+                <input type="text" name="cd2_event_source" aria-label="事件来源" value="{{ config.cd2_event_source }}"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">事件防抖（秒）</label>
+                <input type="number" name="cd2_event_debounce_seconds" aria-label="事件防抖秒数" value="{{ config.cd2_event_debounce_seconds }}" min="0"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">事件去重 TTL（秒）</label>
+                <input type="number" name="cd2_event_dedupe_ttl_seconds" aria-label="事件去重 TTL 秒数" value="{{ config.cd2_event_dedupe_ttl_seconds }}" min="0"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">上传确认延迟（秒）</label>
+                <input type="number" name="cd2_confirm_delay_seconds" aria-label="上传确认延迟秒数" value="{{ config.cd2_confirm_delay_seconds }}" min="0"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">稳定确认次数</label>
+                <input type="number" name="cd2_confirm_stable_checks" aria-label="稳定确认次数" value="{{ config.cd2_confirm_stable_checks }}" min="1"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+        </div>
+        </div>
+    </details>
+
+    <!-- 远端拉取 -->
+    <details class="settings-card space-y-4">
+        <summary class="settings-card-summary">
+            <div>
+                <h3>远端候选与拉取</h3>
+                <p class="mt-2 text-[11px] font-medium text-zinc-500">配置 CD2 候选扫描源、下载目录和拉取规则。</p>
+            </div>
+            <span class="settings-toggle"><span class="when-closed">展开</span><span class="when-open">收起</span></span>
+        </summary>
+        <div class="settings-card-body space-y-4">
+        <div class="flex gap-4 mb-4">
+            <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" name="cd2_manual_pull_enabled" aria-label="启用手动拉取" {% if config.cd2_manual_pull_enabled %}checked{% endif %}
+                       class="rounded bg-zinc-50 border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                <span class="font-semibold text-zinc-700">启用手动拉取</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" name="cd2_auto_pull_enabled" aria-label="启用自动拉取" {% if config.cd2_auto_pull_enabled %}checked{% endif %}
+                       class="rounded bg-zinc-50 border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                <span class="font-semibold text-zinc-700">启用自动拉取</span>
+            </label>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">网盘监控目录（每行一个）</label>
+                <textarea id="cd2_remote_source_dirs_text" name="cd2_remote_source_dirs_text" aria-label="网盘监控目录" rows="5"
+                          class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-[11px] text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">{{ config.cd2_remote_source_dirs_text }}</textarea>
+                <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <p class="text-[10px] text-zinc-400">测试 CD2 连接通过后，可浏览远端目录并追加到候选源目录。</p>
+                    <button type="button"
+                            data-dir-picker
+                            data-dir-provider="cd2"
+                            data-dir-target="cd2_remote_source_dirs_text"
+                            data-dir-append="true"
+                            class="settings-action w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] font-bold text-zinc-700 hover:border-zinc-400 hover:text-zinc-900 sm:w-auto">
+                        浏览 CD2 目录
+                    </button>
+                </div>
+            </div>
+            <div class="space-y-1.5 field">
+                <label class="font-semibold text-zinc-700">下载目录</label>
+                <div class="field-control mb-4">
+                    <input id="cd2_remote_pull_dest_dir" type="text" name="cd2_remote_pull_dest_dir" aria-label="下载目录" value="{{ config.cd2_remote_pull_dest_dir }}"
+                           class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                    <button type="button" data-dir-picker data-dir-target="cd2_remote_pull_dest_dir" data-dir-scope="cd2_remote_pull_dest_dir"
+                            class="settings-action shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] font-bold text-zinc-700 hover:border-zinc-400 hover:text-zinc-900">选择</button>
+                </div>
+                <p class="mb-4 text-[10px] text-zinc-400">CD2 容器或 NAS 能访问的远端目录；用于真实拉取任务的复制目标。</p>
+                <label class="font-semibold text-zinc-700 block">扫描深度</label>
+                <input type="number" name="cd2_remote_scan_depth" aria-label="扫描深度" value="{{ config.cd2_remote_scan_depth }}" min="1"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">每轮最大创建</label>
+                <input type="number" name="cd2_auto_pull_max_tasks_per_scan" aria-label="每轮最大创建" value="{{ config.cd2_auto_pull_max_tasks_per_scan }}" min="1"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">最大活动拉取</label>
+                <input type="number" name="cd2_auto_pull_max_active_tasks" aria-label="最大活动拉取" value="{{ config.cd2_auto_pull_max_active_tasks }}" min="1"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">最小体积（GB）</label>
+                <input type="number" name="cd2_auto_pull_min_size_gb" aria-label="最小体积 GB" value="{{ config.cd2_auto_pull_min_size_gb }}" min="0"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">失败冷却（秒）</label>
+                <input type="number" name="cd2_auto_pull_failure_cooldown_seconds" aria-label="失败冷却秒数" value="{{ config.cd2_auto_pull_failure_cooldown_seconds }}" min="0"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">包含关键词（每行一个）</label>
+                <textarea name="cd2_auto_pull_include_keywords" aria-label="包含关键词" rows="4"
+                          class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-[11px] text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">{{ config.cd2_auto_pull_include_keywords }}</textarea>
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">排除关键词（每行一个）</label>
+                <textarea name="cd2_auto_pull_exclude_keywords" aria-label="排除关键词" rows="4"
+                          class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-[11px] text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">{{ config.cd2_auto_pull_exclude_keywords }}</textarea>
+            </div>
+        </div>
+        </div>
+    </details>
+
+    <!-- Web 登录 -->
+    <details class="settings-card space-y-4">
+        <summary class="settings-card-summary">
+            <div>
+                <h3>Web 登录</h3>
+                <p class="mt-2 text-[11px] font-medium text-zinc-500">修改 Web 控制台登录密码；本地安全预览可临时免登录。</p>
+            </div>
+            <span class="settings-toggle"><span class="when-closed">展开</span><span class="when-open">收起</span></span>
+        </summary>
+        <div class="settings-card-body space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">新登录密码</label>
+                <input type="password" name="web_password" aria-label="新登录密码" placeholder="留空则不修改" autocomplete="new-password"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="space-y-1.5">
+                <label class="font-semibold text-zinc-700">确认新密码</label>
+                <input type="password" name="web_password_confirm" aria-label="确认新密码" placeholder="再次输入新密码" autocomplete="new-password"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+        </div>
+        </div>
+    </details>
+
+    <!-- TMDB 元数据 -->
+    <details class="settings-card space-y-4">
+        <summary class="settings-card-summary">
+            <div>
+                <h3>TMDB 元数据</h3>
+                <p class="mt-2 text-[11px] font-medium text-zinc-500">用于蓝光发行日历补中文名和海报；不影响封装、CD2 拉取或本地扫描。</p>
+            </div>
+            <span class="settings-toggle"><span class="when-closed">展开</span><span class="when-open">收起</span></span>
+        </summary>
+        <div class="settings-card-body space-y-4">
+            <label class="flex min-h-11 items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 cursor-pointer">
+                <input type="checkbox" name="tmdb_api_enabled" aria-label="启用 TMDB 元数据补全" {% if config.tmdb_api_enabled %}checked{% endif %}
+                       class="rounded bg-zinc-50 border-zinc-200 accent-zinc-900 focus:ring-zinc-300 h-4 w-4">
+                <span class="font-semibold text-zinc-700">启用 TMDB 元数据补全</span>
+            </label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="font-semibold text-zinc-700">TMDB API 域名</label>
+                    <input type="text" name="tmdb_api_domain" aria-label="TMDB API 域名" value="{{ config.tmdb_api_domain or 'api.themoviedb.org' }}" spellcheck="false"
+                           class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                    <p class="mt-1 text-[10px] text-zinc-400">例如 api.themoviedb.org；如需镜像可填对应 API 域名。</p>
+                </div>
+                <div>
+                    <label class="font-semibold text-zinc-700">TMDB 图片域名</label>
+                    <input type="text" name="tmdb_image_domain" aria-label="TMDB 图片域名" value="{{ config.tmdb_image_domain or 'image.tmdb.org' }}" spellcheck="false"
+                           class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+                    <p class="mt-1 text-[10px] text-zinc-400">例如 image.tmdb.org；用于生成海报图片地址。</p>
+                </div>
+            </div>
+            <div>
+                <label class="font-semibold text-zinc-700">API Token</label>
+                <input type="password" name="tmdb_api_token" aria-label="TMDB API Token" placeholder="粘贴 TMDB API Token；留空则不修改" autocomplete="new-password"
+                       class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-2 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/[0.015] shadow-inner transition-all duration-150">
+            </div>
+            <div class="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <p id="tmdb-test-result" class="text-[11px] font-bold leading-5 text-zinc-500">填写 Token 后可先测试连接，再刷新首页发行日历。</p>
+                    <button type="button" data-tmdb-test class="inline-flex min-h-10 items-center justify-center rounded-xl border border-zinc-300 bg-white px-4 py-2 text-xs font-black text-zinc-800 transition hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-500 focus:ring-offset-2">测试 TMDB</button>
+                </div>
+            </div>
+        </div>
+    </details>
+
+    <!-- 提交按钮 -->
+    <div class="flex justify-end gap-3 border-t border-zinc-200/80 sticky bottom-0 bg-[#fbfbfa]/90 backdrop-blur-sm py-4 w-full z-30">
+        <button type="button" data-settings-reset
+                class="text-xs font-semibold bg-zinc-100 hover:bg-zinc-200 text-zinc-600 px-4 py-2 rounded-xl border border-zinc-200 transition">
+            取消重置
+        </button>
+        <button type="submit" name="scan" value="1"
+                class="text-xs font-bold bg-white hover:bg-zinc-50 text-zinc-800 px-5 py-2 rounded-xl border border-zinc-300 transition">
+            保存并立即扫描
+        </button>
+        <button type="submit"
+                class="text-xs font-bold bg-zinc-900 hover:bg-zinc-800 text-white px-5 py-2 rounded-xl shadow-md transition active:scale-95">
+            安全保存配置
+        </button>
+    </div>
+</form>
+
+<div id="directory-picker" class="hidden fixed inset-0 z-50 bg-zinc-950/35 backdrop-blur-sm p-4">
+    <div class="mx-auto mt-10 max-w-3xl rounded-2xl border border-zinc-200 bg-[#fbfbfa] shadow-2xl">
+        <div class="flex items-start justify-between gap-4 border-b border-zinc-200 p-5">
+            <div>
+                <div id="directory-picker-title" class="text-sm font-bold text-zinc-900">选择目录</div>
+                <div id="directory-picker-path" class="mt-1 max-w-[62ch] truncate font-mono text-[11px] text-zinc-500">可选目录</div>
+            </div>
+            <button type="button" data-dir-close
+                    class="settings-action rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] font-bold text-zinc-600 hover:border-zinc-400 hover:text-zinc-900">关闭</button>
+        </div>
+        <div class="max-h-[54vh] overflow-auto p-4">
+            <div id="directory-picker-list" class="grid gap-2"></div>
+        </div>
+        <div class="flex justify-between gap-3 border-t border-zinc-200 p-4">
+            <button type="button" id="directory-picker-up"
+                    class="settings-action rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] font-bold text-zinc-700 disabled:opacity-40">上级目录</button>
+            <button type="button" id="directory-picker-use"
+                    class="settings-action rounded-lg bg-zinc-900 px-4 py-2 text-[11px] font-bold text-white disabled:opacity-40">使用当前目录</button>
+        </div>
+        </div>
+</div>
+{% endblock %}
+
+{% block script %}
+<script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+{% endblock %}

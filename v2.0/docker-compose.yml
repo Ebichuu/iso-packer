@@ -1,0 +1,49 @@
+services:
+  iso-packer-v2:
+    build:
+      context: ..
+      dockerfile: v2.0/Dockerfile
+
+    image: iso-packer:v2.0-tailwind
+    container_name: iso-packer-v2
+    restart: unless-stopped
+
+    ports:
+      - "15866:15865"  # 使用 15866 避免与旧版本冲突
+
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      - DATA_DIR=/data
+
+    volumes:
+      # 数据持久化
+      - ./data:/data
+
+      # 监控目录（示例，按实际情况修改）
+      - ./test-watch:/watch
+
+      # 输出目录（示例，按实际情况修改）
+      - ./test-output:/output
+
+      # CD2 挂载（如果有）
+      # - /CloudNAS:/CloudNAS:rslave
+
+    network_mode: bridge
+
+    extra_hosts:
+      # 访问宿主机上的 CD2 API
+      - "host.docker.internal:host-gateway"
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:15865/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
