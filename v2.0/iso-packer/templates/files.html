@@ -110,6 +110,8 @@
     .file-row { padding: 0.875rem; text-align: left; width: 100%; transition: background-color 0.15s, color 0.15s; }
     .file-row:hover { background-color: #fcfcfb; }
     .file-row[data-selected="true"] { background-color: #ecfdf5; }
+    .file-row[data-openable="true"] .file-main { cursor: pointer; }
+    .file-row[data-openable="true"]:hover .file-name { color: #047857; text-decoration: underline; text-underline-offset: 3px; }
     .file-select { height: 1rem; width: 1rem; border-radius: 0.25rem; accent-color: #18181b; }
     .file-main { min-width: 0; }
     .file-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #27272a; }

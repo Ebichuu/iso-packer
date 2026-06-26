@@ -310,6 +310,10 @@ def verify_static_contracts() -> None:
     require("本地测试禁用拉取" in workspace_js, "workspace.js missing local pull guard label")
 
     shared_js = read_text(static_js / "shared.js")
+    files_js = read_text(static_js / "files.js")
+    require("row.dataset.rowOpenPath" in files_js, "files.js should open directories from row clicks")
+    require("open.textContent" not in files_js, "files.js should not render a separate enter button")
+    require("data-open-path" not in files_html, "files.html should not require an enter button column")
     app_py = read_text(ROOT / "app.py")
     require("VERIFY" in shared_js, "shared.js should expose verify badge state")
     require('"phase": "verify"' in app_py or 'update_active_progress("verify"' in app_py,

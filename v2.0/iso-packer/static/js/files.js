@@ -159,6 +159,10 @@
       row.dataset.kind = entryGroup(entry);
       row.dataset.path = entry.path || "";
       row.dataset.selected = state.selected.has(entry.path) ? "true" : "false";
+      if (entry.type === "dir" && entry.path) {
+        row.dataset.openable = "true";
+        row.dataset.rowOpenPath = entry.path;
+      }
 
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
@@ -173,6 +177,12 @@
 
       const main = document.createElement("div");
       main.className = "file-main";
+      if (entry.type === "dir" && entry.path) {
+        main.dataset.openPath = entry.path;
+        main.tabIndex = 0;
+        main.setAttribute("role", "link");
+        main.setAttribute("aria-label", `进入 ${entry.name || "目录"}`);
+      }
       const name = document.createElement("strong");
       name.className = "file-name";
       name.textContent = entry.name || "-";
@@ -197,13 +207,6 @@
 
       const actions = document.createElement("div");
       actions.className = "file-row-actions";
-      if (entry.type === "dir") {
-        const open = document.createElement("button");
-        open.type = "button";
-        open.dataset.openPath = entry.path || "";
-        open.textContent = "进入";
-        actions.appendChild(open);
-      }
       const props = document.createElement("button");
       props.type = "button";
       props.dataset.propsPath = entry.path || "";
@@ -394,15 +397,27 @@
         toggleSelected(checkbox.dataset.selectPath, checkbox.checked);
         return;
       }
+      const props = event.target.closest("[data-props-path]");
+      if (props) {
+        openProperties(props.dataset.propsPath);
+        return;
+      }
       const open = event.target.closest("[data-open-path]");
       if (open) {
         loadDirectory(open.dataset.openPath);
         return;
       }
-      const props = event.target.closest("[data-props-path]");
-      if (props) {
-        openProperties(props.dataset.propsPath);
+      const row = event.target.closest("[data-row-open-path]");
+      if (row && !event.target.closest("button,input,a")) {
+        loadDirectory(row.dataset.rowOpenPath);
       }
+    });
+    helper().qs("#file-browser-list")?.addEventListener("keydown", (event) => {
+      if (!["Enter", " "].includes(event.key)) return;
+      const open = event.target.closest("[data-open-path]");
+      if (!open) return;
+      event.preventDefault();
+      loadDirectory(open.dataset.openPath);
     });
     helper().qs("#file-breadcrumb")?.addEventListener("click", (event) => {
       const target = event.target.closest("[data-breadcrumb-path]");
