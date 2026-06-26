@@ -311,7 +311,10 @@ def verify_static_contracts() -> None:
     require("等待 CD2 拉取完成" in workspace_js, "workspace.js missing cd2 waiting status copy")
     require("pipeline-primary-status" in workspace_js, "workspace.js should update the primary status title")
     require("renderOutputQueue" in workspace_js, "workspace.js missing output queue renderer")
+    require("renderOutputQueueV2" in workspace_js, "workspace.js should use the readable output queue renderer")
     require("outputQueueItems" in workspace_js, "workspace.js missing output queue item builder")
+    require("fileOperationRows" in workspace_js, "workspace.js should include file operations in the output queue")
+    require("本地复制中" in workspace_js, "workspace.js missing local copy output state")
     require("workspace-output-queue" in workspace_js, "workspace.js should render the output queue container")
     require("转存中" in workspace_js, "workspace.js missing transfer output state")
     require("已交付" in workspace_js, "workspace.js missing delivered output state")
@@ -337,8 +340,8 @@ def verify_static_contracts() -> None:
     require("STATUS_POLL_ACTIVE_MS = 2000" in shared_js, "shared.js active poll interval drifted")
     require("STATUS_POLL_IDLE_MS = 6000" in shared_js, "shared.js idle poll interval drifted")
     require("STATUS_POLL_ERROR_MS = 8000" in shared_js, "shared.js error poll interval drifted")
-    require("statusData.current_job ? STATUS_POLL_ACTIVE_MS : STATUS_POLL_IDLE_MS" in shared_js,
-            "shared.js should slow status polling while idle")
+    require("hasActiveFileOperation" in shared_js, "shared.js should keep fast polling for local file operations")
+    require("COPYING" in shared_js, "shared.js should show local copy badge state")
     require("waitingJobFromItems" in shared_js, "shared.js should expose waiting tasks as current jobs")
 
     index_js = read_text(static_js / "index.js")
@@ -346,6 +349,8 @@ def verify_static_contracts() -> None:
     require("Blu-ray.com" in index_js, "index.js missing release calendar external refresh copy")
     require("setupReleaseCalendarFilters" in index_js, "index.js missing release calendar date filters")
     require("setupReleaseCardLinks" in index_js, "index.js missing release card click fallback")
+    require("updateWorkerSummaryV2" in index_js, "index.js should use the file-operation aware worker summary")
+    require("activeFileOps" in index_js, "index.js should count active local file operations")
     require("window.open(href" in index_js, "index.js should open release card links in a new window")
     require("window.location.href = href" not in index_js, "release card clicks should not navigate away from the preview page")
     require("release-tmdb-link" in index_js, "index.js should handle TMDB badge clicks separately")
@@ -602,6 +607,8 @@ def verify_status_payload(client) -> None:
     require(isinstance(payload, dict), f"status payload is not object: {payload}")
     for key in ("config", "state", "cd2_status"):
         require(isinstance(payload.get(key), dict), f"status missing object {key}: {payload}")
+    require(isinstance(payload.get("file_operations"), dict), f"status missing file operation summary: {payload}")
+    require(isinstance(payload.get("stats"), dict), f"status missing stats summary: {payload}")
 
     state = payload["state"]
     require("active" in state, "status state missing active")
@@ -625,6 +632,10 @@ def verify_status_payload(client) -> None:
     for key in ("uploads", "downloads", "copy_tasks"):
         require(key not in cd2_status, f"status payload should not include heavy CD2 list {key}")
         require(key not in state.get("cd2_status", {}), f"state cd2_status should not include heavy CD2 list {key}")
+    file_operations = payload["file_operations"]
+    require("active_count" in file_operations, "file operation summary missing active_count")
+    require(isinstance(file_operations.get("items"), list), "file operation summary items is not list")
+    require("active" in payload["stats"], "status stats missing active count")
     require(response.content_length is None or response.content_length < 65536, "status payload is too large")
 
 
@@ -843,6 +854,13 @@ def run_smoke(keep: bool = False) -> Path:
         require(file_action_payload and file_action_payload.get("ok") is True, f"file copy action not ok: {file_action_payload}")
         task_id = file_action_payload.get("task_id")
         require(task_id, "file copy action missing task id")
+        response = client.get("/api/status")
+        require(response.status_code == 200, f"status after file action returned {response.status_code}")
+        status_payload = response.get_json() or {}
+        file_operations = status_payload.get("file_operations") or {}
+        operation_items = file_operations.get("items") or []
+        require(any(item.get("id") == task_id for item in operation_items), "status should expose file copy task")
+        require("active_count" in file_operations, "status file operations missing active count")
         task_payload = {}
         for _ in range(20):
             response = client.get(f"/api/file-actions/{task_id}")

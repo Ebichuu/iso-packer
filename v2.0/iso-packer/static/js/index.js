@@ -43,6 +43,35 @@
         }
     }
 
+    function updateWorkerSummaryV2(status) {
+        const activeCount = document.getElementById('index-active-count');
+        const workerNote = document.getElementById('index-worker-note');
+        const job = status && status.current_job;
+        const fileOps = status && status.file_operations;
+        const activeFileOps = Number(fileOps?.active_count || 0);
+
+        if (activeCount) {
+            const fallback = (job ? 1 : 0) + activeFileOps;
+            const count = Number(status?.stats?.active ?? status?.state?.active_count ?? fallback);
+            activeCount.textContent = Number.isFinite(count) ? String(count) : String(fallback);
+        }
+
+        if (!workerNote) return;
+        if (job) {
+            const source = job.source_path || job.source || '当前任务';
+            const progress = Number(job.progress || 0);
+            const extra = activeFileOps > 0 ? ` · 另有 ${activeFileOps} 个本地复制任务` : '';
+            workerNote.textContent = `${job.stage_text || '封装执行中'} · ${Math.round(progress)}% · ${source}${extra}`;
+            workerNote.title = workerNote.textContent;
+        } else if (activeFileOps > 0) {
+            workerNote.textContent = `${activeFileOps} 个本地文件复制/移动任务正在执行`;
+            workerNote.title = workerNote.textContent;
+        } else {
+            workerNote.textContent = '当前没有执行中的任务，封装操作请进入封装中心';
+            workerNote.removeAttribute('title');
+        }
+    }
+
     function setupReleaseCalendarRefresh() {
         const button = document.getElementById('release-calendar-refresh');
         const status = document.getElementById('release-calendar-status');
@@ -171,11 +200,11 @@
     window.addEventListener('coreStatusUpdated', (event) => {
         const status = event.detail;
         updateGatewayStatus(status.cd2_status);
-        updateWorkerSummary(status);
+        updateWorkerSummaryV2(status);
     });
 
     document.addEventListener('DOMContentLoaded', () => {
-        updateWorkerSummary({});
+        updateWorkerSummaryV2({});
         setupReleaseCalendarRefresh();
         setupReleaseCalendarFilters();
         setupReleaseCardLinks();

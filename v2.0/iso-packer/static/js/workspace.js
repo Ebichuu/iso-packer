@@ -239,6 +239,32 @@
 
   function outputQueueView(item) {
     const phase = String(item.phase || item.status || "").toLowerCase();
+    if (phase === "file_copy") {
+      const done = item.status === "done" || item.status === "partial";
+      const failed = item.status === "failed";
+      return {
+        label: failed ? "复制失败" : done ? "本地复制完成" : "本地复制中",
+        badge: failed ? "border-red-200 bg-red-50 text-red-700" : done ? "border-sky-200 bg-sky-50 text-sky-700" : "border-blue-200 bg-blue-50 text-blue-700",
+        hint: item.stage_text || "正在从文件浏览选择的目录复制到本地监控目录或指定目录。"
+      };
+    }
+    if (phase === "file_move") {
+      const done = item.status === "done" || item.status === "partial";
+      const failed = item.status === "failed";
+      return {
+        label: failed ? "移动失败" : done ? "本地移动完成" : "本地移动中",
+        badge: failed ? "border-red-200 bg-red-50 text-red-700" : done ? "border-sky-200 bg-sky-50 text-sky-700" : "border-blue-200 bg-blue-50 text-blue-700",
+        hint: item.stage_text || "正在移动文件浏览选择的目录。"
+      };
+    }
+    if (phase === "file_delete") {
+      const failed = item.status === "failed";
+      return {
+        label: failed ? "删除失败" : "本地删除",
+        badge: failed ? "border-red-200 bg-red-50 text-red-700" : "border-zinc-200 bg-zinc-50 text-zinc-700",
+        hint: item.stage_text || "正在删除文件浏览选择的条目。"
+      };
+    }
     if (phase === "transfer" || phase === "transferring") {
       return { label: "转存中", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", hint: "ISO 已生成，正在复制到输出目录或 CD2 挂载目录。" };
     }
@@ -267,9 +293,43 @@
     return item.output_iso || item.target || item.output_target || item.original_target || "--";
   }
 
+  function fileOperationName(operation) {
+    const sources = Array.isArray(operation.sources) ? operation.sources : [];
+    const first = sources[0] || "";
+    const name = first.split(/[\\/]/).filter(Boolean).pop();
+    if (name && sources.length > 1) return `${name} 等 ${sources.length} 项`;
+    return name || `文件操作 ${operation.id || ""}`.trim();
+  }
+
+  function fileOperationTarget(operation) {
+    const destination = operation.destination || "";
+    if (operation.destination_kind === "watch") return `监控目录 · ${destination}`;
+    if (operation.destination_kind === "output") return `输出目录 · ${destination}`;
+    if (operation.destination_kind === "custom") return `其他目录 · ${destination}`;
+    return destination || "--";
+  }
+
+  function fileOperationRows(status) {
+    const operations = (status && status.file_operations && status.file_operations.items) || [];
+    return operations.map((operation) => ({
+      name: fileOperationName(operation),
+      source: (operation.sources || []).join(" / "),
+      output_iso: fileOperationTarget(operation),
+      phase: `file_${operation.action || "operation"}`,
+      status: operation.status || "queued",
+      progress: Number(operation.progress || 0),
+      current: Number(operation.done || 0),
+      total: Number(operation.total || 0),
+      stage_text: operation.message || "文件操作进行中",
+      is_file_operation: true,
+      is_current: ["queued", "running"].includes(operation.status)
+    }));
+  }
+
   function outputQueueItems(status) {
     const rows = [];
     const seen = new Set();
+    fileOperationRows(status).forEach((row) => rows.push(row));
     const current = status && status.current_job;
     if (current) {
       const source = current.source_path || current.source || "";
@@ -353,10 +413,54 @@
     }).join("");
   }
 
+  function renderOutputQueueV2(status) {
+    const container = document.getElementById("workspace-output-queue");
+    if (!container) return;
+    const rows = outputQueueItems(status || {});
+    setText("workspace-output-total", rows.length);
+    const summary = document.getElementById("output-queue-summary");
+    if (summary) {
+      summary.textContent = rows.length
+        ? `共 ${rows.length} 条产出/复制记录，优先显示当前任务。`
+        : "暂无产出或本地复制记录；开始封装或复制后会显示在这里。";
+    }
+    if (!rows.length) {
+      container.innerHTML = renderStateCard("empty", "暂无任务", "封装、校验、转存和文件浏览复制任务会显示在这里。");
+      return;
+    }
+    container.innerHTML = rows.map((item) => {
+      const view = outputQueueView(item);
+      const progress = Number.isFinite(Number(item.progress)) ? formatPercent(item.progress) : "--";
+      const byteText = item.current || item.total ? formatByteProgress(item) : "--";
+      const currentMark = item.is_current ? '<span class="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[9px] font-black tracking-[0.08em] text-blue-700">当前</span>' : "";
+      const metric = item.is_file_operation ? `${Number(item.current || 0)} / ${Number(item.total || 0)} 项` : byteText;
+      return `
+        <div class="grid gap-3 p-3.5 transition hover:bg-zinc-50 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_150px] lg:items-center">
+          <div class="min-w-0 space-y-1">
+            <div class="flex items-center gap-2">
+              <span class="rounded-full border px-2 py-0.5 text-[9px] font-black tracking-[0.08em] ${view.badge}">${escapeHtml(view.label)}</span>
+              ${currentMark}
+            </div>
+            <div class="truncate text-sm font-black leading-5 text-zinc-900" title="${escapeHtml(item.name)}">${escapeHtml(item.name || "--")}</div>
+            <div class="truncate text-[11px] font-medium text-zinc-500" title="${escapeHtml(view.hint)}">${escapeHtml(view.hint)}</div>
+          </div>
+          <div class="min-w-0 space-y-1 font-mono text-[10px] text-zinc-500">
+            <div class="truncate" title="${escapeHtml(item.output_iso)}">目标: ${escapeHtml(item.output_iso || "--")}</div>
+            <div class="truncate" title="${escapeHtml(item.source)}">来源: ${escapeHtml(item.source || "--")}</div>
+          </div>
+          <div class="text-left lg:text-right">
+            <div class="font-mono text-sm font-black text-zinc-900">${escapeHtml(progress)}</div>
+            <div class="mt-0.5 truncate font-mono text-[10px] font-bold text-zinc-400" title="${escapeHtml(metric)}">${escapeHtml(metric)}</div>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
   window.addEventListener("coreStatusUpdated", (event) => {
     const status = event.detail || {};
     renderPipeline(status);
-    renderOutputQueue(status);
+    renderOutputQueueV2(status);
   });
 
   function candidateState(candidate) {

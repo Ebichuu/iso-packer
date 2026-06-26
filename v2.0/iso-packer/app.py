@@ -170,6 +170,44 @@ def file_operation_snapshot(task_id: str) -> Dict:
         return dict(file_operation_tasks.get(task_id) or {})
 
 
+def file_operation_status_payload(limit: int = 6) -> Dict:
+    active_statuses = {"queued", "running"}
+    with file_operation_lock:
+        tasks = [dict(task) for task in file_operation_tasks.values()]
+    tasks.sort(key=lambda task: str(task.get("updated_at") or task.get("created_at") or ""), reverse=True)
+    items = []
+    active_count = 0
+    for task in tasks[:limit]:
+        status = str(task.get("status") or "queued")
+        total = int(task.get("total") or 0)
+        done = int(task.get("done") or 0)
+        if status in active_statuses:
+            active_count += 1
+        progress = 0
+        if total > 0:
+            progress = max(0, min(100, round(done / total * 100, 1)))
+        items.append({
+            "id": task.get("id"),
+            "action": task.get("action"),
+            "status": status,
+            "phase": f"file_{task.get('action') or 'operation'}",
+            "message": task.get("message") or "",
+            "total": total,
+            "done": done,
+            "progress": progress,
+            "sources": task.get("sources") or [],
+            "destination": task.get("destination") or "",
+            "destination_kind": task.get("destination_kind") or "",
+            "created_at": task.get("created_at"),
+            "updated_at": task.get("updated_at"),
+            "results": task.get("results") or [],
+        })
+    return {
+        "active_count": active_count,
+        "items": items,
+    }
+
+
 def update_file_operation_task(task_id: str, **updates) -> None:
     with file_operation_lock:
         task = file_operation_tasks.setdefault(task_id, {"id": task_id})
@@ -4390,8 +4428,18 @@ def api_status():
         snapshot["active"] = apply_task_timings(dict(snapshot_active), snapshot_active)
     safe_cd2_status = ui_safe_cd2_status(cd2_status)
     snapshot["cd2_status"] = safe_cd2_status
+    file_operations = file_operation_status_payload()
+    history_items = ordered_visible_items(snapshot["items"], snapshot.get("active"))
+    stats = dashboard_stats(history_items)
+    stats["active"] = int(stats.get("active") or 0) + int(file_operations.get("active_count") or 0)
     safe_cfg = ui_safe_config(cfg)
-    return jsonify({"config": safe_cfg, "state": snapshot, "cd2_status": safe_cd2_status})
+    return jsonify({
+        "config": safe_cfg,
+        "state": snapshot,
+        "cd2_status": safe_cd2_status,
+        "file_operations": file_operations,
+        "stats": stats,
+    })
 
 
 @app.route("/api/directories")
@@ -4590,6 +4638,9 @@ def api_file_actions():
             "message": "已加入后台任务",
             "total": len(sources),
             "done": 0,
+            "sources": [str(source) for source in sources],
+            "destination": str(destination) if destination else "",
+            "destination_kind": payload.get("destination") or "",
             "created_at": now(),
             "updated_at": now(),
             "results": [],

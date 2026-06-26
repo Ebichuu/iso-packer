@@ -92,12 +92,15 @@ const IsoPacker = (() => {
       stage_text: activeProgress.stage_text || activeProgress.label || active.stage_text || active.status_label || active.status || "底层引擎执行中..."
     } : waitingJobFromItems(state.items);
 
+    const fileOperations = status.file_operations || { active_count: 0, items: [] };
     return {
       ...status,
       state,
       active,
       current_job: status.current_job || currentJob,
-      cd2_status: status.cd2_status || state.cd2_status || {}
+      cd2_status: status.cd2_status || state.cd2_status || {},
+      file_operations: fileOperations,
+      has_active_file_operation: Number(fileOperations.active_count || 0) > 0
     };
   }
 
@@ -139,7 +142,8 @@ function startSerializedSystemLoop() {
       }
 
       const statusData = IsoPacker.normalizeStatusPayload(await response.json());
-      nextPollDelay = statusData.current_job ? STATUS_POLL_ACTIVE_MS : STATUS_POLL_IDLE_MS;
+      const hasActiveFileOperation = Number(statusData.file_operations?.active_count || 0) > 0;
+      nextPollDelay = (statusData.current_job || hasActiveFileOperation) ? STATUS_POLL_ACTIVE_MS : STATUS_POLL_IDLE_MS;
       const globalBadge = document.getElementById("global-worker-badge");
       if (globalBadge) {
         if (statusData.current_job) {
@@ -156,6 +160,9 @@ function startSerializedSystemLoop() {
               : isVerify || isFinalize
                 ? "ml-auto bg-amber-50 text-amber-700 border border-amber-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse"
                 : "ml-auto bg-blue-50 text-blue-600 border border-blue-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse";
+        } else if (hasActiveFileOperation) {
+          globalBadge.innerText = "COPYING";
+          globalBadge.className = "ml-auto bg-sky-50 text-sky-700 border border-sky-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse";
         } else {
           globalBadge.innerText = "IDLE";
           globalBadge.className = "ml-auto bg-zinc-100 text-zinc-400 border border-zinc-200 text-[9px] font-bold px-2 py-0.5 rounded-full";
