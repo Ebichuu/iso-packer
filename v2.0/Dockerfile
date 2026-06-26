@@ -21,6 +21,8 @@ RUN apt-get update && \
 COPY v2.0/requirements.txt /app/requirements.txt
 COPY v2.0/iso-packer/app.py /app/
 COPY v2.0/iso-packer/core.py /app/
+COPY v2.0/iso-packer/release_calendar_fetcher.py /app/
+COPY v2.0/iso-packer/data /app/data/
 COPY v2.0/iso-packer/templates /app/templates/
 COPY v2.0/iso-packer/static /app/static/
 COPY v2.0/iso-packer/scripts /app/scripts/
