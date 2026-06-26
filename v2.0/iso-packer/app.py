@@ -131,6 +131,13 @@ DIRECTORY_PICKER_SCOPES = {
 }
 
 
+def resolve_cd2_browser_root(cfg: Dict) -> Path:
+    mount_root = normalize_path_text((cfg or {}).get("cd2_mount_root"))
+    if mount_root:
+        return Path(mount_root).expanduser()
+    return Path("/CloudNAS/CloudDrive").expanduser()
+
+
 def prune_log_file() -> None:
     global last_log_prune
     current = time.time()
@@ -2283,8 +2290,8 @@ def validate_iso(target: Path) -> bool:
 
 
 def resolve_cd2_target_dir(cfg: Dict) -> Optional[Path]:
-    mount_root = Path(str(cfg.get("cd2_mount_root") or "/CloudNAS")).expanduser()
-    target_dir = Path(str(cfg.get("cd2_target_dir") or str(mount_root / "CloudDrive" / "00-未整理" / "00-mkiso"))).expanduser()
+    mount_root = Path(str(cfg.get("cd2_mount_root") or DEFAULT_CONFIG["cd2_mount_root"])).expanduser()
+    target_dir = Path(str(cfg.get("cd2_target_dir") or DEFAULT_CONFIG["cd2_target_dir"])).expanduser()
     if cfg.get("cd2_require_mount", True) and not mount_root.is_mount():
         log(f"CloudDrive2挂载目录未挂载，停止转移: {mount_root}")
         return None
@@ -3750,10 +3757,11 @@ def workspace():
 @app.route("/files")
 def files():
     context = ui_state_context()
+    cd2_browser_root = resolve_cd2_browser_root(context["cfg"])
     context["browser_roots"] = {
         "watch": context["cfg"].get("watch_dir", ""),
         "output": context["cfg"].get("output_dir", ""),
-        "cd2": context["cfg"].get("cd2_target_dir", ""),
+        "cd2": str(cd2_browser_root),
     }
     return render_template("files.html", **context)
 
@@ -3788,7 +3796,7 @@ def settings():
     cfg["cd2_transfer_enabled"] = "cd2_transfer_enabled" in request.form
     cfg["cd2_wait_upload_complete"] = "cd2_wait_upload_complete" in request.form
     cfg["cd2_require_mount"] = "cd2_require_mount" in request.form
-    cfg["cd2_mount_root"] = request.form.get("cd2_mount_root", cfg.get("cd2_mount_root", "/CloudNAS")).strip()
+    cfg["cd2_mount_root"] = request.form.get("cd2_mount_root", cfg.get("cd2_mount_root", "/CloudNAS/CloudDrive")).strip()
     cfg["cd2_target_dir"] = request.form.get("cd2_target_dir", cfg.get("cd2_target_dir", "/CloudNAS/CloudDrive/00-未整理/00-mkiso")).strip()
     aliases = parse_cd2_path_alias_lines(request.form.get("cd2_path_aliases_text", cfg.get("cd2_path_aliases_text", "")))
     cfg["cd2_path_aliases"] = aliases or cd2_path_aliases_from_cfg(DEFAULT_CONFIG)
@@ -3834,7 +3842,7 @@ def settings():
     Path(cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg.get("cd2_local_pull_dir") or cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
-    Path(cfg.get("cd2_mount_root", "/CloudNAS")).expanduser().mkdir(parents=True, exist_ok=True)
+    Path(cfg.get("cd2_mount_root", DEFAULT_CONFIG["cd2_mount_root"])).expanduser().mkdir(parents=True, exist_ok=True)
     log("设置已保存")
     if request.form.get("scan"):
         threading.Thread(target=scan_once, args=(cfg,), daemon=True).start()
@@ -4092,10 +4100,11 @@ def api_directories():
 @app.route("/api/browse")
 def api_browse():
     cfg = load_config()
+    cd2_browser_root = resolve_cd2_browser_root(cfg)
     roots = {
         "watch": Path(cfg["watch_dir"]).expanduser(),
         "output": Path(cfg["output_dir"]).expanduser(),
-        "cd2": Path(cfg["cd2_target_dir"]).expanduser(),
+        "cd2": cd2_browser_root,
     }
     root_name = (request.args.get("root") or "watch").strip()
     root = roots.get(root_name)
@@ -4139,6 +4148,7 @@ def api_browse():
     return jsonify({
         "ok": True,
         "root": root_name,
+        "root_path": str(root),
         "path": str(path),
         "parent": str(parent) if parent else None,
         "entries": entries,
@@ -4151,5 +4161,5 @@ if __name__ == "__main__":
     Path(cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg.get("cd2_local_pull_dir") or cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
-    Path(cfg.get("cd2_mount_root", "/CloudNAS")).expanduser().mkdir(parents=True, exist_ok=True)
+    Path(cfg.get("cd2_mount_root", DEFAULT_CONFIG["cd2_mount_root"])).expanduser().mkdir(parents=True, exist_ok=True)
     app.run(host="0.0.0.0", port=15865, threaded=True)

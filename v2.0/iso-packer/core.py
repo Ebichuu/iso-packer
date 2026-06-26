@@ -14,7 +14,7 @@ DEFAULT_CONFIG = {
     "enabled": True,
     "cd2_transfer_enabled": True,
     "cd2_wait_upload_complete": True,
-    "cd2_mount_root": "/CloudNAS",
+    "cd2_mount_root": "/CloudNAS/CloudDrive",
     "cd2_target_dir": "/CloudNAS/CloudDrive/00-未整理/00-mkiso",
     "cd2_require_mount": True,
     "web_password_hash": "",

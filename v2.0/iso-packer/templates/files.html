@@ -40,9 +40,9 @@
         </div>
         <span class="text-zinc-300">|</span>
         <div class="flex gap-1 font-mono root-switcher">
-            <button type="button" data-root="watch" data-active="true" class="bg-zinc-900 text-white font-medium px-2.5 py-1 rounded-lg shadow-sm transition">watch</button>
-            <button type="button" data-root="output" data-active="false" class="bg-white hover:bg-zinc-50 text-zinc-600 border border-zinc-200 px-2.5 py-1 rounded-lg shadow-inner transition">output</button>
-            <button type="button" data-root="cd2" data-active="false" class="bg-white hover:bg-zinc-50 text-zinc-600 border border-zinc-200 px-2.5 py-1 rounded-lg shadow-inner transition">cd2</button>
+            <button type="button" data-root="watch" data-root-path="{{ browser_roots.watch|e }}" data-active="true" class="bg-zinc-900 text-white font-medium px-2.5 py-1 rounded-lg shadow-sm transition">watch</button>
+            <button type="button" data-root="output" data-root-path="{{ browser_roots.output|e }}" data-active="false" class="bg-white hover:bg-zinc-50 text-zinc-600 border border-zinc-200 px-2.5 py-1 rounded-lg shadow-inner transition">output</button>
+            <button type="button" data-root="cd2" data-root-path="{{ browser_roots.cd2|e }}" data-active="false" class="bg-white hover:bg-zinc-50 text-zinc-600 border border-zinc-200 px-2.5 py-1 rounded-lg shadow-inner transition">cd2</button>
         </div>
         <span class="text-zinc-300">|</span>
         <button type="button" id="file-up" class="p-1 text-zinc-500 hover:text-zinc-900 transition" title="返回上级">上级</button>

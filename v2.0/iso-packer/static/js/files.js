@@ -6,10 +6,15 @@
     entries: [],
     query: "",
     filter: "all",
+    rootPath: "",
   };
 
   function helper() {
     return window.IsoPacker;
+  }
+
+  function rootPathFor(rootName = state.root) {
+    return String((helper().qs(`[data-root="${rootName}"]`) || {}).dataset?.rootPath || "");
   }
 
   function isDiscHint(entry) {
@@ -52,7 +57,7 @@
     rootButton.textContent = payload.root || state.root;
     root.appendChild(rootButton);
 
-    const rootPath = String((helper().qs(`[data-root="${state.root}"]`) || {}).dataset?.rootPath || "");
+    const rootPath = state.rootPath || rootPathFor();
     const currentPath = String(state.path || "");
     const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
     const normalizedCurrent = currentPath.replace(/\\/g, "/");
@@ -82,7 +87,7 @@
     const discs = state.entries.filter(isDiscHint).length;
     helper().setText(helper().qs("#file-dir-count"), dirs);
     helper().setText(helper().qs("#file-disc-count"), discs);
-    helper().setText(helper().qs("#file-current-root"), state.root);
+    helper().setText(helper().qs("#file-current-root"), state.rootPath ? `${state.root} · ${state.rootPath}` : state.root);
     helper().setText(helper().qs("#file-entry-count"), `${filteredEntries().length} / ${state.entries.length} 项`);
   }
 
@@ -138,6 +143,7 @@
   function renderEntries(payload) {
     state.path = payload.path || "/";
     state.parent = payload.parent || null;
+    state.rootPath = payload.root_path || rootPathFor();
     state.entries = Array.isArray(payload.entries) ? payload.entries : [];
     renderBreadcrumb(payload);
     renderEntryList();
@@ -172,6 +178,7 @@
     state.entries = [];
     state.query = "";
     state.filter = "all";
+    state.rootPath = rootPathFor(root);
     const search = helper().qs("#file-search");
     if (search) search.value = "";
     helper().qsa("[data-file-filter]").forEach((button) => {

@@ -150,6 +150,10 @@ def verify_static_contracts() -> None:
     files_html = read_text(templates / "files.html")
     require("file-browser-list" in files_html, "files.html missing browser list")
     require("data-root=" in files_html, "files.html missing root switch hooks")
+    require("data-root-path=" in files_html, "files.html missing visible root path hooks")
+
+    shared_js = read_text(ROOT / "static" / "js" / "shared.js")
+    require("formatBytes" in shared_js, "shared.js missing file-size formatter")
 
     settings_html = read_text(templates / "settings.html")
     settings_markers = [
@@ -429,7 +433,8 @@ def save_test_settings(client, data_dir: Path) -> None:
     watch_dir = data_dir / "watch"
     output_dir = data_dir / "output"
     cd2_target_dir = data_dir / "cd2-target"
-    for path in (watch_dir, output_dir, cd2_target_dir):
+    cd2_mount_root = data_dir / "cloud-root"
+    for path in (watch_dir, output_dir, cd2_target_dir, cd2_mount_root):
         path.mkdir(parents=True, exist_ok=True)
 
     response = client.post(
@@ -444,8 +449,9 @@ def save_test_settings(client, data_dir: Path) -> None:
             "cd2_api_addr": "127.0.0.1:19798",
             "cd2_api_username": "tester",
             "cd2_api_password": "token",
-            "cd2_mount_root": str(data_dir),
+            "cd2_mount_root": str(cd2_mount_root),
             "cd2_target_dir": str(cd2_target_dir),
+            "cd2_path_aliases_text": f"{cd2_mount_root}=/115",
             "cd2_manual_pull_enabled": "on",
             "cd2_remote_source_dirs_text": "/remote/inbox",
             "cd2_remote_scan_depth": "1",
@@ -677,6 +683,11 @@ def run_smoke(keep: bool = False) -> Path:
             require(response.status_code == 200, f"browse {root_name} returned {response.status_code}")
             payload = response.get_json()
             require(payload and payload.get("ok") is True, f"browse {root_name} not ok: {payload}")
+            if root_name == "cd2":
+                require(
+                    Path(payload.get("root_path") or "").resolve() == (data_dir / "cloud-root").resolve(),
+                    f"browse cd2 should use cd2_mount_root, got {payload}",
+                )
 
         directory_scopes = (
             "watch_dir",
