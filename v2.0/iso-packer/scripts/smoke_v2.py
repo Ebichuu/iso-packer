@@ -178,7 +178,7 @@ def verify_static_contracts() -> None:
         'id="file-select-all"',
         'id="file-operation-bar"',
         'data-file-action="copy"',
-        "复制到监控目录",
+        "拉取到监控目录",
         "修改时间",
         'id="file-properties-panel"',
         'id="file-context-menu"',
@@ -533,6 +533,21 @@ def patch_cd2(appmod) -> None:
     def fake_create_cd2_pull_task(cfg, source_path, mode="manual", cd2_status=None):
         if not source_path:
             return {"ok": False, "message": "missing path"}, 400
+        created_at = appmod.now()
+        local_source = appmod.cd2_local_pull_path_for_source(cfg, source_path)
+        with appmod.lock:
+            item = appmod.state.setdefault("items", {}).setdefault(str(local_source), {"first_seen": created_at})
+            item.update({
+                "status": "waiting_cd2_pull",
+                "pack_iso": True,
+                "cd2_pull_source": source_path,
+                "cd2_pull_dest": cfg.get("cd2_remote_pull_dest_dir") or cfg.get("cd2_local_pull_dir") or cfg.get("watch_dir"),
+                "cd2_pull_created_at": created_at,
+                "cd2_pull_mode": mode,
+                "partial_files": True,
+                "progress": 0,
+            })
+            appmod.save_state_locked()
         return {
             "ok": True,
             "message": "mock pull task created",
@@ -586,7 +601,7 @@ def save_test_settings(client, data_dir: Path) -> None:
             "cd2_target_dir": str(cd2_target_dir),
             "cd2_path_aliases_text": f"{cd2_mount_root}=/115",
             "cd2_manual_pull_enabled": "on",
-            "cd2_remote_source_dirs_text": "/remote/inbox",
+            "cd2_remote_source_dirs_text": "/remote/inbox\n/115",
             "cd2_remote_scan_depth": "1",
             "cd2_remote_pull_dest_dir": str(watch_dir),
             "cd2_refresh_after_source_event": "on",
@@ -849,30 +864,24 @@ def run_smoke(keep: bool = False) -> Path:
                 "destination": "watch",
             },
         )
-        require(response.status_code == 200, f"file copy action returned {response.status_code}: {response.get_data(as_text=True)}")
+        require(response.status_code == 200, f"file remote pull action returned {response.status_code}: {response.get_data(as_text=True)}")
         file_action_payload = response.get_json()
-        require(file_action_payload and file_action_payload.get("ok") is True, f"file copy action not ok: {file_action_payload}")
-        task_id = file_action_payload.get("task_id")
-        require(task_id, "file copy action missing task id")
+        require(file_action_payload and file_action_payload.get("ok") is True, f"file remote pull action not ok: {file_action_payload}")
+        require(file_action_payload.get("remote_pull") is True, f"file action should submit cd2 remote pull: {file_action_payload}")
+        require(file_action_payload.get("created_count") == 1, f"file action should create one cd2 pull task: {file_action_payload}")
         response = client.get("/api/status")
         require(response.status_code == 200, f"status after file action returned {response.status_code}")
         status_payload = response.get_json() or {}
-        file_operations = status_payload.get("file_operations") or {}
-        operation_items = file_operations.get("items") or []
-        require(any(item.get("id") == task_id for item in operation_items), "status should expose file copy task")
-        require("active_count" in file_operations, "status file operations missing active count")
-        task_payload = {}
-        for _ in range(20):
-            response = client.get(f"/api/file-actions/{task_id}")
-            require(response.status_code == 200, f"file action status returned {response.status_code}")
-            task_payload = response.get_json() or {}
-            status = ((task_payload.get("task") or {}).get("status") or "")
-            if status in {"done", "partial", "failed"}:
-                break
-            time.sleep(0.1)
-        task = task_payload.get("task") or {}
-        require(task.get("status") == "done", f"file copy action did not finish cleanly: {task}")
-        require((data_dir / "watch" / "SmokeMovie" / "BDMV" / "index.bdmv").exists(), "file copy action did not copy directory into watch")
+        state_items = (status_payload.get("state") or {}).get("items") or {}
+        require(
+            any(
+                item.get("status") == "waiting_cd2_pull"
+                and item.get("cd2_pull_source") == "/115/SmokeMovie"
+                for item in state_items.values()
+            ),
+            f"file action should create waiting_cd2_pull item, got {state_items}",
+        )
+        require(not (data_dir / "watch" / "SmokeMovie").exists(), "file action should not use local copy for monitor pull")
 
         directory_scopes = (
             "watch_dir",

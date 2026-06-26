@@ -537,13 +537,23 @@
     if (action === "delete") {
       payload.confirm = "DELETE";
     }
-    setOperationStatus("正在提交后台任务。");
+    const isRemotePull = action === "copy" && destination === "watch";
+    setOperationStatus(isRemotePull ? "正在提交 CD2 远程拉取任务..." : "正在提交后台任务。");
     try {
       const response = await helper().fetchJson("/api/file-actions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (response.remote_pull) {
+        const message = response.message || "CD2 远程拉取任务已创建";
+        setOperationStatus(message, !response.ok);
+        helper().notify(message, !response.ok);
+        state.selected.clear();
+        updateSelectionUi();
+        loadDirectory(state.path || "/");
+        return;
+      }
       helper().notify("文件操作已开始");
       pollOperation(response.task_id);
     } catch (error) {

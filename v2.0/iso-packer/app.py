@@ -845,6 +845,56 @@ def cd2_local_path_to_remote(path: str, cfg: Dict) -> str:
     return ""
 
 
+def create_cd2_pull_tasks_for_browser_sources(cfg: Dict, sources: list[Path]) -> tuple[Dict, int]:
+    if not (cfg.get("cd2_manual_pull_enabled") or cfg.get("cd2_auto_pull_enabled")):
+        return {"ok": False, "message": "CD2 拉取未启用，请先开启手动拉取或自动拉取"}, 400
+
+    results = []
+    ok_count = 0
+    last_status = 400
+    for source in sources:
+        remote_path = cd2_local_path_to_remote(str(source), cfg)
+        if not remote_path:
+            results.append({
+                "ok": False,
+                "source": str(source),
+                "message": "所选路径不能映射到 CD2 远端路径，请检查路径别名",
+            })
+            continue
+        result, status_code = create_cd2_pull_task(cfg, remote_path, mode="manual")
+        last_status = status_code
+        result = dict(result or {})
+        result.setdefault("source", str(source))
+        result.setdefault("source_path", remote_path)
+        results.append(result)
+        if result.get("ok"):
+            ok_count += 1
+
+    failed_count = len(results) - ok_count
+    if ok_count == 0:
+        message = (results[0].get("message") if results else "") or "CD2 远程拉取任务创建失败"
+        return {
+            "ok": False,
+            "remote_pull": True,
+            "message": message,
+            "created_count": 0,
+            "failed_count": failed_count,
+            "pulls": results,
+        }, last_status or 400
+
+    message = f"已提交 {ok_count} 个 CD2 远程拉取任务"
+    if failed_count:
+        message += f"，{failed_count} 个失败"
+    return {
+        "ok": True,
+        "remote_pull": True,
+        "message": message,
+        "created_count": ok_count,
+        "failed_count": failed_count,
+        "pulls": results,
+    }, 200
+
+
 def cd2_pull_dest_dir_from_cfg(cfg: Dict) -> str:
     explicit = normalize_path_text((cfg or {}).get("cd2_remote_pull_dest_dir"))
     if explicit:
@@ -4598,8 +4648,12 @@ def api_file_actions():
         return jsonify({"ok": False, "message": f"路径无效: {exc}"}), 400
 
     destination = None
+    destination_kind = str(payload.get("destination") or "").strip().lower()
+    if action == "copy" and destination_kind == "watch":
+        result, status_code = create_cd2_pull_tasks_for_browser_sources(cfg, sources)
+        return jsonify(result), status_code
+
     if action in {"copy", "move"}:
-        destination_kind = str(payload.get("destination") or "").strip().lower()
         if destination_kind == "watch":
             destination = Path(cfg["watch_dir"]).expanduser()
         elif destination_kind == "output":
