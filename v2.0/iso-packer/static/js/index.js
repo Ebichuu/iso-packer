@@ -60,11 +60,11 @@
         if (job) {
             const source = job.source_path || job.source || '当前任务';
             const progress = Number(job.progress || 0);
-            const extra = activeFileOps > 0 ? ` · 另有 ${activeFileOps} 个本地复制任务` : '';
+            const extra = activeFileOps > 0 ? ` · 另有 ${activeFileOps} 个本地文件操作任务` : '';
             workerNote.textContent = `${job.stage_text || '封装执行中'} · ${Math.round(progress)}% · ${source}${extra}`;
             workerNote.title = workerNote.textContent;
         } else if (activeFileOps > 0) {
-            workerNote.textContent = `${activeFileOps} 个本地文件复制/移动任务正在执行`;
+            workerNote.textContent = `${activeFileOps} 个本地文件操作任务正在执行`;
             workerNote.title = workerNote.textContent;
         } else {
             workerNote.textContent = '当前没有执行中的任务，封装操作请进入封装中心';

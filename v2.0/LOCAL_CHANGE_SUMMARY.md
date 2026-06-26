@@ -6,19 +6,20 @@
 
 - 只改 `D:\Projects\makeiso\v2.0`。
 - `D:\Projects\makeiso` 下的 v1.19 只作为只读功能基线。
-- 当前未提交、未推送。
-- 真实 CD2 拉取暂停，后续单独验收。
+- 代码改动已按阶段提交并推送到 `origin/main`；本文件用于同步当前测试阶段摘要。
+- VPS 实机测试使用 Docker Hub `ebichu/iso-packer:test`；本地预览仍默认禁止真实 CD2 拉取。
 
 ## 当前运行状态
 
-- 安全预览端口：`http://127.0.0.1:15866/`
+- 本地安全预览端口：`http://127.0.0.1:15866/`
+- VPS 实机测试入口：`http://your-vps-host/`
 - 默认保护：
   - `ISO_PACKER_DISABLE_AUTH=1`
   - `ISO_PACKER_DISABLE_CD2_PULL=1`
   - `ISO_PACKER_DISABLE_CD2_STATUS_POLL=1`
-- 手动真实拉取：关闭
-- 自动真实拉取：关闭
-- 拉取目标目录：空
+- 本地手动真实拉取：关闭
+- 本地自动真实拉取：关闭
+- VPS 真实拉取：按线上配置执行
 
 ## 已完成改动
 
@@ -36,44 +37,50 @@
   - `TMDB #id` 新窗口打开 TMDB
 - 首页不展示中文校对状态、碟影/贴吧/豆瓣等维护信息。
 
-### 封装工作台
+### 封装中心
 
-- 工作台改为工程体检台方向。
-- 增强任务状态、CD2 候选、失败恢复和页面内反馈。
-- 真实拉取未启用或被本地保护禁止时，按钮会显示明确状态。
-- 清除记录能力已接回 `/api/cd2/pull-record`。
+- 原“工程体检台 / 封装工作台”命名已收敛为“封装中心”。
+- 主状态卡直接显示当前处于 CD2 拉取、封装、校验、转存还是收尾阶段。
+- “远程候选队列”显示输入端的 CD2 可拉取原盘。
+- “产出与转存”显示 ISO 生成、校验、转存结果，以及仍保留的本地文件操作。
+- 后续详细日志不放在主工作台，单独规划“日志中心”。
+
+### 文件浏览
+
+- 文件浏览默认 `cd2` 根目录跟随设置里的网盘挂载根目录，默认 `/CloudNAS/CloudDrive`。
+- 目录行可点击进入，不再需要单独“进入”按钮。
+- 支持多选、右键菜单、属性面板、目录大小统计和目录选择弹层。
+- “拉取到监控目录”已改为走 CD2 API 远程拉取队列，会创建 `waiting_cd2_pull` 状态。
+- “复制到输出目录 / 复制到其他目录 / 移动 / 删除”保留本机文件操作语义，并受路径边界与二次确认保护。
 
 ### 设置页
 
-当前设置卡片顺序：
+当前设置页归类：
 
 1. 本地目录
-2. CD2 登录信息
-3. CD2 转存目录
-4. 高级同步参数
-5. 远端候选与拉取
-6. Web 登录
-7. TMDB 元数据
+2. CD2 设置
+3. 系统设置
 
 已完成：
 
 - 主卡片统一为展开/收起结构。
 - 展开态改为中性色，不使用绿色底。
 - `本地目录` 默认展开。
-- `TMDB 元数据` 移到最底部。
-- `路径别名 / 上传匹配模式` 不再显示给普通用户。
+- `TMDB 元数据` 放入系统设置，并说明它同时服务发行日历和首页已交付资产海报。
+- 上传队列匹配策略改为程序内部默认处理，不在设置页暴露给普通用户。
 - `上传目录` 保持 Windows 本地路径选择语义。
 - `网盘监控目录` 支持 CD2 API 远端目录浏览。
 - `下载目录` 按用户要求保留该名称。
 - `封装后转存到 CD2 目录` 默认开启。
 - `监控 CloudDrive 上传队列` 默认开启。
 
-### CD2 安全保护
+### CD2 安全保护与拉取语义
 
 - 本地预览默认禁止真实 CD2 拉取。
 - 本地预览默认禁止状态页持续读取 CD2 队列。
 - `/api/status` 已瘦身，只返回摘要，不返回 CD2 大列表。
 - CD2 gRPC 客户端禁用 HTTP 代理，避免局域网地址被代理劫持。
+- 文件浏览进入监控目录的动作统一走 CD2 API 远程拉取队列，不再做 `/CloudNAS/CloudDrive -> /watch` 本地复制。
 
 ### 发行日历和 TMDB
 
@@ -83,6 +90,7 @@
 - 首页刷新接口：`POST /api/release-calendar/refresh`
 - TMDB 测试接口：`POST /api/tmdb/test`
 - 设置页可维护 TMDB API 域名、图片域名和 API Token。
+- “测试 TMDB”只验证连通性，不保存配置；首页已交付资产海报需要保存配置或注入 `TMDB_API_KEY` / `TMDB_BEARER_TOKEN`。
 
 ### 验收脚本
 
@@ -128,18 +136,15 @@ docker-compose config --quiet
 - `__pycache__/`
 - 临时截图或本地测试文件
 
-## 建议提交拆分
+## 最近主线提交
 
-1. `feat(ui): refine iso packer v2 dashboard and settings`
-2. `feat(calendar): add blu-ray release calendar with tmdb enrichment`
-3. `feat(cd2): guard real cd2 operations in local preview`
-4. `test: add v2 smoke coverage for ui and cd2 safety`
-5. `docs: update v2 local run and verification workflow`
+- `ae562b3 fix(status): show local file operations`
+- `5c3e367 fix(files): route monitor pulls through cd2`
 
 ## 后续计划
 
-1. 人工预览 `http://127.0.0.1:15866/`。
-2. 重点检查首页发行日历、设置页展开顺序、工作台保护状态、文件页浏览。
-3. 复跑 smoke。
-4. 决定是否整理本地提交。
-5. 真实 CD2 拉取单独开一轮，等 NAS/CD2 I/O 稳定后再做。
+1. VPS 拉取最新 `ebichu/iso-packer:test` 并重启后，确认文件浏览“拉取到监控目录”进入 CD2 远程拉取队列。
+2. 在线上设置页保存 TMDB Token，确认首页已交付资产能自动补海报并缓存。
+3. 继续观察封装中心在两个并发任务下的显示：一个 CD2 远程候选拉取、一个文件浏览提交的 CD2 拉取。
+4. 新增独立“日志中心”，承载封装日志、CD2 拉取事件、后台文件操作事件和下载/复制失败原因。
+5. 继续只更新 Docker Hub `test` 镜像；`latest` 等正式发布时再动。

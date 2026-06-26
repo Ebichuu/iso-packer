@@ -421,11 +421,11 @@
     const summary = document.getElementById("output-queue-summary");
     if (summary) {
       summary.textContent = rows.length
-        ? `共 ${rows.length} 条产出/复制记录，优先显示当前任务。`
-        : "暂无产出或本地复制记录；开始封装或复制后会显示在这里。";
+        ? `共 ${rows.length} 条产出/文件操作记录，优先显示当前任务。`
+        : "暂无产出或本地文件操作记录；开始封装、拉取或整理文件后会显示在这里。";
     }
     if (!rows.length) {
-      container.innerHTML = renderStateCard("empty", "暂无任务", "封装、校验、转存和文件浏览复制任务会显示在这里。");
+      container.innerHTML = renderStateCard("empty", "暂无任务", "封装、校验、转存和文件浏览的本地文件操作会显示在这里。");
       return;
     }
     container.innerHTML = rows.map((item) => {
@@ -765,7 +765,7 @@
 
   document.addEventListener("DOMContentLoaded", () => {
     renderPipeline({});
-    renderOutputQueue({});
+    renderOutputQueueV2({});
     if (document.getElementById("workspace-candidates-container")) fetchCandidatesQueue();
 
     const refreshButton = document.querySelector("[data-refresh-candidates]");
