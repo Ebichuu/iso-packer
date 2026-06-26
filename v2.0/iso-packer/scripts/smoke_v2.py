@@ -118,6 +118,9 @@ def verify_static_contracts() -> None:
         "index.html missing today-aware release cache badge",
     )
     require("暂无封面" in index_html, "index.html missing release poster fallback")
+    require("TMDB 缓存海报" in index_html, "index.html missing local asset poster cache copy")
+    require("movie.poster_path" in index_html, "local asset cards should render poster artwork when available")
+    require("movie.poster_status" in index_html, "local asset cards should expose poster cache status")
     require("radial-gradient" not in index_html, "index.html should not use decorative radial gradients")
     require("release-calendar-row" in index_html, "index.html release calendar should use compact media rows")
     require("release-calendar-poster" in index_html, "index.html release calendar should keep poster artwork visible")
@@ -146,11 +149,37 @@ def verify_static_contracts() -> None:
     workspace_html = read_text(templates / "workspace.html")
     require("workspace-candidates-container" in workspace_html, "workspace missing candidate container")
     require("data-batch-pull" in workspace_html, "workspace missing batch pull hook")
+    require("pipeline-live-card" in workspace_html, "workspace missing live status card")
+    require("pipeline-primary-status" in workspace_html, "workspace missing primary status title")
+    require("pipeline-current-action" in workspace_html, "workspace missing current action text")
+    require("pipeline-byte-progress" in workspace_html, "workspace missing byte progress text")
+    require("pipeline-next-step" in workspace_html, "workspace missing next-step text")
+    require("pipeline-progress-meta" in workspace_html, "workspace missing progress meta label")
+    require("workspace-output-queue" in workspace_html, "workspace missing output queue container")
+    require("output-queue-summary" in workspace_html, "workspace missing output queue summary")
+    require("output-queue-title" in workspace_html, "workspace missing output queue title")
+    require("封装中心" in workspace_html, "workspace should use concise packing-center copy")
+    require("工程体检台" not in workspace_html, "workspace should not use engineering-checkup copy")
+    require("封装工作台" not in workspace_html, "workspace should not mix workbench copy with packing center")
 
     files_html = read_text(templates / "files.html")
     require("file-browser-list" in files_html, "files.html missing browser list")
     require("data-root=" in files_html, "files.html missing root switch hooks")
     require("data-root-path=" in files_html, "files.html missing visible root path hooks")
+    require("file-operation-bar" in files_html, "files.html missing batch operation bar")
+    require('data-file-action="copy"' in files_html, "files.html missing copy action")
+    require("file-custom-destination" in files_html, "files.html missing custom destination input")
+    require("修改时间" in files_html, "files.html missing modified-time column")
+    file_markers = [
+        'id="file-select-all"',
+        'id="file-operation-bar"',
+        'data-file-action="copy"',
+        "复制到监控目录",
+        "修改时间",
+        'id="file-properties-panel"',
+    ]
+    for marker in file_markers:
+        require(marker in files_html, f"files.html missing {marker}")
 
     shared_js = read_text(ROOT / "static" / "js" / "shared.js")
     require("formatBytes" in shared_js, "shared.js missing file-size formatter")
@@ -176,6 +205,9 @@ def verify_static_contracts() -> None:
         'name="tmdb_image_domain"',
         'name="tmdb_api_token"',
         "data-tmdb-test",
+        "settings-group",
+        "CD2 设置",
+        "系统设置",
     ]
     for marker in settings_markers:
         require(marker in settings_html, f"settings.html missing {marker}")
@@ -264,14 +296,32 @@ def verify_static_contracts() -> None:
 
     workspace_js = read_text(static_js / "workspace.js")
     require("pull_guard_enabled" in workspace_js, "workspace.js should read pull guard status")
+    require("正在生成 ISO" in workspace_js, "workspace.js missing iso generation status copy")
+    require("正在校验 ISO" in workspace_js, "workspace.js missing verify status copy")
+    require("正在校验转存结果" in workspace_js, "workspace.js missing transfer verify status copy")
+    require("下一步" in workspace_html, "workspace should expose next-step copy")
+    require("等待 CD2 拉取完成" in workspace_js, "workspace.js missing cd2 waiting status copy")
+    require("pipeline-primary-status" in workspace_js, "workspace.js should update the primary status title")
+    require("renderOutputQueue" in workspace_js, "workspace.js missing output queue renderer")
+    require("outputQueueItems" in workspace_js, "workspace.js missing output queue item builder")
+    require("workspace-output-queue" in workspace_js, "workspace.js should render the output queue container")
+    require("转存中" in workspace_js, "workspace.js missing transfer output state")
+    require("已交付" in workspace_js, "workspace.js missing delivered output state")
     require("本地测试禁用拉取" in workspace_js, "workspace.js missing local pull guard label")
 
     shared_js = read_text(static_js / "shared.js")
+    app_py = read_text(ROOT / "app.py")
+    require("VERIFY" in shared_js, "shared.js should expose verify badge state")
+    require('"phase": "verify"' in app_py or 'update_active_progress("verify"' in app_py,
+            "app.py should mark ISO verify phase")
+    require('update_active_progress("transfer_verify"' in app_py,
+            "app.py should mark transfer verify phase")
     require("STATUS_POLL_ACTIVE_MS = 2000" in shared_js, "shared.js active poll interval drifted")
     require("STATUS_POLL_IDLE_MS = 6000" in shared_js, "shared.js idle poll interval drifted")
     require("STATUS_POLL_ERROR_MS = 8000" in shared_js, "shared.js error poll interval drifted")
     require("statusData.current_job ? STATUS_POLL_ACTIVE_MS : STATUS_POLL_IDLE_MS" in shared_js,
             "shared.js should slow status polling while idle")
+    require("waitingJobFromItems" in shared_js, "shared.js should expose waiting tasks as current jobs")
 
     index_js = read_text(static_js / "index.js")
     require("/api/release-calendar/refresh" in index_js, "index.js missing release calendar refresh endpoint")
@@ -388,6 +438,43 @@ def verify_tmdb_enrichment_contract() -> None:
             os.environ.pop("TMDB_API_KEY", None)
         else:
             os.environ["TMDB_API_KEY"] = previous_key
+
+
+def verify_local_media_poster_contract(appmod) -> None:
+    original_search = appmod.tmdb_search_movie
+
+    def fake_search(title: str, year: str = "", **_kwargs):
+        require(title == "Charade", f"local media TMDB query drifted: {title}")
+        require(year == "1963", f"local media TMDB year drifted: {year}")
+        return {
+            "id": 12345,
+            "title": "谜中谜",
+            "original_title": "Charade",
+            "poster_path": "/charade.jpg",
+        }
+
+    appmod.tmdb_search_movie = fake_search
+    try:
+        with appmod.lock:
+            appmod.state["local_media_posters"] = {}
+        cfg = appmod.DEFAULT_CONFIG.copy()
+        cfg.update({
+            "tmdb_api_enabled": True,
+            "tmdb_api_token": "smoke-test",
+        })
+        cards = appmod.local_media_cards([
+            ("/watch/Charade.1963.2160p.UHD", {
+                "status": "done",
+                "last_size": 1024,
+                "finished_at": "2026-06-26 10:00:00",
+                "pack_iso": True,
+            })
+        ], cfg=cfg)
+        require(cards and cards[0].get("poster_path", "").endswith("/charade.jpg"), "local asset poster was not filled")
+        require(cards[0].get("title") == "谜中谜", "local asset Chinese title was not applied")
+        require(cards[0].get("poster_status") == "TMDB 海报", "local asset poster status was not cached")
+    finally:
+        appmod.tmdb_search_movie = original_search
 
 
 def patch_cd2(appmod) -> None:
@@ -621,6 +708,7 @@ def run_smoke(keep: bool = False) -> Path:
         )
         verify_legacy_config_migration(appmod, data_dir)
         patch_cd2(appmod)
+        verify_local_media_poster_contract(appmod)
         client = appmod.app.test_client()
 
         previous_disable_auth = os.environ.get("ISO_PACKER_DISABLE_AUTH")
@@ -688,6 +776,37 @@ def run_smoke(keep: bool = False) -> Path:
                     Path(payload.get("root_path") or "").resolve() == (data_dir / "cloud-root").resolve(),
                     f"browse cd2 should use cd2_mount_root, got {payload}",
                 )
+
+        source_dir = data_dir / "cloud-root" / "SmokeMovie"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        (source_dir / "BDMV").mkdir(exist_ok=True)
+        (source_dir / "BDMV" / "index.bdmv").write_text("smoke", encoding="utf-8")
+        response = client.post(
+            "/api/file-actions",
+            json={
+                "action": "copy",
+                "root": "cd2",
+                "paths": [str(source_dir)],
+                "destination": "watch",
+            },
+        )
+        require(response.status_code == 200, f"file copy action returned {response.status_code}: {response.get_data(as_text=True)}")
+        file_action_payload = response.get_json()
+        require(file_action_payload and file_action_payload.get("ok") is True, f"file copy action not ok: {file_action_payload}")
+        task_id = file_action_payload.get("task_id")
+        require(task_id, "file copy action missing task id")
+        task_payload = {}
+        for _ in range(20):
+            response = client.get(f"/api/file-actions/{task_id}")
+            require(response.status_code == 200, f"file action status returned {response.status_code}")
+            task_payload = response.get_json() or {}
+            status = ((task_payload.get("task") or {}).get("status") or "")
+            if status in {"done", "partial", "failed"}:
+                break
+            time.sleep(0.1)
+        task = task_payload.get("task") or {}
+        require(task.get("status") == "done", f"file copy action did not finish cleanly: {task}")
+        require((data_dir / "watch" / "SmokeMovie" / "BDMV" / "index.bdmv").exists(), "file copy action did not copy directory into watch")
 
         directory_scopes = (
             "watch_dir",

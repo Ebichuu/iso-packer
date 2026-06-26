@@ -38,7 +38,7 @@
             workerNote.textContent = `${job.stage_text || '封装执行中'} · ${Math.round(progress)}% · ${source}`;
             workerNote.title = workerNote.textContent;
         } else {
-            workerNote.textContent = '当前无执行中任务，封装操作请进入工作台';
+            workerNote.textContent = '当前无执行中任务，封装操作请进入封装中心';
             workerNote.removeAttribute('title');
         }
     }

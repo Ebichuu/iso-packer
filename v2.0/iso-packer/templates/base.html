@@ -60,7 +60,7 @@
                     <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-900 text-[10px] font-black text-white">H</span> 首页展示
                 </a>
                 <a href="{{ url_for('workspace') }}" class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all group {% if request.endpoint == 'workspace' %}bg-white text-zinc-900 font-bold shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200{% else %}text-zinc-500 hover:text-zinc-900 hover:bg-white/60 font-semibold{% endif %}">
-                    <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-200 text-[10px] font-black text-zinc-700">W</span> 封装工作台
+                    <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-200 text-[10px] font-black text-zinc-700">W</span> 封装中心
                     <span id="global-worker-badge" class="ml-auto bg-zinc-200/60 text-zinc-600 text-[9px] font-bold px-2 py-0.5 rounded-full tracking-wide">IDLE</span>
                 </a>
                 <a href="{{ url_for('files') }}" class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all {% if request.endpoint == 'files' %}bg-white text-zinc-900 font-bold shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200{% else %}text-zinc-500 hover:text-zinc-900 hover:bg-white/60 font-semibold{% endif %}">

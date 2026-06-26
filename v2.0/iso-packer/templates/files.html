@@ -3,7 +3,7 @@
 {% block content %}
 <div class="border-b border-zinc-200 pb-4">
     <h2 class="text-sm font-bold tracking-widest text-zinc-400 uppercase">文件浏览</h2>
-    <p class="text-xs text-zinc-500 mt-0.5">只读查看 watch / output / CD2 三个挂载点，辅助确认原盘结构、输出文件和临时锁过滤状态</p>
+    <p class="text-xs text-zinc-500 mt-0.5">浏览本机监控、本机输出和网盘挂载目录；可多选电影文件夹后复制到监控目录或其他本地目录</p>
 </div>
 
 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
@@ -20,33 +20,52 @@
         <div id="file-dir-count" class="text-xs font-bold text-zinc-700 mt-0.5 font-mono">0</div>
     </div>
     <div class="bg-white border border-zinc-200/80 shadow-[0_4px_12px_rgba(0,0,0,0.01)] rounded-xl p-3 ring-1 ring-black/[0.01]">
-        <div class="text-[10px] text-zinc-400 font-bold uppercase tracking-wider font-mono">筛选结果</div>
+        <div class="text-[10px] text-zinc-400 font-bold uppercase tracking-wider font-mono">筛选 / 已选</div>
         <div id="file-entry-count" class="text-xs font-bold text-zinc-700 mt-0.5 font-mono">0</div>
+        <div id="file-selected-count" class="mt-1 text-[10px] font-bold text-emerald-700">0 项已选</div>
     </div>
 </div>
 
-<div class="bg-white border border-zinc-200 rounded-xl p-3 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs shadow-sm">
-    <div class="flex items-center gap-3 flex-1 max-w-md">
-        <input type="text" id="file-search" aria-label="搜索当前目录下的文件" placeholder="搜索当前目录下的文件..."
-               class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-1.5 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 shadow-inner">
-    </div>
+<div class="bg-white border border-zinc-200 rounded-xl p-3 space-y-3 text-xs shadow-sm">
+    <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div class="flex items-center gap-3 flex-1 max-w-md">
+            <input type="text" id="file-search" aria-label="搜索当前目录下的文件" placeholder="搜索当前目录下的文件..."
+                   class="w-full bg-[#fbfbfa] border border-zinc-200 rounded-lg px-3 py-1.5 font-mono text-zinc-800 focus:outline-none focus:border-zinc-400 shadow-inner">
+        </div>
 
-    <div class="flex items-center gap-2 flex-wrap text-[11px]">
-        <div id="file-filters" class="flex p-0.5 bg-zinc-100 rounded-lg border border-zinc-200/60 font-medium">
+        <div class="flex items-center gap-2 flex-wrap text-[11px]">
+            <div class="flex items-center gap-1 rounded-xl border border-zinc-200 bg-zinc-50 p-1">
+                <span class="px-2 text-[10px] font-black tracking-[0.12em] text-zinc-400">位置</span>
+                <div class="flex gap-1 root-switcher">
+                    <button type="button" data-root="watch" data-root-path="{{ browser_roots.watch|e }}" data-active="true" class="rounded-lg px-3 py-1.5 font-bold transition">本机监控</button>
+                    <button type="button" data-root="output" data-root-path="{{ browser_roots.output|e }}" data-active="false" class="rounded-lg px-3 py-1.5 font-bold transition">本机输出</button>
+                    <button type="button" data-root="cd2" data-root-path="{{ browser_roots.cd2|e }}" data-active="false" class="rounded-lg px-3 py-1.5 font-bold transition">网盘挂载</button>
+                </div>
+            </div>
+            <button type="button" id="file-up" class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-bold text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 transition" title="返回上级">上级</button>
+            <button type="button" id="file-refresh" class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-bold text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 transition" title="刷新当前目录">刷新</button>
+        </div>
+    </div>
+    <div class="flex flex-col gap-3 border-t border-zinc-100 pt-3 md:flex-row md:items-center md:justify-between">
+        <div id="file-filters" class="flex w-fit p-0.5 bg-zinc-100 rounded-lg border border-zinc-200/60 font-medium">
             <button type="button" data-file-filter="all" data-active="true" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">全部</button>
             <button type="button" data-file-filter="disc" data-active="false" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">原盘</button>
             <button type="button" data-file-filter="dir" data-active="false" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">目录</button>
             <button type="button" data-file-filter="file" data-active="false" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">文件</button>
         </div>
-        <span class="text-zinc-300">|</span>
-        <div class="flex gap-1 font-mono root-switcher">
-            <button type="button" data-root="watch" data-root-path="{{ browser_roots.watch|e }}" data-active="true" class="bg-zinc-900 text-white font-medium px-2.5 py-1 rounded-lg shadow-sm transition">watch</button>
-            <button type="button" data-root="output" data-root-path="{{ browser_roots.output|e }}" data-active="false" class="bg-white hover:bg-zinc-50 text-zinc-600 border border-zinc-200 px-2.5 py-1 rounded-lg shadow-inner transition">output</button>
-            <button type="button" data-root="cd2" data-root-path="{{ browser_roots.cd2|e }}" data-active="false" class="bg-white hover:bg-zinc-50 text-zinc-600 border border-zinc-200 px-2.5 py-1 rounded-lg shadow-inner transition">cd2</button>
+        <div id="file-operation-bar" class="hidden flex flex-wrap items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
+            <span id="file-selected-count-inline" class="hidden text-[11px] font-black text-emerald-800"></span>
+            <button type="button" data-file-action="copy" data-destination="watch" class="rounded-lg bg-emerald-700 px-3 py-1.5 font-black text-white hover:bg-emerald-800 disabled:opacity-40">复制到监控目录</button>
+            <button type="button" data-file-action="copy" data-destination="output" class="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 font-bold text-emerald-800 hover:border-emerald-500 disabled:opacity-40">复制到输出目录</button>
+            <input id="file-custom-destination" type="text" aria-label="其他目标目录" placeholder="其他目录路径"
+                   class="min-h-8 w-56 rounded-lg border border-emerald-200 bg-white px-2.5 py-1.5 font-mono text-[11px] font-bold text-zinc-800 focus:border-emerald-500 focus:outline-none">
+            <button type="button" data-file-action="copy" data-destination="custom" class="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 font-bold text-emerald-800 hover:border-emerald-500 disabled:opacity-40">复制到其他目录</button>
+            <button type="button" data-file-action="move" data-destination="custom" class="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 font-bold text-zinc-700 hover:border-zinc-500 disabled:opacity-40">移动</button>
+            <button type="button" data-file-action="delete" class="rounded-lg border border-red-200 bg-white px-3 py-1.5 font-bold text-red-700 hover:border-red-400 disabled:opacity-40">删除</button>
         </div>
-        <span class="text-zinc-300">|</span>
-        <button type="button" id="file-up" class="p-1 text-zinc-500 hover:text-zinc-900 transition" title="返回上级">上级</button>
-        <button type="button" id="file-refresh" class="p-1 text-zinc-500 hover:text-zinc-900 transition" title="刷新当前目录">刷新</button>
+    </div>
+    <div class="flex items-center gap-3 flex-1 max-w-md">
+        <span id="file-operation-status" class="text-[11px] font-bold text-zinc-500"></span>
     </div>
 </div>
 
@@ -57,28 +76,56 @@
 </div>
 
 <div class="border border-zinc-200 bg-white rounded-xl overflow-hidden font-mono text-xs shadow-[0_8px_30px_rgba(0,0,0,0.015)]">
-    <div class="bg-gradient-to-b from-zinc-50 to-zinc-100/30 p-3 text-zinc-400 flex justify-between border-b border-zinc-200 text-[10px] font-bold tracking-wider select-none">
-        <span>名称 / 结构</span>
-        <div class="flex gap-24 pr-8"><span class="w-16">属性</span><span class="w-20 text-right">大小</span></div>
+    <div class="file-table-head bg-gradient-to-b from-zinc-50 to-zinc-100/30 p-3 text-zinc-400 border-b border-zinc-200 text-[10px] font-bold tracking-wider select-none">
+        <input id="file-select-all" type="checkbox" aria-label="选择当前列表全部项目" class="h-4 w-4 rounded border-zinc-300 accent-zinc-900">
+        <span>名称 / 路径</span>
+        <span>修改时间</span>
+        <span>属性</span>
+        <span class="text-right">大小</span>
+        <span class="text-right">操作</span>
     </div>
 
     <div id="file-browser-list" class="divide-y divide-zinc-100 text-zinc-700">
     </div>
+</div>
+
+<div id="file-properties-panel" class="hidden rounded-xl border border-zinc-200 bg-white p-4 text-xs shadow-sm">
+    <div class="flex items-center justify-between border-b border-zinc-100 pb-3">
+        <div>
+            <p class="font-mono text-[10px] font-black tracking-[0.12em] text-zinc-400">属性</p>
+            <h3 class="mt-1 text-sm font-black text-zinc-900">文件详情</h3>
+        </div>
+        <button type="button" id="file-properties-close" class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[11px] font-bold text-zinc-600 hover:border-zinc-400">关闭</button>
+    </div>
+    <div id="file-properties-body" class="mt-3 grid gap-2 font-mono"></div>
 </div>
 {% endblock %}
 
 {% block script %}
 <script src="{{ url_for('static', filename='js/files.js') }}"></script>
 <style>
-    /* 文件浏览页专用行样式，保持只读工程表格的密度。 */
-    .file-row { display: flex; align-items: center; justify-content: space-between; padding: 0.875rem; text-align: left; width: 100%; transition: all 0.2s; cursor: pointer; }
-    .file-row:hover { background-color: #fcfcfb; color: #3b82f6; }
-    .file-main { flex: 1; min-width: 0; padding-left: 0.75rem; padding-right: 2rem; }
+    /* 文件浏览页专用行样式，保持工程表格密度，同时支持多选操作。 */
+    .file-table-head,
+    .file-row { display: grid; grid-template-columns: 2rem minmax(0,1fr) 9.5rem 4.5rem 5.5rem 6.5rem; align-items: center; gap: 0.75rem; }
+    .file-row { padding: 0.875rem; text-align: left; width: 100%; transition: background-color 0.15s, color 0.15s; }
+    .file-row:hover { background-color: #fcfcfb; }
+    .file-row[data-selected="true"] { background-color: #ecfdf5; }
+    .file-select { height: 1rem; width: 1rem; border-radius: 0.25rem; accent-color: #18181b; }
+    .file-main { min-width: 0; }
     .file-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #27272a; }
-    .file-meta { display: flex; gap: 1rem; font-size: 10px; color: #a1a1aa; margin-top: 0.125rem; }
+    .file-meta { display: flex; gap: 1rem; font-size: 10px; color: #a1a1aa; margin-top: 0.125rem; min-width: 0; }
+    .file-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-time { color: #71717a; font-weight: 600; }
+    .file-attrs { display: flex; align-items: center; gap: 0.375rem; }
     .file-kind { font-size: 10px; font-weight: bold; border: 1px solid #e4e4e7; padding: 0.125rem 0.5rem; border-radius: 0.375rem; background-color: #f4f4f5; color: #71717a; min-width: 42px; text-align: center; }
     .file-row[data-kind="disc"] .file-kind { background-color: #fef3c7; color: #d97706; border-color: #fde68a; }
-    .file-size { width: 5rem; text-align: right; color: #71717a; font-weight: 500; flex-shrink: 0; }
+    .file-size { text-align: right; color: #71717a; font-weight: 600; }
+    .file-row-actions { display: flex; justify-content: flex-end; gap: 0.375rem; }
+    .file-row-actions button { border: 1px solid #e4e4e7; background: #fff; border-radius: 0.5rem; color: #52525b; font-weight: 800; padding: 0.25rem 0.5rem; }
+    .file-row-actions button:hover { border-color: #a1a1aa; color: #18181b; }
+    .file-prop-row { display: grid; grid-template-columns: 6rem minmax(0,1fr); gap: 1rem; border-bottom: 1px solid #f4f4f5; padding: 0.5rem 0; }
+    .file-prop-row span { color: #a1a1aa; font-weight: 800; }
+    .file-prop-row strong { min-width: 0; overflow-wrap: anywhere; color: #27272a; }
     .root-switcher [data-root][data-active="true"] { background: #18181b !important; color: #fff !important; border-color: #18181b !important; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
     .root-switcher [data-root][data-active="false"] { background: #fff !important; color: #52525b !important; border-color: #e4e4e7 !important; }
     #file-filters button:focus-visible,
@@ -90,5 +137,15 @@
     #file-breadcrumb button { font-weight: bold; color: #2563eb; transition: color 0.15s; cursor: pointer; background: none; border: none; padding: 0; }
     #file-breadcrumb button:hover { color: #1d4ed8; text-decoration: underline; }
     .breadcrumb-separator { color: #d4d4d8; padding: 0 0.25rem; font-weight: normal; }
+    @media (max-width: 900px) {
+        .file-table-head,
+        .file-row { grid-template-columns: 2rem minmax(0,1fr) 5rem; }
+        .file-table-head span:nth-of-type(2),
+        .file-table-head span:nth-of-type(3),
+        .file-table-head span:nth-of-type(4),
+        .file-time,
+        .file-attrs,
+        .file-size { display: none; }
+    }
 </style>
 {% endblock %}

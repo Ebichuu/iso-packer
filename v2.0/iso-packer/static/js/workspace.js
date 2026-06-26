@@ -35,18 +35,168 @@
     showFeedback.timer = window.setTimeout(() => feedback.classList.add("hidden"), 3600);
   }
 
-  function setWorkerVisual(isActive) {
+  function formatPercent(value) {
+    const progress = Math.max(0, Math.min(100, Number(value || 0)));
+    return `${progress.toFixed(progress % 1 ? 1 : 0)}%`;
+  }
+
+  function formatByteProgress(job) {
+    if (!job) return "--";
+    const current = Number(job.current || 0);
+    const total = Number(job.total || 0);
+    if (!Number.isFinite(current) || current <= 0) {
+      return total > 0 ? `0 B / ${helper().formatBytes(total)}` : "--";
+    }
+    if (!Number.isFinite(total) || total <= 0) {
+      return helper().formatBytes(current);
+    }
+    return `${helper().formatBytes(current)} / ${helper().formatBytes(total)}`;
+  }
+
+  function jobStatusView(job) {
+    if (!job) {
+      return {
+        tone: "emerald",
+        kicker: "任务状态",
+        title: "当前待命",
+        detail: "等待新的 BDMV / VIDEO_TS 进入队列。",
+        meta: "待命",
+        next: "等待监控目录出现新的原盘目录"
+      };
+    }
+    const phase = String(job.phase || job.status || "").toLowerCase();
+    if (phase === "transfer" || phase === "transferring") {
+      return {
+        tone: "emerald",
+        kicker: "转存阶段",
+        title: "正在转存 ISO",
+        detail: job.stage_text || "ISO 已封装完成，正在复制到输出目录或 CD2 挂载目录。",
+        meta: "转存中",
+        next: "转存完成后会校验目标文件并标记交付完成"
+      };
+    }
+    if (phase === "transfer_verify") {
+      return {
+        tone: "emerald",
+        kicker: "转存校验",
+        title: "正在校验转存结果",
+        detail: job.stage_text || "ISO 已写入目标目录，正在确认文件大小和收尾状态。",
+        meta: "校验转存",
+        next: "校验通过后会清理临时文件并完成归档"
+      };
+    }
+    if (phase === "refresh_cd2_dir" || phase === "refreshing_cd2_dir") {
+      return {
+        tone: "emerald",
+        kicker: "目录刷新",
+        title: "正在刷新 CD2 目录",
+        detail: job.stage_text || "转存已完成，正在通知 CloudDrive2 刷新目标目录。",
+        meta: "刷新目录",
+        next: "刷新完成后任务会进入已交付状态"
+      };
+    }
+    if (phase === "waiting_cd2_pull") {
+      return {
+        tone: "amber",
+        kicker: "CD2 拉取",
+        title: "等待 CD2 拉取完成",
+        detail: job.stage_text || "远端原盘还在拉取到本地监控目录，完成后才会开始封装。",
+        meta: "等待拉取",
+        next: "拉取完成后自动进入封装队列"
+      };
+    }
+    if (phase === "waiting_partial" || phase === "receiving" || phase === "waiting_stable") {
+      return {
+        tone: "amber",
+        kicker: "源目录检查",
+        title: "等待源目录稳定",
+        detail: job.stage_text || "检测到文件仍在写入或目录还未稳定，暂不开始封装。",
+        meta: "等待稳定",
+        next: "目录稳定后自动开始封装"
+      };
+    }
+    if (phase === "ready") {
+      return {
+        tone: "blue",
+        kicker: "封装队列",
+        title: "准备启动封装",
+        detail: job.stage_text || "源目录已满足条件，等待封装任务启动。",
+        meta: "准备中",
+        next: "封装引擎启动后开始写入 ISO"
+      };
+    }
+    if (phase === "verify" || phase === "verifying" || phase === "validating" || phase === "checking") {
+      return {
+        tone: "amber",
+        kicker: "ISO 校验",
+        title: "正在校验 ISO",
+        detail: job.stage_text || "ISO 文件已经生成，正在确认结构是否完整可读。",
+        meta: "校验中",
+        next: "校验通过后进入转存或完成归档"
+      };
+    }
+    if (phase === "finalize" || phase === "finalizing") {
+      return {
+        tone: "amber",
+        kicker: "封装收尾",
+        title: "封装收尾中",
+        detail: job.stage_text || "ISO 已写入，正在重命名、校验或准备转存。",
+        meta: "收尾中",
+        next: "收尾完成后会进入转存或已交付状态"
+      };
+    }
+    return {
+      tone: "blue",
+      kicker: "封装写入",
+      title: "正在生成 ISO",
+      detail: job.stage_text || "正在读取源目录并写入 ISO 文件。",
+      meta: "封装中",
+      next: "写入完成后会进入 ISO 校验"
+    };
+  }
+
+  function toneClass(tone, target) {
+    const table = {
+      blue: {
+        dot: "bg-blue-500 shadow-[0_0_0_5px_rgba(59,130,246,0.12)]",
+        state: "font-mono text-sm text-blue-700",
+        card: "mt-4 rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-sky-50 p-4 shadow-sm",
+        text: "font-mono text-4xl font-black tracking-tight text-blue-700",
+        bar: "h-full rounded-full bg-blue-500 transition-all duration-300",
+        meta: "shrink-0 font-mono font-black text-blue-700"
+      },
+      emerald: {
+        dot: "bg-emerald-500 shadow-[0_0_0_5px_rgba(16,185,129,0.12)]",
+        state: "font-mono text-sm text-emerald-700",
+        card: "mt-4 rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 via-white to-teal-50 p-4 shadow-sm",
+        text: "font-mono text-4xl font-black tracking-tight text-emerald-700",
+        bar: "h-full rounded-full bg-emerald-500 transition-all duration-300",
+        meta: "shrink-0 font-mono font-black text-emerald-700"
+      },
+      amber: {
+        dot: "bg-amber-500 shadow-[0_0_0_5px_rgba(245,158,11,0.14)]",
+        state: "font-mono text-sm text-amber-700",
+        card: "mt-4 rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-white to-orange-50 p-4 shadow-sm",
+        text: "font-mono text-4xl font-black tracking-tight text-amber-700",
+        bar: "h-full rounded-full bg-amber-500 transition-all duration-300",
+        meta: "shrink-0 font-mono font-black text-amber-700"
+      }
+    };
+    return (table[tone] || table.blue)[target];
+  }
+
+  function setWorkerVisual(isActive, tone = "blue") {
     const dot = document.getElementById("workspace-worker-dot");
     const stateLabel = document.getElementById("workspace-worker-state");
     if (dot) {
       dot.className = isActive
-        ? "h-2.5 w-2.5 rounded-full bg-blue-500 shadow-[0_0_0_5px_rgba(59,130,246,0.12)]"
+        ? `h-2.5 w-2.5 rounded-full ${toneClass(tone, "dot")}`
         : "h-2.5 w-2.5 rounded-full bg-emerald-500 shadow-[0_0_0_5px_rgba(16,185,129,0.12)]";
     }
     if (stateLabel) {
       stateLabel.textContent = isActive ? "运行中" : "待命";
       stateLabel.className = isActive
-        ? "font-mono text-sm text-blue-700"
+        ? toneClass(tone, "state")
         : "font-mono text-sm text-emerald-700";
     }
   }
@@ -58,25 +208,155 @@
 
     const isActive = Boolean(job);
     const progress = Math.max(0, Math.min(100, Number((job && job.progress) || 0)));
-    setWorkerVisual(isActive);
-    setText("workspace-worker-detail", isActive ? "封装引擎正在执行，下面显示当前任务流。" : "当前没有封装任务，工作台处于待命状态。");
+    const view = jobStatusView(job);
+    setWorkerVisual(isActive, view.tone);
+    setText("pipeline-status-kicker", view.kicker);
+    setText("pipeline-primary-status", view.title);
+    setText("pipeline-current-action", view.detail);
+    setText("workspace-worker-detail", view.detail);
     setText("pipeline-src", isActive ? job.source_path : "--");
     setText("pipeline-out", isActive ? job.output_iso : "--");
     setText("pipeline-stream-elapsed", isActive ? `耗时：${job.elapsed || "--"}` : "耗时：--");
-    setText("pipeline-progress-text", `${progress.toFixed(progress % 1 ? 1 : 0)}%`);
-    setText("pipeline-stage-log", isActive ? (job.stage_text || "底层引擎执行中...") : "等待指令流调起...");
+    setText("pipeline-progress-text", formatPercent(progress));
+    setText("pipeline-byte-progress", isActive ? formatByteProgress(job) : "--");
+    setText("pipeline-stage-log", view.detail);
+    setText("pipeline-progress-meta", view.meta);
+    setText("pipeline-next-step", view.next);
+
+    const liveCard = document.getElementById("pipeline-live-card");
+    if (liveCard) liveCard.className = toneClass(view.tone, "card");
+    const progressText = document.getElementById("pipeline-progress-text");
+    if (progressText) progressText.className = toneClass(view.tone, "text");
+    const progressMeta = document.getElementById("pipeline-progress-meta");
+    if (progressMeta) progressMeta.className = toneClass(view.tone, "meta");
 
     const bar = document.getElementById("pipeline-progress-bar");
     if (bar) {
       bar.style.width = `${progress}%`;
-      bar.className = isActive
-        ? "h-full rounded-full bg-blue-500 transition-all duration-300"
-        : "h-full rounded-full bg-emerald-500 transition-all duration-300";
+      bar.className = toneClass(view.tone, "bar");
     }
   }
 
+  function outputQueueView(item) {
+    const phase = String(item.phase || item.status || "").toLowerCase();
+    if (phase === "transfer" || phase === "transferring") {
+      return { label: "转存中", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", hint: "ISO 已生成，正在复制到输出目录或 CD2 挂载目录。" };
+    }
+    if (phase === "transfer_verify") {
+      return { label: "转存校验", badge: "border-amber-200 bg-amber-50 text-amber-700", hint: "目标文件已写入，正在确认大小和收尾状态。" };
+    }
+    if (phase === "verify" || phase === "verifying" || phase === "validating" || phase === "checking") {
+      return { label: "ISO 校验", badge: "border-amber-200 bg-amber-50 text-amber-700", hint: "ISO 已写完，正在确认结构完整。" };
+    }
+    if (phase === "finalize" || phase === "finalizing" || phase === "refresh_cd2_dir" || phase === "refreshing_cd2_dir") {
+      return { label: "收尾中", badge: "border-amber-200 bg-amber-50 text-amber-700", hint: "正在重命名、刷新 CD2 目录或完成归档。" };
+    }
+    if (phase === "done" || phase === "transfer_done") {
+      return { label: "已交付", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", hint: "ISO 已完成，可按输出路径查看。" };
+    }
+    if (phase === "failed" || phase === "verify_failed" || phase === "transfer_failed" || phase === "output_exists") {
+      return { label: "需处理", badge: "border-red-200 bg-red-50 text-red-700", hint: item.error || item.issue_text || "任务失败或输出路径需要手动处理。" };
+    }
+    if (phase === "running" || phase === "packing") {
+      return { label: "生成中", badge: "border-blue-200 bg-blue-50 text-blue-700", hint: "正在读取源目录并写入 ISO。" };
+    }
+    return { label: "待产出", badge: "border-zinc-200 bg-zinc-50 text-zinc-600", hint: item.stage_text || "等待生成 ISO。" };
+  }
+
+  function itemOutputPath(item) {
+    return item.output_iso || item.target || item.output_target || item.original_target || "--";
+  }
+
+  function outputQueueItems(status) {
+    const rows = [];
+    const seen = new Set();
+    const current = status && status.current_job;
+    if (current) {
+      const source = current.source_path || current.source || "";
+      rows.push({
+        name: source.split(/[\\/]/).filter(Boolean).pop() || "当前任务",
+        source,
+        output_iso: current.output_iso || current.target || "--",
+        phase: current.phase || current.status || "running",
+        progress: current.progress,
+        current: current.current,
+        total: current.total,
+        stage_text: current.stage_text,
+        is_current: true
+      });
+      if (source) seen.add(source);
+    }
+
+    const items = (status && status.state && status.state.items) || {};
+    Object.entries(items).forEach(([source, item]) => {
+      if (!item || seen.has(source)) return;
+      const phase = String(item.status || "").toLowerCase();
+      const hasOutput = item.target || item.output_target || item.original_target || phase === "done" || phase === "transfer_done" || phase.includes("transfer") || phase.includes("verify");
+      if (!hasOutput) return;
+      rows.push({
+        name: source.split(/[\\/]/).filter(Boolean).pop() || item.name || "ISO 任务",
+        source,
+        output_iso: itemOutputPath(item),
+        phase,
+        progress: Number(item.progress || 0),
+        current: item.last_size || item.size || 0,
+        total: item.size || item.last_size || 0,
+        stage_text: item.status_label || item.error || "",
+        error: item.error || item.last_error || "",
+        issue_text: item.issue_text || "",
+        finished_at: item.finished_at || item.done_at || item.updated_at || item.first_seen || ""
+      });
+    });
+    return rows.slice(0, 6);
+  }
+
+  function renderOutputQueue(status) {
+    const container = document.getElementById("workspace-output-queue");
+    if (!container) return;
+    const rows = outputQueueItems(status || {});
+    setText("workspace-output-total", rows.length);
+    const summary = document.getElementById("output-queue-summary");
+    if (summary) {
+      summary.textContent = rows.length
+        ? `共 ${rows.length} 条产出记录，优先显示当前任务和最近完成项。`
+        : "暂无产出记录；开始封装后会显示 ISO 生成、校验和转存状态。";
+    }
+    if (!rows.length) {
+      container.innerHTML = renderStateCard("empty", "暂无产出", "开始封装后，这里会显示生成中的 ISO、转存目标和最近交付结果。");
+      return;
+    }
+    container.innerHTML = rows.map((item) => {
+      const view = outputQueueView(item);
+      const progress = Number.isFinite(Number(item.progress)) ? formatPercent(item.progress) : "--";
+      const byteText = item.current || item.total ? formatByteProgress(item) : "--";
+      const currentMark = item.is_current ? '<span class="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 font-mono text-[9px] font-black uppercase tracking-[0.14em] text-blue-700">当前</span>' : "";
+      return `
+        <div class="grid gap-3 p-3.5 transition hover:bg-zinc-50 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_150px] lg:items-center">
+          <div class="min-w-0 space-y-1">
+            <div class="flex items-center gap-2">
+              <span class="rounded-full border px-2 py-0.5 font-mono text-[9px] font-black uppercase tracking-[0.14em] ${view.badge}">${escapeHtml(view.label)}</span>
+              ${currentMark}
+            </div>
+            <div class="truncate font-mono text-xs font-bold text-zinc-800" title="${escapeHtml(item.name)}">${escapeHtml(item.name || "--")}</div>
+            <div class="truncate text-[11px] font-medium text-zinc-500" title="${escapeHtml(view.hint)}">${escapeHtml(view.hint)}</div>
+          </div>
+          <div class="min-w-0 space-y-1 font-mono text-[10px] text-zinc-500">
+            <div class="truncate" title="${escapeHtml(item.output_iso)}">输出: ${escapeHtml(item.output_iso || "--")}</div>
+            <div class="truncate" title="${escapeHtml(item.source)}">源: ${escapeHtml(item.source || "--")}</div>
+          </div>
+          <div class="text-left lg:text-right">
+            <div class="font-mono text-sm font-black text-zinc-900">${escapeHtml(progress)}</div>
+            <div class="mt-0.5 truncate font-mono text-[10px] font-bold text-zinc-400" title="${escapeHtml(byteText)}">${escapeHtml(byteText)}</div>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
   window.addEventListener("coreStatusUpdated", (event) => {
-    renderPipeline(event.detail || {});
+    const status = event.detail || {};
+    renderPipeline(status);
+    renderOutputQueue(status);
   });
 
   function candidateState(candidate) {
@@ -381,6 +661,7 @@
 
   document.addEventListener("DOMContentLoaded", () => {
     renderPipeline({});
+    renderOutputQueue({});
     if (document.getElementById("workspace-candidates-container")) fetchCandidatesQueue();
 
     const refreshButton = document.querySelector("[data-refresh-candidates]");

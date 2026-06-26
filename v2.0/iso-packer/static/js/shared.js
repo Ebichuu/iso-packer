@@ -45,18 +45,52 @@ const IsoPacker = (() => {
     return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
   }
 
+  function waitingJobFromItems(items) {
+    const waitingStatuses = new Set([
+      "waiting_cd2_pull",
+      "waiting_cd2_upload",
+      "waiting_partial",
+      "waiting_stable",
+      "receiving",
+      "ready"
+    ]);
+    for (const [source, item] of Object.entries(items || {})) {
+      const status = item && item.status;
+      if (!waitingStatuses.has(status)) continue;
+      const task = item.cd2_source_task || {};
+      const progress = Number(task.percent ?? item.progress ?? 0);
+      return {
+        source_path: source || item.source || "--",
+        output_iso: item.target || item.output_iso || "--",
+        elapsed: (item.timings && (item.timings.human || item.timings.summary)) || "--",
+        progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0,
+        status,
+        phase: status,
+        stage_text: item.error || item.status_label || status,
+        current: task.current || task.current_bytes || item.last_size || 0,
+        total: task.total || task.total_bytes || item.size || 0
+      };
+    }
+    return null;
+  }
+
   function normalizeStatusPayload(payload) {
     const status = payload || {};
     const state = status.state || {};
     const active = state.active || status.active || null;
     const progress = progressPercent(active);
+    const activeProgress = (active && active.progress) || {};
     const currentJob = active ? {
       source_path: active.source || active.source_path || "--",
       output_iso: active.target || active.output_iso || "--",
       elapsed: active.duration || active.elapsed || active.elapsed_human || "--",
       progress,
-      stage_text: active.stage_text || active.status_label || active.status || "底层引擎执行中..."
-    } : null;
+      status: active.status || "running",
+      phase: activeProgress.phase || active.phase || active.status || "packing",
+      current: activeProgress.current || 0,
+      total: activeProgress.total || 0,
+      stage_text: activeProgress.stage_text || activeProgress.label || active.stage_text || active.status_label || active.status || "底层引擎执行中..."
+    } : waitingJobFromItems(state.items);
 
     return {
       ...status,
@@ -109,8 +143,19 @@ function startSerializedSystemLoop() {
       const globalBadge = document.getElementById("global-worker-badge");
       if (globalBadge) {
         if (statusData.current_job) {
-          globalBadge.innerText = "PACKING";
-          globalBadge.className = "ml-auto bg-blue-50 text-blue-600 border border-blue-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse";
+          const phase = String(statusData.current_job.phase || statusData.current_job.status || "").toLowerCase();
+          const isWaiting = phase.startsWith("waiting") || phase === "receiving";
+          const isTransfer = phase === "transfer" || phase === "transferring";
+          const isVerify = phase === "verify" || phase === "verifying" || phase === "validating" || phase === "checking" || phase === "transfer_verify";
+          const isFinalize = phase === "finalize" || phase === "finalizing" || phase === "refresh_cd2_dir" || phase === "refreshing_cd2_dir";
+          globalBadge.innerText = isWaiting ? "WAITING" : isTransfer ? "TRANSFER" : isVerify ? "VERIFY" : isFinalize ? "FINAL" : "PACKING";
+          globalBadge.className = isWaiting
+            ? "ml-auto bg-amber-50 text-amber-700 border border-amber-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse"
+            : isTransfer
+              ? "ml-auto bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse"
+              : isVerify || isFinalize
+                ? "ml-auto bg-amber-50 text-amber-700 border border-amber-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse"
+                : "ml-auto bg-blue-50 text-blue-600 border border-blue-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse";
         } else {
           globalBadge.innerText = "IDLE";
           globalBadge.className = "ml-auto bg-zinc-100 text-zinc-400 border border-zinc-200 text-[9px] font-bold px-2 py-0.5 rounded-full";

@@ -14,6 +14,11 @@
     .settings-toggle .when-open { display: none; }
     .settings-card[open] .settings-toggle .when-open { display: inline; }
     .settings-card[open] .settings-toggle .when-closed { display: none; }
+    .settings-group { border: 1px solid #e4e4e7; border-radius: 1.25rem; background: #fff; padding: 1rem; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.035); }
+    .settings-group-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; border-bottom: 1px solid #f4f4f5; padding: 0.25rem 0.25rem 1rem; margin-bottom: 1rem; }
+    .settings-group-head h2 { color: #18181b; font-size: 13px; font-weight: 900; letter-spacing: 0.12em; text-transform: uppercase; }
+    .settings-group-head p { margin-top: 0.35rem; color: #71717a; font-size: 11px; font-weight: 600; line-height: 1.6; }
+    .settings-group-tag { border: 1px solid #e4e4e7; border-radius: 999px; color: #52525b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-weight: 900; padding: 0.25rem 0.65rem; white-space: nowrap; }
     .field-control { display: flex; gap: 0.5rem; }
     .field-control input { min-width: 0; flex: 1; }
     .directory-row { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 0.75rem; align-items: center; padding: 0.75rem; border: 1px solid #e4e4e7; border-radius: 0.75rem; background: #fff; text-align: left; transition: border-color .15s ease, background .15s ease; }
@@ -50,6 +55,15 @@
 {% endif %}
 
 <form id="system-config-form" action="{{ url_for('settings') }}" method="POST" class="w-full space-y-6 text-xs">
+
+    <section class="settings-group space-y-4">
+        <div class="settings-group-head">
+            <div>
+                <h2>本地目录</h2>
+                <p>控制本机监控、输出和扫描行为，是封装流程最常用的一组设置。</p>
+            </div>
+            <span class="settings-group-tag">LOCAL</span>
+        </div>
 
     <!-- 本地目录 -->
     <details class="settings-card space-y-4" open>
@@ -117,6 +131,17 @@
         </div>
         </div>
     </details>
+
+    </section>
+
+    <section class="settings-group space-y-4">
+        <div class="settings-group-head">
+            <div>
+                <h2>CD2 设置</h2>
+                <p>集中管理 CloudDrive2 连接、网盘挂载根、上传转存和远端候选拉取。</p>
+            </div>
+            <span class="settings-group-tag">CLOUDDRIVE</span>
+        </div>
 
     <!-- CD2 登录信息 -->
     <details class="settings-card space-y-4 border-zinc-300 bg-zinc-50/30">
@@ -399,6 +424,17 @@
         </div>
     </details>
 
+    </section>
+
+    <section class="settings-group space-y-4">
+        <div class="settings-group-head">
+            <div>
+                <h2>系统设置</h2>
+                <p>登录安全和元数据补全放在这里，和目录/拉取类设置分开。</p>
+            </div>
+            <span class="settings-group-tag">SYSTEM</span>
+        </div>
+
     <!-- Web 登录 -->
     <details class="settings-card space-y-4">
         <summary class="settings-card-summary">
@@ -466,6 +502,8 @@
             </div>
         </div>
     </details>
+
+    </section>
 
     <!-- 提交按钮 -->
     <div class="flex justify-end gap-3 border-t border-zinc-200/80 sticky bottom-0 bg-[#fbfbfa]/90 backdrop-blur-sm py-4 w-full z-30">

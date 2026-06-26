@@ -44,7 +44,7 @@ from core import (
     seconds_between,
     status_label,
 )
-from release_calendar_fetcher import refresh_release_calendar_cache, tmdb_get_json
+from release_calendar_fetcher import apply_tmdb_result, refresh_release_calendar_cache, tmdb_get_json, tmdb_search_movie
 
 try:
     from clouddrive2_client import CloudDriveClient
@@ -59,6 +59,7 @@ STATE_PATH = APP_DIR / "state.json"
 LOG_PATH = APP_DIR / "iso-packer.log"
 RELEASE_CALENDAR_PATH = PROJECT_DIR / "data" / "release_calendar.json"
 LOG_LINE_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
+LOCAL_MEDIA_POSTER_CACHE_LIMIT = 300
 
 
 def ensure_app_dir() -> None:
@@ -68,6 +69,8 @@ app = Flask(__name__)
 lock = threading.RLock()
 cd2_lock = threading.RLock()
 worker_lock = threading.Lock()
+file_operation_lock = threading.RLock()
+file_operation_tasks = {}
 cd2_client_cache = {
     "key": None,
     "client": None,
@@ -136,6 +139,97 @@ def resolve_cd2_browser_root(cfg: Dict) -> Path:
     if mount_root:
         return Path(mount_root).expanduser()
     return Path("/CloudNAS/CloudDrive").expanduser()
+
+
+def file_browser_roots_from_config(cfg: Dict) -> Dict[str, Path]:
+    return {
+        "watch": Path(cfg["watch_dir"]).expanduser(),
+        "output": Path(cfg["output_dir"]).expanduser(),
+        "cd2": resolve_cd2_browser_root(cfg),
+    }
+
+
+def resolve_file_browser_path(cfg: Dict, root_name: str, raw_path: str) -> tuple[Path, Path]:
+    roots = file_browser_roots_from_config(cfg)
+    root = roots.get(root_name)
+    if not root:
+        raise ValueError("无效的根目录")
+    target = (raw_path or str(root)).strip() or str(root)
+    if target == "/":
+        target = str(root)
+    path = Path(target).expanduser().resolve()
+    root = root.resolve()
+    if not path_in_root(path, root):
+        raise ValueError("禁止访问根目录外路径")
+    return path, root
+
+
+def file_operation_snapshot(task_id: str) -> Dict:
+    with file_operation_lock:
+        return dict(file_operation_tasks.get(task_id) or {})
+
+
+def update_file_operation_task(task_id: str, **updates) -> None:
+    with file_operation_lock:
+        task = file_operation_tasks.setdefault(task_id, {"id": task_id})
+        task.update(updates)
+        task["updated_at"] = now()
+
+
+def copy_file_operation_source(source: Path, target: Path) -> None:
+    if source.is_dir():
+        if path_in_root(target.parent, source):
+            raise ValueError("目标目录不能位于源目录内部")
+        shutil.copytree(source, target)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+
+def run_file_operation_task(task_id: str, action: str, sources: list[Path], destination: Optional[Path]) -> None:
+    update_file_operation_task(task_id, status="running", message="正在处理", done=0)
+    results = []
+    try:
+        if destination and action in {"copy", "move"}:
+            destination.mkdir(parents=True, exist_ok=True)
+        for index, source in enumerate(sources, start=1):
+            item = {"source": str(source), "ok": False}
+            try:
+                if not source.exists():
+                    raise FileNotFoundError("源路径不存在")
+                if action == "copy":
+                    target = (destination / source.name).resolve()
+                    if target.exists():
+                        raise FileExistsError(f"目标已存在: {target}")
+                    copy_file_operation_source(source, target)
+                    item.update({"ok": True, "target": str(target)})
+                elif action == "move":
+                    target = (destination / source.name).resolve()
+                    if target.exists():
+                        raise FileExistsError(f"目标已存在: {target}")
+                    if source.is_dir() and path_in_root(target.parent, source):
+                        raise ValueError("目标目录不能位于源目录内部")
+                    shutil.move(str(source), str(target))
+                    item.update({"ok": True, "target": str(target)})
+                elif action == "delete":
+                    if source.is_dir():
+                        shutil.rmtree(source)
+                    else:
+                        source.unlink()
+                    item.update({"ok": True})
+                else:
+                    raise ValueError("不支持的操作")
+            except Exception as exc:
+                item["message"] = str(exc)
+            results.append(item)
+            update_file_operation_task(task_id, done=index, results=results)
+        failed = [item for item in results if not item.get("ok")]
+        status = "failed" if len(failed) == len(results) else ("partial" if failed else "done")
+        message = "操作完成" if status == "done" else f"{len(failed)} 项处理失败"
+        update_file_operation_task(task_id, status=status, message=message, done=len(results), results=results)
+        log(f"文件浏览{action}操作完成: {len(results) - len(failed)}/{len(results)}")
+    except Exception as exc:
+        update_file_operation_task(task_id, status="failed", message=str(exc), results=results)
 
 
 def prune_log_file() -> None:
@@ -2265,7 +2359,12 @@ def run_iso(source: Path, target: Path, source_size: int) -> subprocess.Complete
             percent = 100.0 if source_size <= 0 else current * 100 / source_size
             current_time = time.time()
             if current_time - last_update >= 2:
-                update_active_progress("packing", target, {"percent": min(percent, 99.9), "current": current, "total": source_size})
+                update_active_progress("packing", target, {
+                    "percent": min(percent, 99.9),
+                    "current": current,
+                    "total": source_size,
+                    "stage_text": "正在生成 ISO 文件",
+                })
                 last_update = current_time
             time.sleep(1)
         proc.wait()
@@ -2277,7 +2376,12 @@ def run_iso(source: Path, target: Path, source_size: int) -> subprocess.Complete
     except FileNotFoundError:
         pass
     current = target.stat().st_size if target.exists() else 0
-    update_active_progress("packing", target, {"percent": 100.0 if proc.returncode == 0 else min(current * 100 / max(source_size, 1), 99.9), "current": current, "total": source_size})
+    update_active_progress("packing", target, {
+        "percent": 100.0 if proc.returncode == 0 else min(current * 100 / max(source_size, 1), 99.9),
+        "current": current,
+        "total": source_size,
+        "stage_text": "ISO 生成完成，等待校验",
+    })
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
@@ -2331,10 +2435,21 @@ def copy_iso_to_partial(source: Path, tmp_path: Path, final_path: Path, total: i
             current_time = time.time()
             if current_time - last_update >= 2:
                 percent = 100.0 if total <= 0 else copied * 100 / total
-                update_active_progress("transfer", final_path, {"percent": min(percent, 99.9), "current": copied, "total": total})
+                update_active_progress("transfer", final_path, {
+                    "percent": min(percent, 99.9),
+                    "current": copied,
+                    "total": total,
+                    "stage_text": "正在复制 ISO 到 CD2 挂载目录",
+                })
                 last_update = current_time
         dst.flush()
         os.fsync(dst.fileno())
+    update_active_progress("transfer_verify", final_path, {
+        "percent": 100.0,
+        "current": copied,
+        "total": total,
+        "stage_text": "转存写入完成，正在校验目标文件大小",
+    })
     if tmp_path.stat().st_size != total:
         log(f"CloudDrive2转移大小校验失败: {tmp_path.stat().st_size} != {total}")
         return False
@@ -2346,7 +2461,13 @@ def finalize_cd2_transfer(target: Path, tmp_path: Path, final_path: Path, total:
     if final_path.stat().st_size != total:
         log(f"CloudDrive2最终文件大小校验失败: {final_path.stat().st_size} != {total}")
         return False
-    update_active_progress("transfer", final_path, {"percent": 100.0, "current": total, "total": total, "verified": True})
+    update_active_progress("transfer_verify", final_path, {
+        "percent": 100.0,
+        "current": total,
+        "total": total,
+        "verified": True,
+        "stage_text": "目标文件大小校验通过，正在收尾",
+    })
     target.unlink()
     log(f"CloudDrive2转移完成并校验通过，已删除输出目录临时ISO: {target}，目标文件保留: {final_path}")
     return True
@@ -2495,7 +2616,14 @@ def start_process_item_task(source: Path, target: Path, source_size: int, task_s
             "task_started_at": task_started_at,
             "pack_started_at": task_started_at,
             "status": "running",
-            "progress": {"phase": "packing", "percent": 0, "current": 0, "total": source_size, "updated_at": now()},
+            "progress": {
+                "phase": "packing",
+                "percent": 0,
+                "current": 0,
+                "total": source_size,
+                "stage_text": "准备生成 ISO 文件",
+                "updated_at": now(),
+            },
         }
         save_state_locked()
     return None
@@ -2542,7 +2670,14 @@ def mark_transfer_started(source: Path, target: Path, task_started_at: str) -> s
             "pack_finished_at": item["pack_finished_at"],
             "transfer_started_at": transfer_started_at,
             "status": "transferring",
-            "progress": {"phase": "transfer", "percent": 0, "current": 0, "total": target.stat().st_size if target.exists() else 0, "updated_at": now()},
+            "progress": {
+                "phase": "transfer",
+                "percent": 0,
+                "current": 0,
+                "total": target.stat().st_size if target.exists() else 0,
+                "stage_text": "封装完成，正在转存 ISO",
+                "updated_at": now(),
+            },
         }
         save_state_locked()
     return transfer_started_at
@@ -2698,12 +2833,30 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
             record_pack_failure(source, error)
             return
 
+        update_active_progress("finalize", target, {
+            "percent": 100.0,
+            "current": target.stat().st_size if target.exists() else partial.stat().st_size if partial.exists() else source_size,
+            "total": source_size,
+            "stage_text": "ISO 写入完成，正在移动到最终输出文件",
+        })
         partial.replace(target)
+        update_active_progress("verify", target, {
+            "percent": 100.0,
+            "current": target.stat().st_size if target.exists() else source_size,
+            "total": source_size,
+            "stage_text": "ISO 已生成，正在进行结构校验",
+        })
         if not validate_iso(target):
             log(f"ISO 验证失败，保留源文件: {target}")
             record_verify_failure(source)
             return
 
+        update_active_progress("finalize", target, {
+            "percent": 100.0,
+            "current": target.stat().st_size if target.exists() else source_size,
+            "total": source_size,
+            "stage_text": "ISO 校验通过，正在准备转存或完成归档",
+        })
         log(f"ISO 完成并验证通过: {target}")
         final_target = target
         if cfg.get("cd2_transfer_enabled"):
@@ -3022,7 +3175,118 @@ def infer_resolution_label(text: str) -> str:
     return "本地记录"
 
 
-def local_media_cards(history_items, limit: int = 8) -> list[Dict]:
+def local_media_poster_cache_key(source: str, name: str) -> str:
+    raw = f"{source}|{name}".encode("utf-8", errors="ignore")
+    return hashlib.sha1(raw).hexdigest()[:20]
+
+
+def local_media_tmdb_query(name: str) -> tuple[str, str]:
+    text = str(name or "").strip()
+    if not text:
+        return "", ""
+    try:
+        text = Path(text).stem
+    except Exception:
+        pass
+    text = re.sub(r"[\._]+", " ", text)
+    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", text)
+    year = year_match.group(1) if year_match else ""
+    if year_match:
+        text = text[:year_match.start()]
+    text = re.sub(r"[\[\(].*?[\]\)]", " ", text)
+    text = re.split(
+        r"\b(2160p|1080p|720p|uhd|bluray|blu-ray|remux|x264|x265|hevc|hdr10|dovi|dolby|vision|atmos|truehd|dts)\b",
+        text,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    text = re.sub(r"\s+", " ", text).strip(" -_.,")
+    return text or str(name or "").strip(), year
+
+
+def local_media_cached_poster(cache_key: str) -> Dict:
+    with lock:
+        return dict((state.get("local_media_posters") or {}).get(cache_key) or {})
+
+
+def prune_local_media_poster_cache_locked(limit: int = LOCAL_MEDIA_POSTER_CACHE_LIMIT) -> None:
+    cache = state.get("local_media_posters")
+    if not isinstance(cache, dict) or len(cache) <= limit:
+        return
+    kept = sorted(
+        cache.items(),
+        key=lambda pair: str((pair[1] or {}).get("updated_at") or ""),
+        reverse=True,
+    )[:limit]
+    state["local_media_posters"] = dict(kept)
+
+
+def store_local_media_poster(cache_key: str, payload: Dict) -> None:
+    with lock:
+        cache = state.setdefault("local_media_posters", {})
+        cache[cache_key] = payload
+        prune_local_media_poster_cache_locked()
+        save_state_locked()
+
+
+def apply_local_media_poster(card: Dict, payload: Dict) -> Dict:
+    if not payload:
+        return card
+    poster_url = str(payload.get("poster_url") or "")
+    if poster_url:
+        card["poster_path"] = poster_url
+        card["poster_url"] = poster_url
+    if payload.get("title_zh"):
+        card["title"] = str(payload.get("title_zh") or card.get("title") or "")
+    for key in ("tmdb_id", "tmdb_title", "tmdb_original_title", "poster_status"):
+        if payload.get(key):
+            card[key] = payload.get(key)
+    return card
+
+
+def enrich_local_media_card_with_tmdb(card: Dict, cfg: Optional[Dict]) -> Dict:
+    tmdb_cfg = tmdb_config_from_cfg(cfg or {})
+    if not tmdb_cfg.get("enabled") or not tmdb_cfg.get("api_key"):
+        card["poster_status"] = "TMDB 未配置"
+        return card
+
+    cache_key = local_media_poster_cache_key(str(card.get("source") or ""), str(card.get("raw_name") or ""))
+    cached = local_media_cached_poster(cache_key)
+    if cached:
+        return apply_local_media_poster(card, cached)
+
+    query, year = local_media_tmdb_query(str(card.get("raw_name") or card.get("title") or ""))
+    if not query:
+        card["poster_status"] = "TMDB 未匹配"
+        return card
+    try:
+        result = tmdb_search_movie(query, year, tmdb_config=tmdb_cfg)
+        tmdb_item = apply_tmdb_result({
+            "title": query,
+            "year": year,
+            "poster_url": "",
+            "poster_source": "",
+        }, result, tmdb_config=tmdb_cfg)
+        payload = {
+            "query": query,
+            "year": year,
+            "tmdb_id": tmdb_item.get("tmdb_id") or "",
+            "tmdb_title": tmdb_item.get("tmdb_title") or "",
+            "tmdb_original_title": tmdb_item.get("tmdb_original_title") or "",
+            "title_zh": tmdb_item.get("title_zh") or "",
+            "poster_url": tmdb_item.get("poster_url") or "",
+            "poster_source": tmdb_item.get("poster_source") or "",
+            "poster_status": tmdb_item.get("poster_status") or tmdb_item.get("tmdb_status") or "TMDB 未匹配",
+            "updated_at": now(),
+        }
+        store_local_media_poster(cache_key, payload)
+        return apply_local_media_poster(card, payload)
+    except Exception as exc:
+        card["poster_status"] = f"TMDB 查询失败: {exc}"
+        return card
+
+
+def local_media_cards(history_items, limit: int = 8, cfg: Optional[Dict] = None) -> list[Dict]:
     cards = []
     for source, item in history_items or []:
         status = (item or {}).get("status")
@@ -3046,11 +3310,14 @@ def local_media_cards(history_items, limit: int = 8) -> list[Dict]:
             "match_status": "ISO 归档完成" if status in {"done", "transfer_done"} else "待手动绑定 ID",
             "initial": (name[:1] or "I").upper(),
             "is_dv": has_dv,
-            "poster_path": None,  # 后续接 TMDB 后填充
+            "poster_path": "",
+            "poster_status": "等待 TMDB 海报",
         })
         if len(cards) >= limit:
             break
 
+    if cfg:
+        cards = [enrich_local_media_card_with_tmdb(card, cfg) for card in cards]
     return cards
 
 
@@ -3737,9 +4004,10 @@ def logout():
 
 @app.route("/")
 def index():
-    context = ui_state_context()
+    cfg = load_config()
+    context = ui_state_context(cfg)
     context["stats"] = dashboard_stats(context["history_items"])
-    context["cached_movies"] = local_media_cards(context["history_items"])
+    context["cached_movies"] = local_media_cards(context["history_items"], cfg=cfg)
     calendar_payload = release_calendar_payload()
     context["calendar_releases"] = calendar_payload["items"]
     context["calendar_source"] = calendar_payload
@@ -4100,12 +4368,7 @@ def api_directories():
 @app.route("/api/browse")
 def api_browse():
     cfg = load_config()
-    cd2_browser_root = resolve_cd2_browser_root(cfg)
-    roots = {
-        "watch": Path(cfg["watch_dir"]).expanduser(),
-        "output": Path(cfg["output_dir"]).expanduser(),
-        "cd2": cd2_browser_root,
-    }
+    roots = file_browser_roots_from_config(cfg)
     root_name = (request.args.get("root") or "watch").strip()
     root = roots.get(root_name)
     if not root:
@@ -4153,6 +4416,95 @@ def api_browse():
         "parent": str(parent) if parent else None,
         "entries": entries,
     })
+
+
+@app.route("/api/file-actions", methods=["POST"])
+def api_file_actions():
+    cfg = load_config()
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"copy", "move", "delete"}:
+        return jsonify({"ok": False, "message": "不支持的文件操作"}), 400
+    root_name = str(payload.get("root") or "watch").strip()
+    raw_paths = payload.get("paths") or []
+    if not isinstance(raw_paths, list) or not raw_paths:
+        return jsonify({"ok": False, "message": "请先选择文件或目录"}), 400
+    if len(raw_paths) > 50:
+        return jsonify({"ok": False, "message": "一次最多处理 50 项"}), 400
+
+    sources = []
+    try:
+        for raw_path in raw_paths:
+            source, _root = resolve_file_browser_path(cfg, root_name, str(raw_path or ""))
+            if not source.exists():
+                return jsonify({"ok": False, "message": f"路径不存在: {source}"}), 404
+            if source.resolve() == _root.resolve():
+                return jsonify({"ok": False, "message": "不能直接操作根目录"}), 400
+            sources.append(source)
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "message": f"路径无效: {exc}"}), 400
+
+    destination = None
+    if action in {"copy", "move"}:
+        destination_kind = str(payload.get("destination") or "").strip().lower()
+        if destination_kind == "watch":
+            destination = Path(cfg["watch_dir"]).expanduser()
+        elif destination_kind == "output":
+            destination = Path(cfg["output_dir"]).expanduser()
+        elif destination_kind == "custom":
+            custom_path = normalize_path_text(payload.get("destination_path") or "")
+            if not custom_path:
+                return jsonify({"ok": False, "message": "请填写目标目录"}), 400
+            destination = Path(custom_path).expanduser()
+        else:
+            return jsonify({"ok": False, "message": "请选择目标目录"}), 400
+        try:
+            destination = destination.resolve()
+        except Exception as exc:
+            return jsonify({"ok": False, "message": f"目标目录无效: {exc}"}), 400
+        for source in sources:
+            if source.resolve() == destination or path_in_root(destination, source.resolve()):
+                return jsonify({"ok": False, "message": "目标目录不能位于源目录内部"}), 400
+
+    if action == "delete":
+        confirm = str(payload.get("confirm") or "").strip()
+        if confirm != "DELETE":
+            return jsonify({"ok": False, "message": "删除操作需要确认"}), 400
+    if action == "move":
+        confirm = str(payload.get("confirm") or "").strip()
+        if confirm != "MOVE":
+            return jsonify({"ok": False, "message": "移动操作需要确认"}), 400
+
+    task_id = secrets.token_hex(8)
+    with file_operation_lock:
+        file_operation_tasks[task_id] = {
+            "id": task_id,
+            "ok": True,
+            "action": action,
+            "status": "queued",
+            "message": "已加入后台任务",
+            "total": len(sources),
+            "done": 0,
+            "created_at": now(),
+            "updated_at": now(),
+            "results": [],
+        }
+    threading.Thread(
+        target=run_file_operation_task,
+        args=(task_id, action, sources, destination),
+        daemon=True,
+    ).start()
+    return jsonify({"ok": True, "task_id": task_id, "task": file_operation_snapshot(task_id)})
+
+
+@app.route("/api/file-actions/<task_id>")
+def api_file_action_status(task_id: str):
+    task = file_operation_snapshot(task_id)
+    if not task:
+        return jsonify({"ok": False, "message": "任务不存在"}), 404
+    return jsonify({"ok": True, "task": task})
 
 
 if __name__ == "__main__":
