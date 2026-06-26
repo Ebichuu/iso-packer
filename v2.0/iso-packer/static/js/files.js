@@ -1,4 +1,5 @@
 (function () {
+  const DIRECTORY_ROOT = "@roots";
   const ROOT_LABELS = {
     watch: "本机监控",
     output: "本机输出",
@@ -21,6 +22,11 @@
     rootPath: "",
     selected: new Set(),
     operationTimer: null,
+    customDestination: "",
+    destinationAction: "copy",
+    destinationPath: DIRECTORY_ROOT,
+    destinationParent: null,
+    contextPath: "",
   };
 
   function helper() {
@@ -119,6 +125,13 @@
     if (!bar) return;
     const hasSelection = state.selected.size > 0;
     bar.classList.toggle("hidden", !hasSelection);
+    const destinationLabel = helper().qs("#file-custom-destination-label");
+    const destinationInput = helper().qs("#file-custom-destination");
+    if (destinationInput) destinationInput.value = state.customDestination;
+    if (destinationLabel) {
+      destinationLabel.textContent = state.customDestination || "未选择其他目录";
+      destinationLabel.title = state.customDestination || "";
+    }
     const inlineCount = helper().qs("#file-selected-count-inline");
     if (inlineCount) {
       inlineCount.textContent = `${state.selected.size} 项已选`;
@@ -287,29 +300,75 @@
     renderEntryList();
   }
 
-  function openProperties(path) {
+  function appendPropertyRow(body, label, value) {
+    const row = document.createElement("div");
+    row.className = "file-prop-row";
+    const key = document.createElement("span");
+    key.textContent = label;
+    const text = document.createElement("strong");
+    text.textContent = value || "-";
+    row.append(key, text);
+    body.appendChild(row);
+  }
+
+  function appendDiskUsage(body, disk) {
+    if (!disk) return;
+    const wrap = document.createElement("div");
+    wrap.className = "mt-3 rounded-xl border border-zinc-100 bg-zinc-50 p-3";
+    const title = document.createElement("div");
+    title.className = "mb-2 text-[11px] font-black text-zinc-700";
+    title.textContent = "空间使用";
+    const meta = document.createElement("div");
+    meta.className = "mb-2 flex justify-between gap-3 font-mono text-[10px] font-bold text-zinc-500";
+    const used = document.createElement("span");
+    used.textContent = `已用 ${helper().formatBytes(disk.used)}`;
+    const free = document.createElement("span");
+    free.textContent = `可用 ${helper().formatBytes(disk.free)}`;
+    const bar = document.createElement("div");
+    bar.className = "h-2 overflow-hidden rounded-full bg-zinc-200";
+    const fill = document.createElement("div");
+    fill.className = "h-full rounded-full bg-emerald-600";
+    const pct = disk.total ? Math.min(100, Math.max(0, (Number(disk.used || 0) / Number(disk.total || 1)) * 100)) : 0;
+    fill.style.width = `${pct.toFixed(1)}%`;
+    const total = document.createElement("div");
+    total.className = "mt-2 font-mono text-[10px] font-bold text-zinc-500";
+    total.textContent = `总共 ${helper().formatBytes(disk.total)}`;
+    meta.append(used, free);
+    bar.appendChild(fill);
+    wrap.append(title, meta, bar, total);
+    body.appendChild(wrap);
+  }
+
+  async function openProperties(path) {
     const entry = state.entries.find((item) => item.path === path);
-    if (!entry) return;
     const panel = helper().qs("#file-properties-panel");
     const body = helper().qs("#file-properties-body");
     if (!panel || !body) return;
-    body.innerHTML = "";
-    [
-      ["名称", entry.name || "-"],
-      ["路径", entry.path || "-"],
-      ["类型", entry.type === "dir" ? "目录" : "文件"],
-      ["属性", isDiscHint(entry) ? "原盘结构" : (entry.type === "dir" ? "普通目录" : "文件")],
-      ["大小", entry.type === "dir" ? "-" : helper().formatBytes(entry.size)],
-      ["修改时间", entry.mtime || "-"],
-      ["可读取", entry.readable ? "是" : "否"],
-    ].forEach(([label, value]) => {
-      const row = document.createElement("div");
-      row.className = "file-prop-row";
-      row.innerHTML = `<span>${label}</span><strong></strong>`;
-      row.querySelector("strong").textContent = value;
-      body.appendChild(row);
-    });
     panel.classList.remove("hidden");
+    helper().clearNode(body);
+    appendPropertyRow(body, "名称", entry?.name || path || "-");
+    appendPropertyRow(body, "状态", "正在读取属性...");
+    try {
+      const payload = await helper().fetchJson(`/api/file-properties?root=${encodeURIComponent(state.root)}&path=${encodeURIComponent(path)}`);
+      helper().clearNode(body);
+      appendPropertyRow(body, "名称", payload.name || "-");
+      appendPropertyRow(body, "类型", payload.type === "dir" ? "文件夹" : "文件");
+      appendPropertyRow(body, "大小", helper().formatBytes(payload.size));
+      if (payload.type === "dir") {
+        const count = `${payload.file_count || 0} 个文件 / ${payload.dir_count || 0} 个子目录${payload.partial ? "（部分目录不可读）" : ""}`;
+        appendPropertyRow(body, "内容", count);
+      }
+      appendPropertyRow(body, "修改时间", payload.mtime || "-");
+      appendPropertyRow(body, "创建时间", payload.ctime || "-");
+      appendPropertyRow(body, "访问时间", payload.atime || "-");
+      appendPropertyRow(body, "可读写", `${payload.readable ? "可读" : "不可读"} / ${payload.writable ? "可写" : "不可写"}`);
+      appendPropertyRow(body, "路径", payload.path || "-");
+      appendPropertyRow(body, "根目录", `${rootLabel(payload.root)} · ${payload.root_path || ""}`);
+      appendDiskUsage(body, payload.disk);
+    } catch (error) {
+      helper().clearNode(body);
+      appendPropertyRow(body, "属性读取失败", error.message || "无法读取文件属性");
+    }
   }
 
   function closeProperties() {
@@ -322,6 +381,113 @@
     node.textContent = message || "";
     node.classList.toggle("text-red-600", Boolean(isError));
     node.classList.toggle("text-zinc-500", !isError);
+  }
+
+  function closeDestinationPicker() {
+    const picker = helper().qs("#file-destination-picker");
+    if (picker) picker.classList.add("hidden");
+    document.body.classList.remove("has-modal");
+    const use = helper().qs("#file-destination-use");
+    if (use) {
+      use.dataset.confirming = "false";
+      use.textContent = state.destinationAction === "move" ? "移动到这里" : "复制到这里";
+    }
+  }
+
+  function updateDestinationSelection(path) {
+    state.customDestination = path || "";
+    const input = helper().qs("#file-custom-destination");
+    const label = helper().qs("#file-custom-destination-label");
+    if (input) input.value = state.customDestination;
+    if (label) {
+      label.textContent = state.customDestination || "未选择其他目录";
+      label.title = state.customDestination || "";
+    }
+  }
+
+  function renderDestinationMessage(message) {
+    const list = helper().qs("#file-destination-list");
+    if (!list) return;
+    list.replaceChildren(Object.assign(document.createElement("div"), {
+      className: "empty-state slim",
+      textContent: message,
+    }));
+  }
+
+  function renderDestinationEntries(payload) {
+    state.destinationPath = payload.path || DIRECTORY_ROOT;
+    state.destinationParent = payload.parent || null;
+    helper().setText(helper().qs("#file-destination-path"), payload.display_path || state.destinationPath);
+    helper().setText(helper().qs("#file-destination-selected"), state.destinationPath === DIRECTORY_ROOT ? "未选择" : state.destinationPath);
+    const up = helper().qs("#file-destination-up");
+    const use = helper().qs("#file-destination-use");
+    if (up) up.disabled = !state.destinationParent;
+    if (use) {
+      use.disabled = state.destinationPath === DIRECTORY_ROOT || state.destinationPath === "/";
+      use.textContent = state.destinationAction === "move" ? "移动到这里" : "复制到这里";
+      use.dataset.confirming = "false";
+    }
+    const list = helper().qs("#file-destination-list");
+    if (!list) return;
+    helper().clearNode(list);
+    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+    if (!entries.length) {
+      renderDestinationMessage("没有可进入的子目录。");
+      return;
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "grid gap-2";
+    entries.forEach((entry) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "file-destination-row";
+      row.dataset.dirPath = entry.path || "";
+      row.dataset.selected = entry.path === state.destinationPath ? "true" : "false";
+      row.disabled = entry.readable === false;
+
+      const kind = document.createElement("span");
+      kind.className = "file-kind";
+      kind.textContent = "DIR";
+      const main = document.createElement("span");
+      main.className = "file-destination-main";
+      const name = document.createElement("strong");
+      name.textContent = entry.name || entry.path || "未命名目录";
+      const path = document.createElement("small");
+      path.textContent = entry.path || "";
+      const statePill = document.createElement("span");
+      statePill.className = "soft-pill";
+      statePill.textContent = entry.readable === false ? "不可读" : "进入";
+      main.append(name, path);
+      row.append(kind, main, statePill);
+      wrap.appendChild(row);
+    });
+    list.appendChild(wrap);
+  }
+
+  async function loadDestinationDirectory(path) {
+    renderDestinationMessage("正在读取目录。");
+    try {
+      const targetPath = path || DIRECTORY_ROOT;
+      const payload = await helper().fetchJson(`/api/directories?scope=file_destination&path=${encodeURIComponent(targetPath)}`);
+      renderDestinationEntries(payload);
+    } catch (error) {
+      renderDestinationMessage(error.message || "目录读取失败。");
+    }
+  }
+
+  function openDestinationPicker(action) {
+    if (!selectedEntries().length) {
+      helper().notify("请先选择文件或目录", true);
+      return;
+    }
+    state.destinationAction = action || "copy";
+    const picker = helper().qs("#file-destination-picker");
+    if (!picker) return;
+    helper().setText(helper().qs("#file-destination-title"), state.destinationAction === "move" ? "移动到..." : "复制到...");
+    helper().setText(helper().qs("#file-destination-status"), `${state.selected.size} 项已选`);
+    picker.classList.remove("hidden");
+    document.body.classList.add("has-modal");
+    loadDestinationDirectory(state.customDestination || DIRECTORY_ROOT);
   }
 
   async function pollOperation(taskId) {
@@ -343,7 +509,7 @@
     }
   }
 
-  async function submitFileAction(action, destination) {
+  async function submitFileAction(action, destination, customDestination) {
     const entries = selectedEntries();
     if (!entries.length) {
       helper().notify("请先选择文件或目录", true);
@@ -357,9 +523,9 @@
     if (action === "copy" || action === "move") {
       payload.destination = destination;
       if (destination === "custom") {
-        const custom = helper().qs("#file-custom-destination")?.value?.trim() || "";
+        const custom = (customDestination || state.customDestination || helper().qs("#file-custom-destination")?.value || "").trim();
         if (!custom) {
-          helper().notify("请先填写其他目录路径", true);
+          helper().notify("请先选择其他目录", true);
           return;
         }
         payload.destination_path = custom;
@@ -386,12 +552,95 @@
     }
   }
 
+  function hideContextMenu() {
+    const menu = helper().qs("#file-context-menu");
+    if (!menu) return;
+    menu.classList.add("hidden");
+    helper().qsa("[data-context-action]", menu).forEach((item) => {
+      item.dataset.confirming = "false";
+      if (item.dataset.originalText) item.textContent = item.dataset.originalText;
+    });
+  }
+
+  function prepareContextSelection(path) {
+    if (!path) return;
+    if (!state.selected.has(path)) {
+      state.selected.clear();
+      state.selected.add(path);
+      renderEntryList();
+    }
+    state.contextPath = path;
+  }
+
+  function showContextMenu(event, path) {
+    const menu = helper().qs("#file-context-menu");
+    if (!menu || !path) return;
+    prepareContextSelection(path);
+    menu.classList.remove("hidden");
+    const margin = 8;
+    const rect = menu.getBoundingClientRect();
+    const left = Math.min(event.clientX, window.innerWidth - rect.width - margin);
+    const top = Math.min(event.clientY, window.innerHeight - rect.height - margin);
+    menu.style.left = `${Math.max(margin, left)}px`;
+    menu.style.top = `${Math.max(margin, top)}px`;
+  }
+
+  function handleContextAction(button) {
+    const action = button.dataset.contextAction || "";
+    if (action === "select") {
+      toggleSelected(state.contextPath, !state.selected.has(state.contextPath));
+      hideContextMenu();
+      return;
+    }
+    if (action === "properties") {
+      openProperties(state.contextPath);
+      hideContextMenu();
+      return;
+    }
+    if (action === "copy-watch") {
+      hideContextMenu();
+      submitFileAction("copy", "watch");
+      return;
+    }
+    if (action === "copy-output") {
+      hideContextMenu();
+      submitFileAction("copy", "output");
+      return;
+    }
+    if (action === "copy-custom") {
+      hideContextMenu();
+      openDestinationPicker("copy");
+      return;
+    }
+    if (action === "move-custom") {
+      hideContextMenu();
+      openDestinationPicker("move");
+      return;
+    }
+    if (action === "delete") {
+      if (button.dataset.confirming !== "true") {
+        button.dataset.confirming = "true";
+        button.dataset.originalText = button.dataset.originalText || button.textContent;
+        button.textContent = "再次点击确认删除";
+        setOperationStatus("删除会改变源目录，请再次点击确认。", true);
+        window.setTimeout(() => {
+          button.dataset.confirming = "false";
+          button.textContent = button.dataset.originalText || "删除";
+        }, 3500);
+        return;
+      }
+      hideContextMenu();
+      submitFileAction("delete", "");
+    }
+  }
+
   function bindEvents() {
     helper().qs(".root-switcher")?.addEventListener("click", (event) => {
       const button = event.target.closest("[data-root]");
       if (button) switchRoot(button.dataset.root);
     });
     helper().qs("#file-browser-list")?.addEventListener("click", (event) => {
+      hideContextMenu();
       const checkbox = event.target.closest("[data-select-path]");
       if (checkbox) {
         toggleSelected(checkbox.dataset.selectPath, checkbox.checked);
@@ -412,6 +661,12 @@
         loadDirectory(row.dataset.rowOpenPath);
       }
     });
+    helper().qs("#file-browser-list")?.addEventListener("contextmenu", (event) => {
+      const row = event.target.closest("[data-path]");
+      if (!row || !row.dataset.path) return;
+      event.preventDefault();
+      showContextMenu(event, row.dataset.path);
+    });
     helper().qs("#file-browser-list")?.addEventListener("keydown", (event) => {
       if (!["Enter", " "].includes(event.key)) return;
       const open = event.target.closest("[data-open-path]");
@@ -426,15 +681,19 @@
     helper().qs("#file-select-all")?.addEventListener("change", (event) => {
       toggleAllVisible(event.target.checked);
     });
+    helper().qs("#file-pick-destination")?.addEventListener("click", () => openDestinationPicker("copy"));
     helper().qs("#file-operation-bar")?.addEventListener("click", (event) => {
       const button = event.target.closest("[data-file-action]");
       if (!button || button.disabled) return;
-      if (["delete", "move"].includes(button.dataset.fileAction) && button.dataset.confirming !== "true") {
+      if (button.dataset.destination === "custom" && ["copy", "move"].includes(button.dataset.fileAction)) {
+        openDestinationPicker(button.dataset.fileAction);
+        return;
+      }
+      if (button.dataset.fileAction === "delete" && button.dataset.confirming !== "true") {
         button.dataset.confirming = "true";
         const oldText = button.textContent;
-        const actionText = button.dataset.fileAction === "delete" ? "删除" : "移动";
-        button.textContent = `再次点击确认${actionText}`;
-        setOperationStatus(`${actionText}会改变源目录，请再次点击按钮确认。`, true);
+        button.textContent = "再次点击确认删除";
+        setOperationStatus("删除会改变源目录，请再次点击按钮确认。", true);
         window.setTimeout(() => {
           button.dataset.confirming = "false";
           button.textContent = oldText;
@@ -442,6 +701,41 @@
         return;
       }
       submitFileAction(button.dataset.fileAction, button.dataset.destination || "");
+    });
+    helper().qs("#file-context-menu")?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-context-action]");
+      if (button) handleContextAction(button);
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest("#file-context-menu")) hideContextMenu();
+    });
+    helper().qs("#file-destination-list")?.addEventListener("click", (event) => {
+      const row = event.target.closest("[data-dir-path]");
+      if (row && !row.disabled) loadDestinationDirectory(row.dataset.dirPath);
+    });
+    helper().qs("#file-destination-up")?.addEventListener("click", () => {
+      if (state.destinationParent) loadDestinationDirectory(state.destinationParent);
+    });
+    helper().qs("#file-destination-roots")?.addEventListener("click", () => loadDestinationDirectory(DIRECTORY_ROOT));
+    helper().qs("#file-destination-close")?.addEventListener("click", closeDestinationPicker);
+    helper().qs("#file-destination-cancel")?.addEventListener("click", closeDestinationPicker);
+    helper().qs("#file-destination-picker")?.addEventListener("click", (event) => {
+      if (event.target.id === "file-destination-picker") closeDestinationPicker();
+    });
+    helper().qs("#file-destination-use")?.addEventListener("click", (event) => {
+      const button = event.currentTarget;
+      if (!state.destinationPath || state.destinationPath === DIRECTORY_ROOT || state.destinationPath === "/") return;
+      if (state.destinationAction === "move" && button.dataset.confirming !== "true") {
+        button.dataset.confirming = "true";
+        button.textContent = "再次点击确认移动";
+        setOperationStatus("移动会改变源目录，请再次点击确认。", true);
+        return;
+      }
+      updateDestinationSelection(state.destinationPath);
+      const action = state.destinationAction;
+      const destination = state.destinationPath;
+      closeDestinationPicker();
+      submitFileAction(action, "custom", destination);
     });
     helper().qs("#file-properties-close")?.addEventListener("click", closeProperties);
     helper().qs("#file-search")?.addEventListener("input", (event) => {

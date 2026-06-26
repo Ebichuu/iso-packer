@@ -127,6 +127,7 @@ DIRECTORY_PICKER_ROOT = "@roots"
 DIRECTORY_PICKER_SCOPES = {
     "watch_dir": ("watch_dir",),
     "output_dir": ("output_dir",),
+    "file_destination": ("watch_dir", "output_dir", "cd2_mount_root"),
     "cd2_mount_root": ("cd2_mount_root",),
     "cd2_target_dir": ("cd2_mount_root", "cd2_target_dir"),
     "cd2_local_pull_dir": ("watch_dir", "cd2_local_pull_dir"),
@@ -184,6 +185,75 @@ def copy_file_operation_source(source: Path, target: Path) -> None:
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
+
+
+def directory_size_summary(path: Path) -> Dict:
+    total = 0
+    file_count = 0
+    dir_count = 0
+    partial = False
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        stat = entry.stat(follow_symlinks=False)
+                        if entry.is_dir(follow_symlinks=False):
+                            dir_count += 1
+                            stack.append(Path(entry.path))
+                        else:
+                            file_count += 1
+                            total += stat.st_size
+                    except OSError:
+                        partial = True
+        except OSError:
+            partial = True
+    return {
+        "size": total,
+        "file_count": file_count,
+        "dir_count": dir_count,
+        "partial": partial,
+    }
+
+
+def file_property_payload(path: Path, root_name: str, root: Path) -> Dict:
+    stat = path.stat()
+    is_dir = path.is_dir()
+    summary = directory_size_summary(path) if is_dir else {
+        "size": stat.st_size,
+        "file_count": 1,
+        "dir_count": 0,
+        "partial": False,
+    }
+    try:
+        usage = shutil.disk_usage(path if is_dir else path.parent)
+        disk = {
+            "total": usage.total,
+            "used": usage.used,
+            "free": usage.free,
+        }
+    except OSError:
+        disk = None
+    return {
+        "ok": True,
+        "root": root_name,
+        "root_path": str(root),
+        "name": path.name or str(path),
+        "path": str(path),
+        "type": "dir" if is_dir else "file",
+        "size": summary["size"],
+        "file_count": summary["file_count"],
+        "dir_count": summary["dir_count"],
+        "partial": summary["partial"],
+        "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        "ctime": datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S"),
+        "atime": datetime.fromtimestamp(stat.st_atime).strftime("%Y-%m-%d %H:%M:%S"),
+        "readable": os.access(path, os.R_OK | (os.X_OK if is_dir else 0)),
+        "writable": os.access(path, os.W_OK),
+        "disk": disk,
+    }
 
 
 def run_file_operation_task(task_id: str, action: str, sources: list[Path], destination: Optional[Path]) -> None:
@@ -4416,6 +4486,27 @@ def api_browse():
         "parent": str(parent) if parent else None,
         "entries": entries,
     })
+
+
+@app.route("/api/file-properties")
+def api_file_properties():
+    cfg = load_config()
+    root_name = str(request.args.get("root") or "watch").strip()
+    raw_path = str(request.args.get("path") or "").strip()
+    if not raw_path:
+        return jsonify({"ok": False, "message": "请选择文件或目录"}), 400
+    try:
+        path, root = resolve_file_browser_path(cfg, root_name, raw_path)
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "message": f"路径无效: {exc}"}), 400
+    if not path.exists():
+        return jsonify({"ok": False, "message": "路径不存在"}), 404
+    try:
+        return jsonify(file_property_payload(path, root_name, root))
+    except OSError as exc:
+        return jsonify({"ok": False, "message": f"无法读取属性: {exc}"}), 400
 
 
 @app.route("/api/file-actions", methods=["POST"])

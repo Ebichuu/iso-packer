@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,6 +170,9 @@ def verify_static_contracts() -> None:
     require("file-operation-bar" in files_html, "files.html missing batch operation bar")
     require('data-file-action="copy"' in files_html, "files.html missing copy action")
     require("file-custom-destination" in files_html, "files.html missing custom destination input")
+    require("file-context-menu" in files_html, "files.html missing context menu")
+    require("file-destination-picker" in files_html, "files.html missing destination picker")
+    require("file-destination-use" in files_html, "files.html missing destination picker submit")
     require("修改时间" in files_html, "files.html missing modified-time column")
     file_markers = [
         'id="file-select-all"',
@@ -177,6 +181,8 @@ def verify_static_contracts() -> None:
         "复制到监控目录",
         "修改时间",
         'id="file-properties-panel"',
+        'id="file-context-menu"',
+        'id="file-destination-picker"',
     ]
     for marker in file_markers:
         require(marker in files_html, f"files.html missing {marker}")
@@ -314,7 +320,13 @@ def verify_static_contracts() -> None:
     require("row.dataset.rowOpenPath" in files_js, "files.js should open directories from row clicks")
     require("open.textContent" not in files_js, "files.js should not render a separate enter button")
     require("data-open-path" not in files_html, "files.html should not require an enter button column")
+    require("/api/file-properties" in files_js, "files.js should fetch live file properties")
+    require("contextmenu" in files_js, "files.js missing row context menu binding")
+    require("openDestinationPicker" in files_js, "files.js missing destination picker flow")
+    require("file_destination" in files_js, "files.js should use scoped destination picker")
     app_py = read_text(ROOT / "app.py")
+    require("/api/file-properties" in app_py, "app.py missing file properties endpoint")
+    require('"file_destination"' in app_py, "app.py missing file operation destination picker scope")
     require("VERIFY" in shared_js, "shared.js should expose verify badge state")
     require('"phase": "verify"' in app_py or 'update_active_progress("verify"' in app_py,
             "app.py should mark ISO verify phase")
@@ -785,6 +797,13 @@ def run_smoke(keep: bool = False) -> Path:
         source_dir.mkdir(parents=True, exist_ok=True)
         (source_dir / "BDMV").mkdir(exist_ok=True)
         (source_dir / "BDMV" / "index.bdmv").write_text("smoke", encoding="utf-8")
+        response = client.get(f"/api/file-properties?root=cd2&path={quote(str(source_dir))}")
+        require(response.status_code == 200, f"file properties returned {response.status_code}: {response.get_data(as_text=True)}")
+        prop_payload = response.get_json()
+        require(prop_payload and prop_payload.get("ok") is True, f"file properties not ok: {prop_payload}")
+        require(prop_payload.get("type") == "dir", f"file properties should describe folder: {prop_payload}")
+        require((prop_payload.get("size") or 0) >= 5, f"file properties should include folder size: {prop_payload}")
+        require((prop_payload.get("file_count") or 0) >= 1, f"file properties should include file count: {prop_payload}")
         response = client.post(
             "/api/file-actions",
             json={
