@@ -57,8 +57,11 @@ const IsoPacker = (() => {
     for (const [source, item] of Object.entries(items || {})) {
       const status = item && item.status;
       if (!waitingStatuses.has(status)) continue;
-      const task = item.cd2_source_task || {};
+      const task = status === "waiting_cd2_upload"
+        ? (item.cd2_upload || {})
+        : (item.cd2_source_task || {});
       const progress = Number(task.percent ?? item.progress ?? 0);
+      const uploadText = task.human || task.summary || task.status || "";
       return {
         source_path: source || item.source || "--",
         output_iso: item.target || item.output_iso || "--",
@@ -66,7 +69,7 @@ const IsoPacker = (() => {
         progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0,
         status,
         phase: status,
-        stage_text: item.error || item.status_label || status,
+        stage_text: uploadText || item.error || item.status_label || status,
         current: task.current || task.current_bytes || item.last_size || 0,
         total: task.total || task.total_bytes || item.size || 0
       };
@@ -149,11 +152,14 @@ function startSerializedSystemLoop() {
         if (statusData.current_job) {
           const phase = String(statusData.current_job.phase || statusData.current_job.status || "").toLowerCase();
           const isWaiting = phase.startsWith("waiting") || phase === "receiving";
+          const isUpload = phase === "waiting_cd2_upload";
           const isTransfer = phase === "transfer" || phase === "transferring";
           const isVerify = phase === "verify" || phase === "verifying" || phase === "validating" || phase === "checking" || phase === "transfer_verify";
           const isFinalize = phase === "finalize" || phase === "finalizing" || phase === "refresh_cd2_dir" || phase === "refreshing_cd2_dir";
-          globalBadge.innerText = isWaiting ? "WAITING" : isTransfer ? "TRANSFER" : isVerify ? "VERIFY" : isFinalize ? "FINAL" : "PACKING";
-          globalBadge.className = isWaiting
+          globalBadge.innerText = isUpload ? "UPLOAD" : isWaiting ? "WAITING" : isTransfer ? "TRANSFER" : isVerify ? "VERIFY" : isFinalize ? "FINAL" : "PACKING";
+          globalBadge.className = isUpload
+            ? "ml-auto bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse"
+            : isWaiting
             ? "ml-auto bg-amber-50 text-amber-700 border border-amber-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse"
             : isTransfer
               ? "ml-auto bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9px] font-extrabold px-2 py-0.5 rounded-full animate-pulse"

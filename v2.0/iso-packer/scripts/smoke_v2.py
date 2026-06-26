@@ -309,6 +309,8 @@ def verify_static_contracts() -> None:
     require("正在校验转存结果" in workspace_js, "workspace.js missing transfer verify status copy")
     require("下一步" in workspace_html, "workspace should expose next-step copy")
     require("等待 CD2 拉取完成" in workspace_js, "workspace.js missing cd2 waiting status copy")
+    require("正在 CD2 上传云端" in workspace_js, "workspace.js missing cd2 upload status copy")
+    require("CD2 上传中" in workspace_js, "workspace.js missing cd2 upload output row copy")
     require("pipeline-primary-status" in workspace_js, "workspace.js should update the primary status title")
     require("renderOutputQueue" in workspace_js, "workspace.js missing output queue renderer")
     require("renderOutputQueueV2" in workspace_js, "workspace.js should use the readable output queue renderer")
@@ -321,6 +323,10 @@ def verify_static_contracts() -> None:
     require("本地测试禁用拉取" in workspace_js, "workspace.js missing local pull guard label")
 
     shared_js = read_text(static_js / "shared.js")
+    require("waiting_cd2_upload" in shared_js, "shared.js should treat cd2 upload waits as active jobs")
+    require("UPLOAD" in shared_js, "shared.js should expose an upload global badge")
+    index_js = read_text(static_js / "index.js")
+    require("CD2 上传云端中" in index_js, "index.js should show cloud upload status on home")
     files_js = read_text(static_js / "files.js")
     require("row.dataset.rowOpenPath" in files_js, "files.js should open directories from row clicks")
     require("open.textContent" not in files_js, "files.js should not render a separate enter button")
@@ -654,6 +660,60 @@ def verify_status_payload(client) -> None:
     require(response.content_length is None or response.content_length < 65536, "status payload is too large")
 
 
+def verify_cd2_upload_wait_status(appmod, client, data_dir: Path) -> None:
+    target = str(data_dir / "cd2-target" / "Smoke Movie.iso")
+    source = str(data_dir / "watch" / "Smoke Movie")
+    upload = {
+        "path": target,
+        "status": "传输中",
+        "current": 25 * 1024 * 1024,
+        "total": 100 * 1024 * 1024,
+        "percent": 25.0,
+        "human": "25.0 MB / 100.0 MB",
+        "summary": "CD2 上传中",
+    }
+    original_fetch = appmod.fetch_cd2_uploads
+    try:
+        appmod.fetch_cd2_uploads = lambda cfg: (
+            {appmod.normalize_upload_path(target): upload},
+            {
+                "connected": True,
+                "human": "CD2 mock upload ok",
+                "last_error": "",
+                "upload_count": 1,
+                "download_count": 0,
+                "copy_task_count": 0,
+                "uploads": [upload],
+                "downloads": [],
+                "copy_tasks": [],
+            },
+        )
+        with appmod.lock:
+            appmod.state["items"][source] = {
+                "status": "waiting_cd2_upload",
+                "target": target,
+                "size": upload["total"],
+                "last_size": upload["total"],
+                "pack_iso": True,
+                "first_seen": appmod.now(),
+                "transfer_finished_at": appmod.now(),
+            }
+            appmod.save_state_locked()
+        response = client.get("/api/status")
+        require(response.status_code == 200, f"upload wait status returned {response.status_code}")
+        payload = response.get_json()
+        item = (payload.get("state", {}).get("items") or {}).get(source) or {}
+        require(item.get("status") == "waiting_cd2_upload", f"upload wait item status mismatch: {item}")
+        attached = item.get("cd2_upload") or {}
+        require(attached.get("percent") == 25.0, f"upload progress was not attached: {attached}")
+        require((payload.get("stats") or {}).get("active", 0) >= 1, "upload wait should count as active")
+    finally:
+        appmod.fetch_cd2_uploads = original_fetch
+        with appmod.lock:
+            appmod.state.get("items", {}).pop(source, None)
+            appmod.save_state_locked()
+
+
 def verify_status_poll_guard(client) -> None:
     previous = os.environ.get("ISO_PACKER_DISABLE_CD2_STATUS_POLL")
     try:
@@ -796,6 +856,7 @@ def run_smoke(keep: bool = False) -> Path:
 
         save_test_settings(client, data_dir)
         verify_status_payload(client)
+        verify_cd2_upload_wait_status(appmod, client, data_dir)
         verify_status_poll_guard(client)
         verify_release_calendar_refresh(appmod, client)
 

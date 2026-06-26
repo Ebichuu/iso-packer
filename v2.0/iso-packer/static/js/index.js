@@ -60,8 +60,10 @@
         if (job) {
             const source = job.source_path || job.source || '当前任务';
             const progress = Number(job.progress || 0);
+            const phase = String(job.phase || job.status || '').toLowerCase();
+            const label = phase === 'waiting_cd2_upload' ? 'CD2 上传云端中' : (job.stage_text || '封装执行中');
             const extra = activeFileOps > 0 ? ` · 另有 ${activeFileOps} 个本地文件操作任务` : '';
-            workerNote.textContent = `${job.stage_text || '封装执行中'} · ${Math.round(progress)}% · ${source}${extra}`;
+            workerNote.textContent = `${label} · ${Math.round(progress)}% · ${source}${extra}`;
             workerNote.title = workerNote.textContent;
         } else if (activeFileOps > 0) {
             workerNote.textContent = `${activeFileOps} 个本地文件操作任务正在执行`;

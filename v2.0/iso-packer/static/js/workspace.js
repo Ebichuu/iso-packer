@@ -105,6 +105,16 @@
         next: "拉取完成后自动进入封装队列"
       };
     }
+    if (phase === "waiting_cd2_upload") {
+      return {
+        tone: "emerald",
+        kicker: "CD2 上传",
+        title: "正在 CD2 上传云端",
+        detail: job.stage_text || "ISO 已写入 CD2 挂载目录，CloudDrive2 正在上传到云端。",
+        meta: "上传云端",
+        next: "上传队列完成后会标记为已交付"
+      };
+    }
     if (phase === "waiting_partial" || phase === "receiving" || phase === "waiting_stable") {
       return {
         tone: "amber",
@@ -271,6 +281,9 @@
     if (phase === "transfer_verify") {
       return { label: "转存校验", badge: "border-amber-200 bg-amber-50 text-amber-700", hint: "目标文件已写入，正在确认大小和收尾状态。" };
     }
+    if (phase === "waiting_cd2_upload") {
+      return { label: "CD2 上传中", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", hint: item.stage_text || "ISO 已写入 CD2 挂载目录，正在由 CloudDrive2 上传云端。" };
+    }
     if (phase === "verify" || phase === "verifying" || phase === "validating" || phase === "checking") {
       return { label: "ISO 校验", badge: "border-amber-200 bg-amber-50 text-amber-700", hint: "ISO 已写完，正在确认结构完整。" };
     }
@@ -351,17 +364,19 @@
     Object.entries(items).forEach(([source, item]) => {
       if (!item || seen.has(source)) return;
       const phase = String(item.status || "").toLowerCase();
-      const hasOutput = item.target || item.output_target || item.original_target || phase === "done" || phase === "transfer_done" || phase.includes("transfer") || phase.includes("verify");
+      const hasOutput = item.target || item.output_target || item.original_target || phase === "done" || phase === "transfer_done" || phase === "waiting_cd2_upload" || phase.includes("transfer") || phase.includes("verify");
       if (!hasOutput) return;
+      const upload = item.cd2_upload || {};
+      const uploadProgress = Number(upload.percent ?? item.progress ?? 0);
       rows.push({
         name: source.split(/[\\/]/).filter(Boolean).pop() || item.name || "ISO 任务",
         source,
         output_iso: itemOutputPath(item),
         phase,
-        progress: Number(item.progress || 0),
-        current: item.last_size || item.size || 0,
-        total: item.size || item.last_size || 0,
-        stage_text: item.status_label || item.error || "",
+        progress: Number.isFinite(uploadProgress) ? uploadProgress : Number(item.progress || 0),
+        current: upload.current || upload.current_bytes || item.last_size || item.size || 0,
+        total: upload.total || upload.total_bytes || item.size || item.last_size || 0,
+        stage_text: upload.human || upload.summary || item.status_label || item.error || "",
         error: item.error || item.last_error || "",
         issue_text: item.issue_text || "",
         finished_at: item.finished_at || item.done_at || item.updated_at || item.first_seen || ""
