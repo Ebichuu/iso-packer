@@ -44,7 +44,7 @@ from core import (
     seconds_between,
     status_label,
 )
-from release_calendar_fetcher import apply_tmdb_result, refresh_release_calendar_cache, tmdb_get_json, tmdb_search_movie
+from release_calendar_fetcher import apply_tmdb_result, refresh_release_calendar_cache, tmdb_get_json, tmdb_search_movie, tmdb_settings
 
 try:
     from clouddrive2_client import CloudDriveClient
@@ -699,11 +699,23 @@ def apply_tmdb_form(cfg: Dict, form) -> Dict:
 
 def tmdb_config_from_cfg(cfg: Dict) -> Dict:
     cfg = cfg or {}
-    return {
-        "enabled": bool(cfg.get("tmdb_api_enabled")),
-        "api_key": str(cfg.get("tmdb_api_token") or "").strip(),
+    api_key = str(cfg.get("tmdb_api_token") or "").strip()
+    bearer_token = str(cfg.get("tmdb_bearer_token") or "").strip()
+    env_api_key = str(os.environ.get("TMDB_API_KEY") or "").strip()
+    env_bearer_token = str(os.environ.get("TMDB_BEARER_TOKEN") or "").strip()
+    normalized = tmdb_settings({
+        "enabled": bool(cfg.get("tmdb_api_enabled") or env_api_key or env_bearer_token),
+        "api_key": api_key or env_api_key,
+        "bearer_token": bearer_token or env_bearer_token,
         "api_domain": normalize_tmdb_domain(cfg.get("tmdb_api_domain"), "api.themoviedb.org"),
         "image_domain": normalize_tmdb_domain(cfg.get("tmdb_image_domain"), "image.tmdb.org"),
+    })
+    return {
+        "enabled": bool(normalized.get("enabled")),
+        "api_key": str(normalized.get("api_key") or "").strip(),
+        "bearer_token": str(normalized.get("bearer_token") or "").strip(),
+        "api_domain": str(normalized.get("api_base") or "https://api.themoviedb.org").strip(),
+        "image_domain": str(normalized.get("image_base") or "https://image.tmdb.org").strip(),
     }
 
 
@@ -3316,7 +3328,7 @@ def apply_local_media_poster(card: Dict, payload: Dict) -> Dict:
 
 def enrich_local_media_card_with_tmdb(card: Dict, cfg: Optional[Dict]) -> Dict:
     tmdb_cfg = tmdb_config_from_cfg(cfg or {})
-    if not tmdb_cfg.get("enabled") or not tmdb_cfg.get("api_key"):
+    if not tmdb_cfg.get("enabled") or not (tmdb_cfg.get("api_key") or tmdb_cfg.get("bearer_token")):
         card["poster_status"] = "TMDB 未配置"
         return card
 

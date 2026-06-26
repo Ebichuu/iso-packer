@@ -211,6 +211,8 @@ def verify_static_contracts() -> None:
         'name="tmdb_image_domain"',
         'name="tmdb_api_token"',
         "data-tmdb-test",
+        "测试不会保存",
+        "首页资产海报",
         "settings-group",
         "CD2 设置",
         "系统设置",
@@ -458,6 +460,7 @@ def verify_tmdb_enrichment_contract() -> None:
 
 def verify_local_media_poster_contract(appmod) -> None:
     original_search = appmod.tmdb_search_movie
+    original_env_key = os.environ.get("TMDB_API_KEY")
 
     def fake_search(title: str, year: str = "", **_kwargs):
         require(title == "Charade", f"local media TMDB query drifted: {title}")
@@ -489,8 +492,30 @@ def verify_local_media_poster_contract(appmod) -> None:
         require(cards and cards[0].get("poster_path", "").endswith("/charade.jpg"), "local asset poster was not filled")
         require(cards[0].get("title") == "谜中谜", "local asset Chinese title was not applied")
         require(cards[0].get("poster_status") == "TMDB 海报", "local asset poster status was not cached")
+
+        with appmod.lock:
+            appmod.state["local_media_posters"] = {}
+        cfg_without_saved_token = appmod.DEFAULT_CONFIG.copy()
+        cfg_without_saved_token.update({
+            "tmdb_api_enabled": False,
+            "tmdb_api_token": "",
+        })
+        os.environ["TMDB_API_KEY"] = "smoke-env-key"
+        env_cards = appmod.local_media_cards([
+            ("/watch/Charade.1963.2160p.UHD", {
+                "status": "done",
+                "last_size": 1024,
+                "finished_at": "2026-06-26 10:00:00",
+                "pack_iso": True,
+            })
+        ], cfg=cfg_without_saved_token)
+        require(env_cards and env_cards[0].get("poster_path", "").endswith("/charade.jpg"), "local asset poster should use TMDB env fallback")
     finally:
         appmod.tmdb_search_movie = original_search
+        if original_env_key is None:
+            os.environ.pop("TMDB_API_KEY", None)
+        else:
+            os.environ["TMDB_API_KEY"] = original_env_key
 
 
 def patch_cd2(appmod) -> None:

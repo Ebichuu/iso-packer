@@ -87,14 +87,15 @@
       const originalText = tmdbTestButton.textContent;
       tmdbTestButton.disabled = true;
       tmdbTestButton.textContent = "正在测试...";
-      showTmdbTestResult("正在使用当前表单配置测试 TMDB。", false);
+      showTmdbTestResult("正在使用当前表单配置测试 TMDB；测试不会保存配置。", false);
       try {
         const payload = await helper().fetchJson("/api/tmdb/test", {
           method: "POST",
           body: new FormData(form),
         });
         const sizes = Array.isArray(payload.poster_sizes) ? payload.poster_sizes.slice(0, 3).join(" / ") : "";
-        showTmdbTestResult(sizes ? `${payload.message || "TMDB 连接正常"} · 海报尺寸 ${sizes}` : (payload.message || "TMDB 连接正常"), false);
+        const savedHint = "测试通过，点“安全保存配置”后首页资产海报才会生效";
+        showTmdbTestResult(sizes ? `${payload.message || "TMDB 连接正常"} · 海报尺寸 ${sizes} · ${savedHint}` : `${payload.message || "TMDB 连接正常"} · ${savedHint}`, false);
       } catch (error) {
         showTmdbTestResult(error.message || "TMDB 测试失败，请检查域名和 API Token。", true);
       } finally {
