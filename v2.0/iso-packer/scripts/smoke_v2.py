@@ -184,6 +184,7 @@ def verify_static_contracts() -> None:
     require("file-browser-list" in files_html, "files.html missing browser list")
     require("data-root=" in files_html, "files.html missing root switch hooks")
     require("data-root-path=" in files_html, "files.html missing visible root path hooks")
+    require('.root-switcher [data-root][data-active="true"] { background: #f4f4f5' in files_html, "active root switch should use neutral gray background")
     require("file-operation-bar" in files_html, "files.html missing batch operation bar")
     require('data-file-action="copy"' in files_html, "files.html missing copy action")
     require("file-custom-destination" in files_html, "files.html missing custom destination input")
