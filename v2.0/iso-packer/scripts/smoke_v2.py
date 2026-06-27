@@ -194,6 +194,10 @@ def verify_static_contracts() -> None:
     require("file-page-size" in files_html, "files.html missing page-size control")
     require("file-page-go" in files_html, "files.html missing page jump control")
     require("file-browser-shell" in files_html, "files.html missing embedded browser shell")
+    require("file-rename-dialog" in files_html, "files.html missing rename dialog")
+    require('data-context-action="rename"' in files_html, "files.html missing rename context action")
+    require("拉取到监控目录" not in files_html, "files.html should use copy-to-monitor wording")
+    require(".file-row[data-selected=\"true\"] { background-color: #f4f4f5; }" in files_html, "selected file rows should use neutral gray background")
     require("修改时间" in files_html, "files.html missing modified-time column")
     require("大小" in files_html and files_html.index("大小") < files_html.index("修改时间"), "files.html should place size before modified time")
     require("#file-properties-panel { position: sticky" in files_html, "file properties should be embedded, not fixed overlay")
@@ -216,6 +220,8 @@ def verify_static_contracts() -> None:
     require("sortKey" in files_js and "sortDir" in files_js, "files.js missing table sort state")
     require("pagedEntries" in files_js, "files.js missing paginated entry renderer")
     require("dataset.propertiesOpen" in files_js, "files.js missing embedded properties panel state")
+    require("LOCATION_STORE" in files_js and "saveCurrentLocation" in files_js, "files.js missing location persistence")
+    require("submitRename" in files_js and 'action: "rename"' in files_js, "files.js missing rename submit flow")
 
     shared_js = read_text(ROOT / "static" / "js" / "shared.js")
     require("formatBytes" in shared_js, "shared.js missing file-size formatter")
@@ -341,6 +347,8 @@ def verify_static_contracts() -> None:
     require("等待 CD2 拉取完成" in workspace_js, "workspace.js missing cd2 waiting status copy")
     require("正在 CD2 上传云端" in workspace_js, "workspace.js missing cd2 upload status copy")
     require("CD2 上传中" in workspace_js, "workspace.js missing cd2 upload output row copy")
+    require("file_rename" in workspace_js, "workspace.js missing rename operation status")
+    require("item.progress_label ||" in workspace_js, "workspace.js should prefer explicit completion progress labels")
     require("pipeline-primary-status" in workspace_js, "workspace.js should update the primary status title")
     require("renderOutputQueue" in workspace_js, "workspace.js missing output queue renderer")
     require("renderOutputQueueV2" in workspace_js, "workspace.js should use the readable output queue renderer")
@@ -976,6 +984,29 @@ def run_smoke(keep: bool = False) -> Path:
             f"file action should not create waiting_cd2_pull item, got {state_items}",
         )
         require(not (data_dir / "watch" / "SmokeMovie").exists(), "file action should not use local copy for monitor copy")
+
+        response = client.post(
+            "/api/file-actions",
+            json={
+                "action": "rename",
+                "root": "cd2",
+                "paths": [str(source_dir)],
+                "new_name": "SmokeMovieRenamed",
+            },
+        )
+        require(response.status_code == 200, f"file rename action returned {response.status_code}: {response.get_data(as_text=True)}")
+        rename_payload = response.get_json()
+        require(rename_payload and rename_payload.get("ok") is True, f"file rename action not ok: {rename_payload}")
+        rename_id = rename_payload.get("task_id")
+        for _ in range(20):
+            status_response = client.get(f"/api/file-actions/{rename_id}")
+            status_payload = status_response.get_json() or {}
+            task = status_payload.get("task") or {}
+            if task.get("status") in {"done", "partial", "failed"}:
+                break
+            time.sleep(0.05)
+        require((data_dir / "cloud-root" / "SmokeMovieRenamed").exists(), "file rename action should rename folder")
+        require(not source_dir.exists(), "file rename action should remove old folder name")
 
         directory_scopes = (
             "watch_dir",

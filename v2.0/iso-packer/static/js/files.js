@@ -1,5 +1,6 @@
 (function () {
   const DIRECTORY_ROOT = "@roots";
+  const LOCATION_STORE = "iso-packer:file-browser-location";
   const ROOT_LABELS = {
     watch: "本机监控",
     output: "本机输出",
@@ -10,6 +11,7 @@
     copy: "复制",
     move: "移动",
     delete: "删除",
+    rename: "重命名",
   };
 
   const state = {
@@ -27,6 +29,8 @@
     destinationPath: DIRECTORY_ROOT,
     destinationParent: null,
     contextPath: "",
+    renamePath: "",
+    renameName: "",
     sortKey: "name",
     sortDir: "asc",
     page: 1,
@@ -35,6 +39,31 @@
 
   function helper() {
     return window.IsoPacker;
+  }
+
+  function readSavedLocation() {
+    try {
+      return JSON.parse(window.localStorage.getItem(LOCATION_STORE) || "{}") || {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function saveCurrentLocation() {
+    try {
+      const saved = readSavedLocation();
+      saved.root = state.root;
+      saved.paths = Object.assign({}, saved.paths || {}, { [state.root]: state.path || "/" });
+      window.localStorage.setItem(LOCATION_STORE, JSON.stringify(saved));
+    } catch (_) {}
+  }
+
+  function clearSavedPath(rootName) {
+    try {
+      const saved = readSavedLocation();
+      if (saved.paths) delete saved.paths[rootName];
+      window.localStorage.setItem(LOCATION_STORE, JSON.stringify(saved));
+    } catch (_) {}
   }
 
   function rootPathFor(rootName = state.root) {
@@ -319,6 +348,7 @@
     state.selected.clear();
     renderBreadcrumb(payload);
     renderEntryList();
+    saveCurrentLocation();
   }
 
   async function loadDirectory(path) {
@@ -334,6 +364,11 @@
       const payload = await helper().fetchJson(`/api/browse?root=${encodeURIComponent(state.root)}&path=${encodeURIComponent(targetPath)}`);
       renderEntries(payload);
     } catch (error) {
+      if (targetPath !== "/") {
+        clearSavedPath(state.root);
+        loadDirectory("/");
+        return;
+      }
       if (list) {
         list.replaceChildren(Object.assign(document.createElement("div"), {
           className: "empty-state slim",
@@ -345,7 +380,8 @@
 
   function switchRoot(root) {
     state.root = root;
-    state.path = "/";
+    const saved = readSavedLocation();
+    state.path = (saved.paths && saved.paths[root]) || "/";
     state.parent = null;
     state.entries = [];
     state.query = "";
@@ -361,7 +397,7 @@
     helper().qsa("[data-root]").forEach((button) => {
       button.dataset.active = button.dataset.root === root ? "true" : "false";
     });
-    loadDirectory("/");
+    loadDirectory(state.path || "/");
   }
 
   function toggleSelected(path, checked) {
@@ -647,6 +683,66 @@
     }
   }
 
+  function openRenameDialog(path) {
+    const entry = state.entries.find((item) => item.path === path);
+    const dialog = helper().qs("#file-rename-dialog");
+    const input = helper().qs("#file-rename-input");
+    if (!dialog || !input || !path) return;
+    state.renamePath = path;
+    state.renameName = entry?.name || path.split(/[\\/]/).filter(Boolean).pop() || "";
+    helper().setText(helper().qs("#file-rename-current"), state.renameName || path);
+    helper().setText(helper().qs("#file-rename-error"), "");
+    input.value = state.renameName;
+    dialog.classList.remove("hidden");
+    document.body.classList.add("has-modal");
+    window.setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 0);
+  }
+
+  function closeRenameDialog() {
+    helper().qs("#file-rename-dialog")?.classList.add("hidden");
+    document.body.classList.remove("has-modal");
+    state.renamePath = "";
+    state.renameName = "";
+  }
+
+  async function submitRename() {
+    const input = helper().qs("#file-rename-input");
+    const error = helper().qs("#file-rename-error");
+    const newName = (input?.value || "").trim();
+    if (!state.renamePath || !newName) {
+      if (error) error.textContent = "请填写新名称";
+      return;
+    }
+    if (newName === state.renameName) {
+      closeRenameDialog();
+      return;
+    }
+    if (/[\\/]/.test(newName) || newName === "." || newName === "..") {
+      if (error) error.textContent = "名称不能包含路径分隔符";
+      return;
+    }
+    try {
+      const response = await helper().fetchJson("/api/file-actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "rename",
+          root: state.root,
+          paths: [state.renamePath],
+          new_name: newName,
+        }),
+      });
+      closeRenameDialog();
+      helper().notify("重命名已开始");
+      pollOperation(response.task_id);
+    } catch (err) {
+      if (error) error.textContent = err.message || "重命名失败";
+    }
+  }
+
   function hideContextMenu() {
     const menu = helper().qs("#file-context-menu");
     if (!menu) return;
@@ -710,6 +806,11 @@
     if (action === "move-custom") {
       hideContextMenu();
       openDestinationPicker("move");
+      return;
+    }
+    if (action === "rename") {
+      openRenameDialog(state.contextPath);
+      hideContextMenu();
       return;
     }
     if (action === "delete") {
@@ -830,6 +931,19 @@
       const button = event.target.closest("[data-context-action]");
       if (button) handleContextAction(button);
     });
+    helper().qs("#file-rename-submit")?.addEventListener("click", submitRename);
+    helper().qs("#file-rename-close")?.addEventListener("click", closeRenameDialog);
+    helper().qs("#file-rename-cancel")?.addEventListener("click", closeRenameDialog);
+    helper().qs("#file-rename-dialog")?.addEventListener("click", (event) => {
+      if (event.target.id === "file-rename-dialog") closeRenameDialog();
+    });
+    helper().qs("#file-rename-input")?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        submitRename();
+      }
+      if (event.key === "Escape") closeRenameDialog();
+    });
     document.addEventListener("click", (event) => {
       if (!event.target.closest("#file-context-menu")) hideContextMenu();
     });
@@ -885,6 +999,13 @@
 
   document.addEventListener("DOMContentLoaded", () => {
     bindEvents();
-    loadDirectory("/");
+    const saved = readSavedLocation();
+    const savedRoot = saved.root && rootPathFor(saved.root) ? saved.root : state.root;
+    state.root = savedRoot;
+    state.rootPath = rootPathFor(savedRoot);
+    helper().qsa("[data-root]").forEach((button) => {
+      button.dataset.active = button.dataset.root === savedRoot ? "true" : "false";
+    });
+    loadDirectory((saved.paths && saved.paths[savedRoot]) || "/");
   });
 })();

@@ -275,6 +275,15 @@
         hint: item.stage_text || "正在删除文件浏览选择的条目。"
       };
     }
+    if (phase === "file_rename") {
+      const done = item.status === "done" || item.status === "partial";
+      const failed = item.status === "failed";
+      return {
+        label: failed ? "重命名失败" : done ? "重命名完成" : "重命名中",
+        badge: failed ? "border-red-200 bg-red-50 text-red-700" : done ? "border-sky-200 bg-sky-50 text-sky-700" : "border-blue-200 bg-blue-50 text-blue-700",
+        hint: item.stage_text || "正在重命名文件浏览选择的条目。"
+      };
+    }
     if (phase === "transfer" || phase === "transferring") {
       return { label: "转存中", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", hint: "ISO 已生成，正在复制到输出目录或 CD2 挂载目录。" };
     }

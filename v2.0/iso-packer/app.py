@@ -319,6 +319,13 @@ def run_file_operation_task(task_id: str, action: str, sources: list[Path], dest
                         raise ValueError("目标目录不能位于源目录内部")
                     shutil.move(str(source), str(target))
                     item.update({"ok": True, "target": str(target)})
+                elif action == "rename":
+                    if len(sources) != 1 or destination is None:
+                        raise ValueError("重命名只能处理单个条目")
+                    if destination.exists():
+                        raise FileExistsError(f"目标已存在: {destination}")
+                    source.rename(destination)
+                    item.update({"ok": True, "target": str(destination)})
                 elif action == "delete":
                     if source.is_dir():
                         shutil.rmtree(source)
@@ -4728,7 +4735,7 @@ def api_file_actions():
     cfg = load_config()
     payload = request.get_json(silent=True) or {}
     action = str(payload.get("action") or "").strip().lower()
-    if action not in {"copy", "move", "delete"}:
+    if action not in {"copy", "move", "delete", "rename"}:
         return jsonify({"ok": False, "message": "不支持的文件操作"}), 400
     root_name = str(payload.get("root") or "watch").strip()
     raw_paths = payload.get("paths") or []
@@ -4756,6 +4763,19 @@ def api_file_actions():
     if action == "copy" and destination_kind == "watch":
         result, status_code = create_cd2_monitor_copy_tasks_for_browser_sources(cfg, sources)
         return jsonify(result), status_code
+
+    if action == "rename":
+        if len(sources) != 1:
+            return jsonify({"ok": False, "message": "重命名一次只能处理一个条目"}), 400
+        new_name = str(payload.get("new_name") or "").strip()
+        if not new_name:
+            return jsonify({"ok": False, "message": "请填写新名称"}), 400
+        if new_name in {".", ".."} or Path(new_name).name != new_name or any(sep in new_name for sep in ("/", "\\")):
+            return jsonify({"ok": False, "message": "新名称不能包含路径分隔符"}), 400
+        destination = (sources[0].parent / new_name).resolve()
+        _, source_root = resolve_file_browser_path(cfg, root_name, str(sources[0]))
+        if not path_in_root(destination, source_root.resolve()):
+            return jsonify({"ok": False, "message": "重命名目标不能越过当前根目录"}), 400
 
     if action in {"copy", "move"}:
         if destination_kind == "watch":
