@@ -137,6 +137,7 @@ def verify_static_contracts() -> None:
     require("movie.poster_path" in index_html, "local asset cards should render poster artwork when available")
     require("movie.poster_status" not in index_html, "local asset cards should not expose poster-maintenance status")
     require("movie.match_status" not in index_html, "local asset cards should not expose archive-maintenance status")
+    require("任务名：" not in index_html, "local asset cards should not expose task-name labels")
     require("https://www.themoviedb.org/movie/{{ movie.tmdb_id }}" in index_html, "local asset cards should link to TMDB when matched")
     require("lg:grid-cols-5" in index_html, "local asset cards should render five columns on desktop")
     require("radial-gradient" not in index_html, "index.html should not use decorative radial gradients")

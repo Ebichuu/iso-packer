@@ -182,7 +182,7 @@
                             {{ movie.size or "—" }}
                         </span>
                     </div>
-                    <p class="mt-2 truncate text-[10px] font-semibold text-zinc-400" title="{{ movie.raw_name }}">任务名：{{ movie.raw_name }}</p>
+                    <p class="mt-2 truncate text-[10px] font-semibold text-zinc-400" title="{{ movie.raw_name }}">{{ movie.raw_name }}</p>
                 </div>
             {% if movie.tmdb_id %}
             </a>
