@@ -164,6 +164,7 @@ def verify_static_contracts() -> None:
     require("封装工作台" not in workspace_html, "workspace should not mix workbench copy with packing center")
 
     files_html = read_text(templates / "files.html")
+    files_js = read_text(static_js / "files.js")
     require("file-browser-list" in files_html, "files.html missing browser list")
     require("data-root=" in files_html, "files.html missing root switch hooks")
     require("data-root-path=" in files_html, "files.html missing visible root path hooks")
@@ -173,7 +174,15 @@ def verify_static_contracts() -> None:
     require("file-context-menu" in files_html, "files.html missing context menu")
     require("file-destination-picker" in files_html, "files.html missing destination picker")
     require("file-destination-use" in files_html, "files.html missing destination picker submit")
+    require("data-file-sort=" in files_html, "files.html missing sortable table headers")
+    require("data-sort-indicator=" in files_html, "files.html missing sort indicators")
+    require("file-pagination" in files_html, "files.html missing pagination controls")
+    require("file-page-size" in files_html, "files.html missing page-size control")
+    require("file-page-go" in files_html, "files.html missing page jump control")
+    require("file-browser-shell" in files_html, "files.html missing embedded browser shell")
     require("修改时间" in files_html, "files.html missing modified-time column")
+    require("大小" in files_html and files_html.index("大小") < files_html.index("修改时间"), "files.html should place size before modified time")
+    require("#file-properties-panel { position: sticky" in files_html, "file properties should be embedded, not fixed overlay")
     file_markers = [
         'id="file-select-all"',
         'id="file-operation-bar"',
@@ -183,9 +192,16 @@ def verify_static_contracts() -> None:
         'id="file-properties-panel"',
         'id="file-context-menu"',
         'id="file-destination-picker"',
+        'data-file-sort="size"',
+        'data-file-sort="mtime"',
+        'id="file-pagination"',
     ]
     for marker in file_markers:
         require(marker in files_html, f"files.html missing {marker}")
+    require("props.innerHTML" in files_js and "ⓘ" in files_js, "files.js should render property action as an icon button")
+    require("sortKey" in files_js and "sortDir" in files_js, "files.js missing table sort state")
+    require("pagedEntries" in files_js, "files.js missing paginated entry renderer")
+    require("dataset.propertiesOpen" in files_js, "files.js missing embedded properties panel state")
 
     shared_js = read_text(ROOT / "static" / "js" / "shared.js")
     require("formatBytes" in shared_js, "shared.js missing file-size formatter")

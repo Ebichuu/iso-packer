@@ -27,6 +27,10 @@
     destinationPath: DIRECTORY_ROOT,
     destinationParent: null,
     contextPath: "",
+    sortKey: "name",
+    sortDir: "asc",
+    page: 1,
+    pageSize: 50,
   };
 
   function helper() {
@@ -67,6 +71,76 @@
       if (state.filter !== "all" && group !== state.filter) return false;
       if (!query) return true;
       return [entry.name, entry.path, entry.type].some((value) => String(value || "").toLowerCase().includes(query));
+    });
+  }
+
+  function sortValue(entry, key) {
+    if (key === "size") return Number(entry.size || 0);
+    if (key === "mtime") {
+      const time = Date.parse(entry.mtime || "");
+      return Number.isFinite(time) ? time : 0;
+    }
+    if (key === "kind") return entryGroup(entry);
+    return String(entry.name || "").toLowerCase();
+  }
+
+  function sortedEntries() {
+    const entries = filteredEntries().slice();
+    entries.sort((a, b) => {
+      const aDir = a.type === "dir";
+      const bDir = b.type === "dir";
+      if (aDir !== bDir) return aDir ? -1 : 1;
+      const av = sortValue(a, state.sortKey);
+      const bv = sortValue(b, state.sortKey);
+      let result = 0;
+      if (typeof av === "number" && typeof bv === "number") result = av - bv;
+      else result = String(av).localeCompare(String(bv), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+      if (result === 0) result = String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+      return state.sortDir === "desc" ? -result : result;
+    });
+    return entries;
+  }
+
+  function pageSizeValue() {
+    return state.pageSize === "all" ? Infinity : Number(state.pageSize || 50);
+  }
+
+  function pageCount(total) {
+    const size = pageSizeValue();
+    if (!Number.isFinite(size)) return 1;
+    return Math.max(1, Math.ceil(total / size));
+  }
+
+  function pagedEntries(entries) {
+    const pages = pageCount(entries.length);
+    state.page = Math.min(Math.max(1, Number(state.page || 1)), pages);
+    const size = pageSizeValue();
+    if (!Number.isFinite(size)) return entries;
+    const start = (state.page - 1) * size;
+    return entries.slice(start, start + size);
+  }
+
+  function updateSortIndicators() {
+    helper().qsa("[data-sort-indicator]").forEach((node) => {
+      const key = node.dataset.sortIndicator;
+      node.textContent = key === state.sortKey ? (state.sortDir === "asc" ? "↑" : "↓") : "";
+    });
+  }
+
+  function renderPagination(total) {
+    const pages = pageCount(total);
+    state.page = Math.min(Math.max(1, Number(state.page || 1)), pages);
+    helper().setText(helper().qs("#file-page-summary"), `第 ${state.page} / ${pages} 页 · ${total} 项`);
+    const jump = helper().qs("#file-page-jump");
+    if (jump) {
+      jump.max = String(pages);
+      jump.value = String(state.page);
+    }
+    const size = helper().qs("#file-page-size");
+    if (size) size.value = String(state.pageSize);
+    helper().qsa("[data-page-action]").forEach((button) => {
+      if (button.dataset.pageAction === "prev") button.disabled = state.page <= 1;
+      if (button.dataset.pageAction === "next") button.disabled = state.page >= pages;
     });
   }
 
@@ -155,10 +229,13 @@
     const list = helper().qs("#file-browser-list");
     if (!list) return;
     helper().clearNode(list);
-    const entries = filteredEntries();
+    const entries = sortedEntries();
+    const pageEntries = pagedEntries(entries);
     renderSummary();
     renderOperationBar();
-    syncSelectAll(entries);
+    syncSelectAll(pageEntries);
+    updateSortIndicators();
+    renderPagination(entries.length);
     if (!entries.length) {
       const empty = document.createElement("div");
       empty.className = "empty-state slim";
@@ -166,7 +243,7 @@
       list.appendChild(empty);
       return;
     }
-    entries.forEach((entry) => {
+    pageEntries.forEach((entry) => {
       const row = document.createElement("div");
       row.className = "file-row";
       row.dataset.kind = entryGroup(entry);
@@ -223,10 +300,12 @@
       const props = document.createElement("button");
       props.type = "button";
       props.dataset.propsPath = entry.path || "";
-      props.textContent = "属性";
+      props.innerHTML = '<span aria-hidden="true">ⓘ</span>';
+      props.title = "查看属性";
+      props.setAttribute("aria-label", `查看 ${entry.name || "文件"} 属性`);
       actions.appendChild(props);
 
-      row.append(checkbox, main, mtime, attr, size, actions);
+      row.append(checkbox, main, size, mtime, attr, actions);
       list.appendChild(row);
     });
   }
@@ -236,6 +315,7 @@
     state.parent = payload.parent || null;
     state.rootPath = payload.root_path || rootPathFor();
     state.entries = Array.isArray(payload.entries) ? payload.entries : [];
+    state.page = 1;
     state.selected.clear();
     renderBreadcrumb(payload);
     renderEntryList();
@@ -272,6 +352,7 @@
     state.filter = "all";
     state.rootPath = rootPathFor(root);
     state.selected.clear();
+    state.page = 1;
     const search = helper().qs("#file-search");
     if (search) search.value = "";
     helper().qsa("[data-file-filter]").forEach((button) => {
@@ -291,7 +372,7 @@
   }
 
   function toggleAllVisible(checked) {
-    filteredEntries().forEach((entry) => {
+    pagedEntries(sortedEntries()).forEach((entry) => {
       if (entry.path) {
         if (checked) state.selected.add(entry.path);
         else state.selected.delete(entry.path);
@@ -343,8 +424,10 @@
     const entry = state.entries.find((item) => item.path === path);
     const panel = helper().qs("#file-properties-panel");
     const body = helper().qs("#file-properties-body");
+    const shell = helper().qs("#file-browser-shell");
     if (!panel || !body) return;
     panel.classList.remove("hidden");
+    if (shell) shell.dataset.propertiesOpen = "true";
     helper().clearNode(body);
     appendPropertyRow(body, "名称", entry?.name || path || "-");
     appendPropertyRow(body, "状态", "正在读取属性...");
@@ -373,6 +456,8 @@
 
   function closeProperties() {
     helper().qs("#file-properties-panel")?.classList.add("hidden");
+    const shell = helper().qs("#file-browser-shell");
+    if (shell) delete shell.dataset.propertiesOpen;
   }
 
   function setOperationStatus(message, isError = false) {
@@ -550,7 +635,7 @@
         setOperationStatus(message, !response.ok);
         helper().notify(message, !response.ok);
         state.selected.clear();
-        updateSelectionUi();
+        renderEntryList();
         loadDirectory(state.path || "/");
         return;
       }
@@ -688,8 +773,37 @@
       const target = event.target.closest("[data-breadcrumb-path]");
       if (target) loadDirectory(target.dataset.breadcrumbPath);
     });
+    helper().qsa("[data-file-sort]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const key = button.dataset.fileSort || "name";
+        if (state.sortKey === key) state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+        else {
+          state.sortKey = key;
+          state.sortDir = key === "mtime" || key === "size" ? "desc" : "asc";
+        }
+        state.page = 1;
+        renderEntryList();
+      });
+    });
     helper().qs("#file-select-all")?.addEventListener("change", (event) => {
       toggleAllVisible(event.target.checked);
+    });
+    helper().qs("#file-page-size")?.addEventListener("change", (event) => {
+      state.pageSize = event.target.value === "all" ? "all" : Number(event.target.value || 50);
+      state.page = 1;
+      renderEntryList();
+    });
+    helper().qsa("[data-page-action]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (button.dataset.pageAction === "prev") state.page -= 1;
+        if (button.dataset.pageAction === "next") state.page += 1;
+        renderEntryList();
+      });
+    });
+    helper().qs("#file-page-go")?.addEventListener("click", () => {
+      const jump = Number(helper().qs("#file-page-jump")?.value || 1);
+      state.page = Number.isFinite(jump) ? jump : 1;
+      renderEntryList();
     });
     helper().qs("#file-pick-destination")?.addEventListener("click", () => openDestinationPicker("copy"));
     helper().qs("#file-operation-bar")?.addEventListener("click", (event) => {
@@ -750,12 +864,14 @@
     helper().qs("#file-properties-close")?.addEventListener("click", closeProperties);
     helper().qs("#file-search")?.addEventListener("input", (event) => {
       state.query = event.target.value || "";
+      state.page = 1;
       renderEntryList();
     });
     helper().qs("#file-filters")?.addEventListener("click", (event) => {
       const button = event.target.closest("[data-file-filter]");
       if (!button) return;
       state.filter = button.dataset.fileFilter || "all";
+      state.page = 1;
       helper().qsa("[data-file-filter]").forEach((item) => {
         item.dataset.active = item === button ? "true" : "false";
       });

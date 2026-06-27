@@ -76,17 +76,40 @@
     </div>
 </div>
 
-<div class="border border-zinc-200 bg-white rounded-xl overflow-hidden font-mono text-xs shadow-[0_8px_30px_rgba(0,0,0,0.015)]">
+<div id="file-browser-shell" class="file-browser-shell">
+<div class="file-table-card border border-zinc-200 bg-white rounded-xl overflow-hidden font-mono text-xs shadow-[0_8px_30px_rgba(0,0,0,0.015)]">
     <div class="file-table-head bg-gradient-to-b from-zinc-50 to-zinc-100/30 p-3 text-zinc-400 border-b border-zinc-200 text-[10px] font-bold tracking-wider select-none">
         <input id="file-select-all" type="checkbox" aria-label="选择当前列表全部项目" class="h-4 w-4 rounded border-zinc-300 accent-zinc-900">
-        <span>名称 / 路径</span>
-        <span>修改时间</span>
-        <span>属性</span>
-        <span class="text-right">大小</span>
-        <span class="text-right">操作</span>
+        <button type="button" data-file-sort="name" class="file-sort-button">名称 / 路径 <span data-sort-indicator="name"></span></button>
+        <button type="button" data-file-sort="size" class="file-sort-button text-right">大小 <span data-sort-indicator="size"></span></button>
+        <button type="button" data-file-sort="mtime" class="file-sort-button">修改时间 <span data-sort-indicator="mtime"></span></button>
+        <button type="button" data-file-sort="kind" class="file-sort-button">类型 <span data-sort-indicator="kind"></span></button>
+        <span class="text-right">详情</span>
     </div>
 
     <div id="file-browser-list" class="divide-y divide-zinc-100 text-zinc-700">
+    </div>
+    <div id="file-pagination" class="file-pagination border-t border-zinc-100 bg-zinc-50/70 px-3 py-2 text-[11px]">
+        <div class="flex flex-wrap items-center gap-2">
+            <button type="button" data-page-action="prev" class="file-page-button">上一页</button>
+            <span id="file-page-summary" class="font-bold text-zinc-500">第 1 / 1 页</span>
+            <button type="button" data-page-action="next" class="file-page-button">下一页</button>
+            <label class="ml-auto flex items-center gap-2 font-bold text-zinc-500">
+                每页
+                <select id="file-page-size" class="rounded-md border border-zinc-200 bg-white px-2 py-1 font-mono text-zinc-700">
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                    <option value="500">500</option>
+                    <option value="all">全部</option>
+                </select>
+            </label>
+            <label class="flex items-center gap-2 font-bold text-zinc-500">
+                跳转
+                <input id="file-page-jump" type="number" min="1" value="1" class="w-16 rounded-md border border-zinc-200 bg-white px-2 py-1 font-mono text-zinc-700">
+            </label>
+            <button type="button" id="file-page-go" class="file-page-button">前往</button>
+        </div>
     </div>
 </div>
 
@@ -99,6 +122,7 @@
         <button type="button" id="file-properties-close" class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[11px] font-bold text-zinc-600 hover:border-zinc-400">关闭</button>
     </div>
     <div id="file-properties-body" class="mt-3 grid gap-2 font-mono"></div>
+</div>
 </div>
 
 <div id="file-context-menu" class="hidden fixed z-50 w-56 rounded-xl border border-zinc-200 bg-white p-1 text-xs shadow-2xl">
@@ -144,8 +168,14 @@
 <script src="{{ url_for('static', filename='js/files.js') }}"></script>
 <style>
     /* 文件浏览页专用行样式，保持工程表格密度，同时支持多选操作。 */
+    .file-browser-shell { display: grid; grid-template-columns: minmax(0,1fr); gap: 1rem; align-items: start; }
+    .file-browser-shell[data-properties-open="true"] { grid-template-columns: minmax(0,1fr) minmax(20rem, 24rem); }
+    .file-table-card { min-width: 0; }
     .file-table-head,
-    .file-row { display: grid; grid-template-columns: 2rem minmax(0,1fr) 9.5rem 4.5rem 5.5rem 6.5rem; align-items: center; gap: 0.75rem; }
+    .file-row { display: grid; grid-template-columns: 2rem minmax(0,1fr) 7rem 9.5rem 4.5rem 3.5rem; align-items: center; gap: 0.75rem; }
+    .file-sort-button { display: inline-flex; min-width: 0; align-items: center; gap: 0.25rem; color: inherit; font: inherit; font-weight: 800; letter-spacing: inherit; text-align: left; text-transform: uppercase; }
+    .file-sort-button.text-right { justify-self: end; text-align: right; }
+    .file-sort-button:hover { color: #18181b; }
     .file-row { padding: 0.875rem; text-align: left; width: 100%; transition: background-color 0.15s, color 0.15s; }
     .file-row:hover { background-color: #fcfcfb; }
     .file-row[data-selected="true"] { background-color: #ecfdf5; }
@@ -162,9 +192,9 @@
     .file-row[data-kind="disc"] .file-kind { background-color: #fef3c7; color: #d97706; border-color: #fde68a; }
     .file-size { text-align: right; color: #71717a; font-weight: 600; }
     .file-row-actions { display: flex; justify-content: flex-end; gap: 0.375rem; }
-    .file-row-actions button { border: 1px solid #e4e4e7; background: #fff; border-radius: 0.5rem; color: #52525b; font-weight: 800; padding: 0.25rem 0.5rem; }
+    .file-row-actions button { display: grid; place-items: center; width: 2rem; height: 2rem; border: 1px solid #e4e4e7; background: #fff; border-radius: 0.5rem; color: #52525b; font-weight: 800; padding: 0; }
     .file-row-actions button:hover { border-color: #a1a1aa; color: #18181b; }
-    #file-properties-panel { position: fixed; top: 5.5rem; right: 1rem; bottom: 1rem; z-index: 35; width: min(24rem, calc(100vw - 2rem)); overflow: auto; }
+    #file-properties-panel { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: auto; }
     .file-prop-row { display: grid; grid-template-columns: 6rem minmax(0,1fr); gap: 1rem; border-bottom: 1px solid #f4f4f5; padding: 0.5rem 0; }
     .file-prop-row span { color: #a1a1aa; font-weight: 800; }
     .file-prop-row strong { min-width: 0; overflow-wrap: anywhere; color: #27272a; }
@@ -179,6 +209,9 @@
     .file-destination-main strong,
     .file-destination-main small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .file-destination-main small { margin-top: 0.15rem; color: #71717a; }
+    .file-page-button { border: 1px solid #e4e4e7; background: #fff; border-radius: 0.5rem; color: #52525b; font-weight: 800; padding: 0.35rem 0.65rem; }
+    .file-page-button:hover:not(:disabled) { border-color: #a1a1aa; color: #18181b; }
+    .file-page-button:disabled { opacity: 0.45; cursor: default; }
     .root-switcher [data-root][data-active="true"] { background: #18181b !important; color: #fff !important; border-color: #18181b !important; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
     .root-switcher [data-root][data-active="false"] { background: #fff !important; color: #52525b !important; border-color: #e4e4e7 !important; }
     #file-filters button:focus-visible,
@@ -191,11 +224,15 @@
     #file-breadcrumb button:hover { color: #1d4ed8; text-decoration: underline; }
     .breadcrumb-separator { color: #d4d4d8; padding: 0 0.25rem; font-weight: normal; }
     @media (max-width: 900px) {
+        .file-browser-shell,
+        .file-browser-shell[data-properties-open="true"] { grid-template-columns: minmax(0,1fr); }
+        #file-properties-panel { position: static; max-height: none; }
         .file-table-head,
-        .file-row { grid-template-columns: 2rem minmax(0,1fr) 5rem; }
+        .file-row { grid-template-columns: 2rem minmax(0,1fr) 3.5rem; }
         .file-table-head span:nth-of-type(2),
-        .file-table-head span:nth-of-type(3),
-        .file-table-head span:nth-of-type(4),
+        .file-table-head button:nth-of-type(2),
+        .file-table-head button:nth-of-type(3),
+        .file-table-head button:nth-of-type(4),
         .file-time,
         .file-attrs,
         .file-size { display: none; }
