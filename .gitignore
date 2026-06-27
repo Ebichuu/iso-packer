@@ -40,6 +40,11 @@ skills-lock.json
 *.gz
 *.rar
 
+# Local-only release notes / secrets
+PROJECT_STAGE_SUMMARY.md
+tests/key.txt
+v2.0-HTML/
+
 # Archived / duplicate experiments
 AutoISO/
 iso-packer-v2/
