@@ -25,6 +25,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeCd2Client:
+    copy_calls = []
+
+    def copy_file(self, source_paths, dest_dir):
+        call = {
+            "sources": list(source_paths or []),
+            "dest_dir": dest_dir,
+        }
+        self.copy_calls.append(call)
+        return SimpleNamespace(
+            success=True,
+            errorMessage="",
+            resultFilePaths=[f"{str(dest_dir).rstrip('/')}/{Path(source).name}" for source in call["sources"]],
+        )
+
     def get_sub_files(self, path: str, force_refresh: bool = False):
         if path == "/":
             return [
@@ -187,7 +201,7 @@ def verify_static_contracts() -> None:
         'id="file-select-all"',
         'id="file-operation-bar"',
         'data-file-action="copy"',
-        "拉取到监控目录",
+        "复制到监控目录",
         "修改时间",
         'id="file-properties-panel"',
         'id="file-context-menu"',
@@ -546,6 +560,7 @@ def verify_local_media_poster_contract(appmod) -> None:
 
 
 def patch_cd2(appmod) -> None:
+    FakeCd2Client.copy_calls = []
     appmod.get_cd2_client = lambda cfg: FakeCd2Client()
     appmod.fetch_cd2_uploads = lambda cfg: (
         {},
@@ -941,24 +956,24 @@ def run_smoke(keep: bool = False) -> Path:
                 "destination": "watch",
             },
         )
-        require(response.status_code == 200, f"file remote pull action returned {response.status_code}: {response.get_data(as_text=True)}")
+        require(response.status_code == 200, f"file monitor copy action returned {response.status_code}: {response.get_data(as_text=True)}")
         file_action_payload = response.get_json()
-        require(file_action_payload and file_action_payload.get("ok") is True, f"file remote pull action not ok: {file_action_payload}")
-        require(file_action_payload.get("remote_pull") is True, f"file action should submit cd2 remote pull: {file_action_payload}")
-        require(file_action_payload.get("created_count") == 1, f"file action should create one cd2 pull task: {file_action_payload}")
+        require(file_action_payload and file_action_payload.get("ok") is True, f"file monitor copy action not ok: {file_action_payload}")
+        require(file_action_payload.get("remote_copy") is True, f"file action should submit cd2 monitor copy: {file_action_payload}")
+        require(file_action_payload.get("created_count") == 1, f"file action should create one cd2 copy task: {file_action_payload}")
+        require(file_action_payload.get("dest_dir") == "/remote/inbox", f"file action should copy into monitor dir: {file_action_payload}")
+        require(FakeCd2Client.copy_calls, "file action should call cd2 copy_file")
+        require(FakeCd2Client.copy_calls[-1]["sources"] == ["/115/SmokeMovie"], f"copy source mismatch: {FakeCd2Client.copy_calls}")
+        require(FakeCd2Client.copy_calls[-1]["dest_dir"] == "/remote/inbox", f"copy destination mismatch: {FakeCd2Client.copy_calls}")
         response = client.get("/api/status")
         require(response.status_code == 200, f"status after file action returned {response.status_code}")
         status_payload = response.get_json() or {}
         state_items = (status_payload.get("state") or {}).get("items") or {}
         require(
-            any(
-                item.get("status") == "waiting_cd2_pull"
-                and item.get("cd2_pull_source") == "/115/SmokeMovie"
-                for item in state_items.values()
-            ),
-            f"file action should create waiting_cd2_pull item, got {state_items}",
+            not any(item.get("cd2_pull_source") == "/115/SmokeMovie" for item in state_items.values()),
+            f"file action should not create waiting_cd2_pull item, got {state_items}",
         )
-        require(not (data_dir / "watch" / "SmokeMovie").exists(), "file action should not use local copy for monitor pull")
+        require(not (data_dir / "watch" / "SmokeMovie").exists(), "file action should not use local copy for monitor copy")
 
         directory_scopes = (
             "watch_dir",

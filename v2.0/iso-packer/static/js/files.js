@@ -622,16 +622,16 @@
     if (action === "delete") {
       payload.confirm = "DELETE";
     }
-    const isRemotePull = action === "copy" && destination === "watch";
-    setOperationStatus(isRemotePull ? "正在提交 CD2 远程拉取任务..." : "正在提交后台任务。");
+    const isRemoteCopy = action === "copy" && destination === "watch";
+    setOperationStatus(isRemoteCopy ? "正在提交 CD2 网盘复制任务..." : "正在提交后台任务。");
     try {
       const response = await helper().fetchJson("/api/file-actions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (response.remote_pull) {
-        const message = response.message || "CD2 远程拉取任务已创建";
+      if (response.remote_copy) {
+        const message = response.message || "CD2 网盘复制任务已创建";
         setOperationStatus(message, !response.ok);
         helper().notify(message, !response.ok);
         state.selected.clear();

@@ -895,6 +895,110 @@ def create_cd2_pull_tasks_for_browser_sources(cfg: Dict, sources: list[Path]) ->
     }, 200
 
 
+def cd2_monitor_copy_dest_dir_from_cfg(cfg: Dict) -> str:
+    roots = parse_cd2_remote_source_dirs((cfg or {}).get("cd2_remote_source_dirs"))
+    if not roots:
+        return ""
+    return cd2_remote_path_for_refresh(roots[0], cfg)
+
+
+def record_cd2_monitor_copy_result(result: Dict) -> None:
+    with lock:
+        cd2_state = state.setdefault("cd2", {})
+        copy_state = cd2_state.setdefault("monitor_copy", {})
+        copy_state["last_result"] = dict(result)
+        recent = list(copy_state.get("recent_results") or [])
+        recent.append(dict(result))
+        copy_state["recent_results"] = recent[-20:]
+        save_state_locked()
+
+
+def create_cd2_monitor_copy_tasks_for_browser_sources(cfg: Dict, sources: list[Path]) -> tuple[Dict, int]:
+    dest_dir = cd2_monitor_copy_dest_dir_from_cfg(cfg)
+    if not dest_dir:
+        return {"ok": False, "message": "请先在设置页配置网盘监控目录"}, 400
+    if cd2_pull_disabled():
+        return {"ok": False, "message": "本地预览已禁用真实 CD2 文件任务"}, 400
+
+    client = get_cd2_client(cfg)
+    if client is None:
+        return {"ok": False, "message": cd2_client_cache.get("last_error") or "CD2 API 未连接"}, 400
+    if not hasattr(client, "copy_file"):
+        return {"ok": False, "message": "当前 clouddrive2-client 不支持创建复制任务"}, 400
+
+    results = []
+    ok_count = 0
+    last_status = 400
+    for source in sources:
+        remote_path = cd2_local_path_to_remote(str(source), cfg)
+        if not remote_path:
+            result = {
+                "ok": False,
+                "source": str(source),
+                "message": "所选路径不能映射到 CD2 远端路径，请检查路径别名",
+            }
+            results.append(result)
+            record_cd2_monitor_copy_result({**result, "dest_dir": dest_dir, "checked_at": now()})
+            continue
+        if remote_path_under(remote_path, dest_dir):
+            result = {
+                "ok": False,
+                "source": str(source),
+                "source_path": remote_path,
+                "message": "所选目录已经在网盘监控目录内，无需复制",
+            }
+            results.append(result)
+            record_cd2_monitor_copy_result({**result, "dest_dir": dest_dir, "checked_at": now()})
+            continue
+        try:
+            copy_result = client.copy_file([remote_path], dest_dir)
+            ok, message, result_paths = cd2_result_success(copy_result)
+        except Exception as exc:
+            ok, message, result_paths = False, cd2_error_message(exc), []
+        result = {
+            "ok": ok,
+            "source": str(source),
+            "source_path": remote_path,
+            "dest_dir": dest_dir,
+            "message": message or ("CD2 网盘复制任务已创建" if ok else "CD2 网盘复制任务创建失败"),
+            "result_paths": result_paths,
+            "checked_at": now(),
+        }
+        results.append(result)
+        record_cd2_monitor_copy_result(result)
+        if ok:
+            ok_count += 1
+            last_status = 200
+        else:
+            last_status = 400
+
+    failed_count = len(results) - ok_count
+    if ok_count == 0:
+        message = (results[0].get("message") if results else "") or "CD2 网盘复制任务创建失败"
+        return {
+            "ok": False,
+            "remote_copy": True,
+            "message": message,
+            "created_count": 0,
+            "failed_count": failed_count,
+            "dest_dir": dest_dir,
+            "copies": results,
+        }, last_status or 400
+
+    message = f"已提交 {ok_count} 个 CD2 网盘复制任务"
+    if failed_count:
+        message += f"，{failed_count} 个失败"
+    return {
+        "ok": True,
+        "remote_copy": True,
+        "message": message,
+        "created_count": ok_count,
+        "failed_count": failed_count,
+        "dest_dir": dest_dir,
+        "copies": results,
+    }, 200
+
+
 def cd2_pull_dest_dir_from_cfg(cfg: Dict) -> str:
     explicit = normalize_path_text((cfg or {}).get("cd2_remote_pull_dest_dir"))
     if explicit:
@@ -4650,7 +4754,7 @@ def api_file_actions():
     destination = None
     destination_kind = str(payload.get("destination") or "").strip().lower()
     if action == "copy" and destination_kind == "watch":
-        result, status_code = create_cd2_pull_tasks_for_browser_sources(cfg, sources)
+        result, status_code = create_cd2_monitor_copy_tasks_for_browser_sources(cfg, sources)
         return jsonify(result), status_code
 
     if action in {"copy", "move"}:
