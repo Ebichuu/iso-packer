@@ -350,6 +350,8 @@ def verify_static_contracts() -> None:
     require("workspace-output-queue" in workspace_js, "workspace.js should render the output queue container")
     require("转存中" in workspace_js, "workspace.js missing transfer output state")
     require("已交付" in workspace_js, "workspace.js missing delivered output state")
+    require("progress_label" in workspace_js, "workspace.js should allow delivered rows to override stale progress")
+    require('phase === "done" || phase === "transfer_done"' in workspace_js, "workspace.js should prioritize delivered output state")
     require("本地测试禁用拉取" in workspace_js, "workspace.js missing local pull guard label")
 
     shared_js = read_text(static_js / "shared.js")

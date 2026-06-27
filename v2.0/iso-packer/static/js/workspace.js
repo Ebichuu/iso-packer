@@ -366,17 +366,19 @@
       const phase = String(item.status || "").toLowerCase();
       const hasOutput = item.target || item.output_target || item.original_target || phase === "done" || phase === "transfer_done" || phase === "waiting_cd2_upload" || phase.includes("transfer") || phase.includes("verify");
       if (!hasOutput) return;
-      const upload = item.cd2_upload || {};
-      const uploadProgress = Number(upload.percent ?? item.progress ?? 0);
+      const delivered = phase === "done" || phase === "transfer_done";
+      const upload = delivered ? {} : (item.cd2_upload || {});
+      const uploadProgress = delivered ? 100 : Number(upload.percent ?? item.progress ?? 0);
       rows.push({
         name: source.split(/[\\/]/).filter(Boolean).pop() || item.name || "ISO 任务",
         source,
         output_iso: itemOutputPath(item),
         phase,
         progress: Number.isFinite(uploadProgress) ? uploadProgress : Number(item.progress || 0),
+        progress_label: delivered ? "完成" : "",
         current: upload.current || upload.current_bytes || item.last_size || item.size || 0,
         total: upload.total || upload.total_bytes || item.size || item.last_size || 0,
-        stage_text: upload.human || upload.summary || item.status_label || item.error || "",
+        stage_text: delivered ? (item.status_label || "已交付") : (upload.human || upload.summary || item.status_label || item.error || ""),
         error: item.error || item.last_error || "",
         issue_text: item.issue_text || "",
         finished_at: item.finished_at || item.done_at || item.updated_at || item.first_seen || ""
@@ -402,7 +404,7 @@
     }
     container.innerHTML = rows.map((item) => {
       const view = outputQueueView(item);
-      const progress = Number.isFinite(Number(item.progress)) ? formatPercent(item.progress) : "--";
+      const progress = item.progress_label || (Number.isFinite(Number(item.progress)) ? formatPercent(item.progress) : "--");
       const byteText = item.current || item.total ? formatByteProgress(item) : "--";
       const currentMark = item.is_current ? '<span class="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 font-mono text-[9px] font-black uppercase tracking-[0.14em] text-blue-700">当前</span>' : "";
       return `
@@ -445,7 +447,7 @@
     }
     container.innerHTML = rows.map((item) => {
       const view = outputQueueView(item);
-      const progress = Number.isFinite(Number(item.progress)) ? formatPercent(item.progress) : "--";
+      const progress = item.progress_label || (Number.isFinite(Number(item.progress)) ? formatPercent(item.progress) : "--");
       const byteText = item.current || item.total ? formatByteProgress(item) : "--";
       const currentMark = item.is_current ? '<span class="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[9px] font-black tracking-[0.08em] text-blue-700">当前</span>' : "";
       const metric = item.is_file_operation ? `${Number(item.current || 0)} / ${Number(item.total || 0)} 项` : byteText;
