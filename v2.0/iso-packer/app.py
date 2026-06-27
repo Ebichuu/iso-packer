@@ -3519,7 +3519,7 @@ def apply_local_media_poster(card: Dict, payload: Dict) -> Dict:
         card["poster_url"] = poster_url
     if payload.get("title_zh"):
         card["title"] = str(payload.get("title_zh") or card.get("title") or "")
-    for key in ("tmdb_id", "tmdb_title", "tmdb_original_title", "poster_status"):
+    for key in ("tmdb_id", "tmdb_title", "tmdb_original_title", "poster_status", "year"):
         if payload.get(key):
             card[key] = payload.get(key)
     return card
@@ -3579,12 +3579,15 @@ def local_media_cards(history_items, limit: int = 8, cfg: Optional[Dict] = None)
         upper_text = f"{name} {source}".upper()
         has_dv = any(token in upper_text for token in ("DV", "DOLBY", "VISION", "DOVI"))
 
+        _, release_year = local_media_tmdb_query(name)
+
         cards.append({
             "title": name,
             "raw_name": name,
             "subtitle": status_label(status),
             "source": source,
             "resolution": infer_resolution_label(f"{name} {source}"),
+            "year": release_year,
             "size": format_size(size_value) if size_value else "-",
             "completed_at": (item or {}).get("finished_at") or (item or {}).get("done_at") or "",
             "status": "done" if status in {"done", "transfer_done"} else "pending_confirm",

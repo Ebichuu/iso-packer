@@ -133,9 +133,11 @@ def verify_static_contracts() -> None:
         "index.html missing today-aware release cache badge",
     )
     require("暂无封面" in index_html, "index.html missing release poster fallback")
-    require("TMDB 缓存海报" in index_html, "index.html missing local asset poster cache copy")
+    require("点击有匹配结果的卡片" in index_html, "index.html missing local asset TMDB link copy")
     require("movie.poster_path" in index_html, "local asset cards should render poster artwork when available")
-    require("movie.poster_status" in index_html, "local asset cards should expose poster cache status")
+    require("movie.poster_status" not in index_html, "local asset cards should not expose poster-maintenance status")
+    require("movie.match_status" not in index_html, "local asset cards should not expose archive-maintenance status")
+    require("https://www.themoviedb.org/movie/{{ movie.tmdb_id }}" in index_html, "local asset cards should link to TMDB when matched")
     require("radial-gradient" not in index_html, "index.html should not use decorative radial gradients")
     require("release-calendar-row" in index_html, "index.html release calendar should use compact media rows")
     require("release-calendar-poster" in index_html, "index.html release calendar should keep poster artwork visible")

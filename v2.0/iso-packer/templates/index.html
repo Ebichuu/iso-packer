@@ -132,14 +132,21 @@
                 <p class="font-mono text-[10px] font-black tracking-[0.12em] text-emerald-700">本地归档</p>
                 <h3 class="mt-1 text-2xl font-black tracking-[-0.035em] text-zinc-950">已交付原盘资产</h3>
             </div>
-            <p class="max-w-md text-xs font-medium leading-6 text-zinc-500">交付记录会按本地任务名匹配 TMDB 缓存海报；未匹配时保留中文占位，便于继续核对片名和规格。</p>
+            <p class="max-w-md text-xs font-medium leading-6 text-zinc-500">最近完成的 ISO 以影片海报和规格展示；点击有匹配结果的卡片可打开 TMDB 详情。</p>
         </div>
 
-        <div class="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        <div class="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
             {% for movie in cached_movies %}
+            {% set movie_title = movie.tmdb_title or movie.title or movie.raw_name %}
+            {% set movie_original = movie.tmdb_original_title or movie.raw_name %}
+            {% if movie.tmdb_id %}
+            <a class="group block overflow-hidden rounded-xl border border-zinc-200 bg-white transition hover:-translate-y-0.5 hover:border-zinc-300 hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2" href="https://www.themoviedb.org/movie/{{ movie.tmdb_id }}" target="_blank" rel="noreferrer" aria-label="打开 {{ movie_title }} 的 TMDB 页面">
+            {% else %}
             <article class="group overflow-hidden rounded-xl border border-zinc-200 bg-white transition hover:-translate-y-0.5 hover:border-zinc-300 hover:shadow-sm">
-                <div class="relative aspect-[2/3] overflow-hidden bg-zinc-100 bg-cover bg-center" {% if movie.poster_path %}style="background-image: url('{{ movie.poster_path }}');"{% endif %}>
+            {% endif %}
+                <div class="relative aspect-[2/3] overflow-hidden bg-zinc-100">
                     {% if movie.poster_path %}
+                    <img src="{{ movie.poster_path }}" alt="{{ movie_title }} 海报" class="h-full w-full object-cover transition duration-500 group-hover:scale-[1.035]" loading="lazy">
                     <div class="absolute inset-0 bg-gradient-to-t from-zinc-950/88 via-zinc-950/10 to-transparent"></div>
                     {% else %}
                     <div class="home-poster-card absolute inset-0"></div>
@@ -156,18 +163,32 @@
                         {% endif %}
                     </div>
                 </div>
-                <div class="space-y-1.5 border-t border-zinc-100 p-3">
-                    <h4 class="home-asset-title text-xs font-black leading-snug tracking-[-0.01em] text-zinc-900" title="{{ movie.title or movie.raw_name }}">{{ movie.title or movie.raw_name }}</h4>
-                    <div class="flex items-center justify-between gap-2">
-                        <span class="truncate text-[10px] font-bold text-zinc-500">{{ movie.size }}</span>
-                        <span class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[9px] font-black text-emerald-700">
-                            <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
-                            {{ movie.match_status }}
+                <div class="border-t border-zinc-100 p-3">
+                    <h4 class="home-asset-title text-sm font-black leading-snug tracking-[-0.01em] text-zinc-900" title="{{ movie_title }}">{{ movie_title }}</h4>
+                    {% if movie_original and movie_original != movie_title %}
+                    <p class="mt-1 truncate text-[11px] font-semibold text-zinc-500" title="{{ movie_original }}">{{ movie_original }}</p>
+                    {% endif %}
+                    <div class="mt-3 grid grid-cols-3 gap-2 text-[10px] font-bold text-zinc-500">
+                        <span class="rounded-lg bg-zinc-50 px-2 py-1">
+                            <span class="block text-[9px] font-black text-zinc-400">年份</span>
+                            {{ movie.year or "—" }}
+                        </span>
+                        <span class="rounded-lg bg-zinc-50 px-2 py-1">
+                            <span class="block text-[9px] font-black text-zinc-400">规格</span>
+                            {{ movie.resolution or "—" }}
+                        </span>
+                        <span class="rounded-lg bg-zinc-50 px-2 py-1">
+                            <span class="block text-[9px] font-black text-zinc-400">容量</span>
+                            {{ movie.size or "—" }}
                         </span>
                     </div>
-                    <p class="truncate font-mono text-[9px] font-bold text-zinc-400">{{ movie.poster_status or movie.completed_at or movie.subtitle }}</p>
+                    <p class="mt-2 truncate text-[10px] font-semibold text-zinc-400" title="{{ movie.raw_name }}">任务名：{{ movie.raw_name }}</p>
                 </div>
+            {% if movie.tmdb_id %}
+            </a>
+            {% else %}
             </article>
+            {% endif %}
             {% else %}
             <div class="col-span-full rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 p-8 text-center">
                 <div class="mx-auto flex h-14 w-14 items-center justify-center rounded-xl border border-zinc-200 bg-white shadow-sm">
