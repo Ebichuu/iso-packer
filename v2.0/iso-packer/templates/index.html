@@ -135,7 +135,7 @@
             <p class="max-w-md text-xs font-medium leading-6 text-zinc-500">最近完成的 ISO 以影片海报和规格展示；点击有匹配结果的卡片可打开 TMDB 详情。</p>
         </div>
 
-        <div class="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+        <div class="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
             {% for movie in cached_movies %}
             {% set movie_title = movie.tmdb_title or movie.title or movie.raw_name %}
             {% set movie_original = movie.tmdb_original_title or movie.raw_name %}
