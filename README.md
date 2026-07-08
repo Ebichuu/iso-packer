@@ -1,234 +1,33 @@
 # ISO Packer
 
-轻量个人版蓝光原盘自动封装工具。当前主线以 `ebichu/iso-packer:latest` 为准，面向单 VPS、自用部署、固定 CD2 流程。
+当前主版本是 `v2.0`，源码、Dockerfile、Compose 配置和本地启动脚本都集中在 [`v2.0/`](v2.0/) 目录。
 
-## 当前定位
+## 当前发布
 
-- 单实例 Docker 部署
-- 固定流程：`/watch -> /output -> /CloudNAS/CloudDrive/00-未整理/00-mkiso`
-- CloudDrive2 API 用于观察、测试连接、封装前门禁和受控手动 / 自动拉取
-- 只做封装、转移、观察和固定目录内的受控拉取
+- GitHub 主线：`main`
+- Docker Hub 正式镜像：`ebichu/iso-packer:latest`
+- Docker Hub 测试镜像：`ebichu/iso-packer:test`
+- 本地预览端口：`15866`
 
-## 已有功能
+## 本地运行
 
-- 监控 `BDMV` / `VIDEO_TS` 原盘目录
-- 使用 `genisoimage` 封装 ISO
-- 使用 `xorriso` 做封装后校验
-- 将 ISO 从 `/output` 通过文件系统移动到 CD2 挂载目标目录
-- Web 密码登录保护
-- 任务耗时统计
-- 读取 CD2 API 上传 / 下载 / 复制任务并显示状态
-- CD2 下载或复制未完成时，自动等待，不抢跑封装
-- 扫描 CD2 远程源目录，手动点选候选或开启自动拉取后调用 CD2 创建复制任务拉取到 `/watch`
-- 目录观察：`watch` / `output` / `cd2`
-- `GET /healthz` 健康检查
-
-## 封装说明
-
-当前封装链路是：
-
-```text
-识别原盘目录 -> genisoimage 打包 -> xorriso 校验 -> 移动到 CD2 目标目录
+```powershell
+cd D:\Projects\makeiso\v2.0
+.\start-local.bat
 ```
 
-说明：
+或使用 Docker Compose：
 
-- 只处理原盘目录，不处理普通单视频文件
-- 不做转码，不改音轨和视频轨
-- 双层、三层、4K UHD 原盘都按原结构打包
-- Dolby Vision、HDR10+、Atmos 等信息不会被重新编码
-- 前提是原盘目录完整，且 `/output` 有足够临时空间
-
-## 推荐部署
-
-推荐直接使用 Docker Hub 镜像：
-
-```yaml
-services:
-  iso-packer:
-    image: ebichu/iso-packer:latest
-    container_name: iso-packer
-    restart: unless-stopped
-
-    ports:
-      - "15865:15865"
-
-    environment:
-      - TZ=Asia/Shanghai
-      - PYTHONUNBUFFERED=1
-
-    volumes:
-      - ./data:/data
-      - /mnt/115Download:/watch
-      - /mnt/iso-output:/output
-      - /CloudNAS:/CloudNAS:rslave
-
-    network_mode: bridge
-
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-```
-
-说明：
-
-- `./data` 用于持久化配置、状态和日志
-- `/mnt/115Download` 是监控目录
-- `/mnt/iso-output` 是临时 ISO 输出目录
-- `/CloudNAS:/CloudNAS:rslave` 用于接收 CD2 的挂载传播
-- `extra_hosts` 用于在 Linux bridge 网络下访问宿主机上的 CD2 API
-
-如果你要本地改代码再构建，把 `image:` 改成 `build: .` 即可。
-
-## 首次使用
-
-1. 启动容器：
-
-   ```bash
-   docker compose up -d
-   ```
-
-2. 打开：
-
-   ```text
-   http://<你的 VPS IP>:15865/
-   ```
-
-3. 首次进入会先要求设置 Web 登录密码
-
-4. 在设置页确认或修改下面这些值：
-
-   ```text
-   监控目录: /watch
-   输出目录: /output
-   CD2 挂载根目录: /CloudNAS
-   启用 CD2 转移: 开（把 ISO 通过文件系统移动到 CD2 挂载目标目录）
-   CD2 目标目录: /CloudNAS/CloudDrive/00-未整理/00-mkiso（本地挂载路径，不是 API 上传地址）
-   ```
-
-5. 如果你要看 CD2 上传 / 下载 / 复制状态，并让封装前门禁参考 CD2 任务，再额外填写：
-
-   ```text
-   启用 CD2 API: 勾选
-   CD2 认证方式: API Token
-   CD2 API 地址: host.docker.internal:19798
-   CD2 API Token: 按你的 CD2 实际配置填写
-   轮询秒数: 10
-   等待 CD2 上传完成: 按需开启（开启后会等待匹配到的 CD2 上传任务完成，再显示最终完成）
-   ```
-
-   如果你不用 Token，也可以切换成用户名密码模式；个人部署建议优先用 API Token，并确保它至少能读取上传队列、下载队列和复制任务。开启等待上传完成前，需要确认路径别名能把容器路径（如 `/CloudNAS/CloudDrive/...`）匹配到 CD2 网盘路径（如 `/115/...`）。
-
-6. 如果要在 Web 里从 CD2 远程源目录拉取原盘，再填写：
-
-   ```text
-   CD2 归档监控路径: /115/03-PT（每行一个）
-   归档监控递归层级: 1（默认只看监控路径下一级目录）
-   启用 CD2 手动拉取: 按需勾选
-   启用 CD2 自动拉取: 按需勾选（默认关闭）
-   同时自动拉取任务数: 1
-   自动拉取最小体积 GB: 0（默认不过滤）
-   CD2 本地拉取目录: /watch
-   CD2 拉取目标目录: /115/Download（CD2 网盘路径）
-   ```
-
-   `CD2 拉取目标目录` 留空时，会尝试用路径别名把 `/watch` 转换成 CD2 网盘路径。手动 / 自动拉取只会对已配置源目录下的候选调用 CD2 `copy_file`，不会删除源文件，也不会取消你在 CD2 里手动创建的任务。自动拉取默认关闭，开启后每轮扫描默认最多创建 1 个拉取任务，且默认同时只保留 1 个自动拉取任务；这些上限都可在 Web 设置里调整。也可以配置递归层级、最小体积和包含 / 排除关键词，并会跳过已经记录过的同源候选。
-
-7. 保存设置后开始监控
-
-## Web 界面现在能看什么
-
-- 当前任务状态
-- 封装耗时、转移耗时、总耗时
-- CD2 上传 / 下载 / 复制状态
-- CD2 远程原盘候选、手动拉取入口和自动拉取状态
-- 最近日志
-- 目录观察：
-  - `watch`
-  - `output`
-  - `cd2`
-
-目录观察是只读的，主要为了少进 CD2 容器确认文件状态。
-
-## 健康检查
-
-容器健康检查走的是：
-
-```bash
-curl http://127.0.0.1:15865/healthz
-```
-
-正常返回：
-
-```json
-{"ok": true}
-```
-
-## 常用命令
-
-查看日志：
-
-```bash
-docker logs -f iso-packer
-```
-
-更新镜像：
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-源码构建：
-
-```bash
+```powershell
+cd D:\Projects\makeiso\v2.0
 docker compose up -d --build
 ```
 
-备份数据目录：
+## 目录说明
 
-```bash
-tar -czf iso-packer-data-$(date +%Y%m%d).tar.gz data/
-```
+- `v2.0/iso-packer/`：Flask 应用、模板和静态资源
+- `v2.0/docker-compose.yml`：v2.0 本地容器配置
+- `v2.0/Dockerfile`：Docker Hub 构建入口
+- `.github/workflows/`：构建并推送 Docker Hub 镜像
 
-## 常见问题
-
-### 1. 为什么 CD2 API 不是必须的
-
-因为当前项目的实际转移逻辑仍然是文件系统移动：
-
-```text
-/output -> /CloudNAS/CloudDrive/00-未整理/00-mkiso
-```
-
-CD2 API 默认做观察和封装门禁：
-
-- 测试连接
-- 读取上传 / 下载 / 复制任务并显示状态
-- 判断 `/watch` 里的原盘是否仍在由 CD2 下载或复制，未完成时先等待
-
-开启“CD2 手动拉取”后，它还会对配置源目录下的远程原盘候选创建 CD2 复制任务，把原盘拉到 `/watch`。开启“CD2 自动拉取”后，扫描周期会自动发现候选，并按 Web 里配置的“归档监控递归层级”“每轮自动拉取任务数”“同时自动拉取任务数”“自动拉取最小体积”和包含 / 排除关键词创建复制任务，默认每轮 1 个、同时 1 个、体积不过滤。它不会通过 API 直传 ISO，也不会自动删除、取消或接管你在 CD2 里手动创建的任务。
-
-### 2. 为什么必须挂载 `/CloudNAS`
-
-因为 CD2 的 FUSE 挂载点通常是在 `/CloudNAS` 下动态出现，`/CloudNAS:/CloudNAS:rslave` 才能让容器看到这些变化。
-
-### 3. 封装完成但网盘里暂时看不到
-
-通常是 CD2 还在后台上传。此时 Web 界面里的 CD2 状态区和目录观察区会比以前更方便。
-
-### 4. 双层杜比原盘有没有问题
-
-当前方案不转码，只做原盘目录打包和校验，所以双层、三层、UHD、杜比视界、Atmos 这类内容本身没有额外兼容层要处理。真正关键的是原盘结构完整和临时空间足够。
-
-## 相关文档
-
-- [QUICKSTART.md](QUICKSTART.md)
-- [DEPLOYMENT.md](DEPLOYMENT.md)
-- [CLOUDDRIVE2_INTEGRATION.md](CLOUDDRIVE2_INTEGRATION.md)
-- [ISO_PACKER_PLAN.md](ISO_PACKER_PLAN.md)
+旧版根目录项目已移除，后续开发和发布都以 `v2.0` 为准。

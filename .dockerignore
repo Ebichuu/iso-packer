@@ -1,12 +1,17 @@
 .git/
 .github/
 .agents/
+.tmp/
 
 data/
-iso-packer/config.json
-iso-packer/state.json
-iso-packer/*.log
-iso-packer/__pycache__/
+v2.0/data/
+v2.0/test-output/
+v2.0/test-watch/
+v2.0/host/
+v2.0/iso-packer/config.json
+v2.0/iso-packer/state.json
+v2.0/iso-packer/*.log
+v2.0/iso-packer/__pycache__/
 __pycache__/
 
 AutoISO/
