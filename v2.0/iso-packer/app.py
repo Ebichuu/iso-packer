@@ -3811,44 +3811,26 @@ def media_parse_score(name: str, kind: str, resolution: str, source: str, group:
         score += 2
     if group:
         score += 1
-    if kind == "disc":
-        score += 3
     if Path(str(name or "")).suffix.lower() in MEDIA_FILE_EXTENSIONS:
         score += 2
     return score
 
 
-def media_candidate_from_path(path: Path, root_name: str, root: Path, force_kind: str = "") -> Optional[Dict]:
+def media_candidate_from_path(path: Path, root_name: str, root: Path) -> Optional[Dict]:
     try:
-        is_dir = path.is_dir()
+        if not path.is_file() or path.suffix.lower() not in MEDIA_FILE_EXTENSIONS:
+            return None
         stat = path.stat()
     except OSError:
         return None
     display_path = path
-    if is_dir and path.name.lower() in DISC_STRUCTURE_DIRS and path.parent != path:
-        display_path = path.parent
-    raw_name = display_path.stem if display_path.is_file() else display_path.name
-    kind = force_kind
-    if not kind:
-        kind = "folder" if display_path.is_dir() else "file"
-        if display_path.is_dir():
-            try:
-                child_names = {child.name.lower() for child in display_path.iterdir()}
-            except OSError:
-                child_names = set()
-            if DISC_STRUCTURE_DIRS & child_names:
-                kind = "disc"
-        elif display_path.suffix.lower() == ".iso":
-            kind = "iso"
-        elif display_path.suffix.lower() in VIDEO_EXTENSIONS:
-            kind = "video"
+    raw_name = display_path.stem
+    kind = "iso" if display_path.suffix.lower() == ".iso" else "video"
     title, year = local_media_tmdb_query(raw_name)
     resolution = detect_media_resolution(raw_name)
     source = detect_media_source(raw_name)
     group = detect_media_group(raw_name)
     score = media_parse_score(raw_name, kind, resolution, source, group, year)
-    if kind == "folder" and score < 2:
-        return None
     key = media_identity_key(title, year)
     try:
         relative = str(display_path.relative_to(root))
@@ -3863,7 +3845,7 @@ def media_candidate_from_path(path: Path, root_name: str, root: Path, force_kind
         "source": source,
         "group": group or "未知组",
         "kind": kind,
-        "type": "dir" if display_path.is_dir() else "file",
+        "type": "file",
         "path": str(display_path),
         "relative_path": relative,
         "root": root_name,
@@ -3921,7 +3903,11 @@ def scan_media_compare_payload() -> tuple[Dict, int]:
     root = roots.get(root_name)
     if not root:
         return {"ok": False, "message": "无效的根目录"}, 400
-    raw_path = str(request.args.get("path") or str(root)).strip() or str(root)
+    if root_name == "cd2":
+        default_path = str(Path(str(cfg.get("cd2_target_dir") or DEFAULT_CONFIG["cd2_target_dir"])).expanduser())
+    else:
+        default_path = str(root)
+    raw_path = str(request.args.get("path") or default_path).strip() or default_path
     if raw_path == "/":
         raw_path = str(root)
     try:
@@ -3944,11 +3930,6 @@ def scan_media_compare_payload() -> tuple[Dict, int]:
     scanned_dirs = 0
     truncated = False
 
-    initial = media_candidate_from_path(path, root_name, root)
-    if initial and media_candidate_matches_query(initial, query):
-        candidates.append(initial)
-        seen_paths.add(initial["path"])
-
     while queue and len(candidates) < MEDIA_SCAN_MAX_ITEMS:
         current, level = queue.pop(0)
         scanned_dirs += 1
@@ -3964,21 +3945,15 @@ def scan_media_compare_payload() -> tuple[Dict, int]:
                 is_dir = child.is_dir()
             except OSError:
                 continue
-            force_kind = "disc" if is_dir and child.name.lower() in DISC_STRUCTURE_DIRS else ""
-            target = child.parent if force_kind == "disc" else child
-            if str(target) not in seen_paths:
-                candidate = None
-                if force_kind:
-                    candidate = media_candidate_from_path(target, root_name, root, force_kind="disc")
-                elif is_dir:
-                    candidate = media_candidate_from_path(child, root_name, root)
-                elif child.suffix.lower() in MEDIA_FILE_EXTENSIONS:
-                    candidate = media_candidate_from_path(child, root_name, root)
+            if is_dir:
+                if level + 1 < depth:
+                    queue.append((child, level + 1))
+                continue
+            if str(child) not in seen_paths:
+                candidate = media_candidate_from_path(child, root_name, root)
                 if candidate and media_candidate_matches_query(candidate, query):
                     candidates.append(candidate)
                     seen_paths.add(candidate["path"])
-            if is_dir and not force_kind and level + 1 < depth:
-                queue.append((child, level + 1))
         if truncated:
             break
 
@@ -3996,6 +3971,7 @@ def scan_media_compare_payload() -> tuple[Dict, int]:
         "root": root_name,
         "root_path": str(root),
         "path": str(path),
+        "mode": "finished_files",
         "depth": depth,
         "query": query,
         "summary": summary,
@@ -4846,10 +4822,12 @@ def logs():
 def compare():
     context = ui_state_context()
     cd2_browser_root = resolve_cd2_browser_root(context["cfg"])
+    cd2_finished_root = Path(str(context["cfg"].get("cd2_target_dir") or DEFAULT_CONFIG["cd2_target_dir"])).expanduser()
     context["browser_roots"] = {
         "watch": context["cfg"].get("watch_dir", ""),
         "output": context["cfg"].get("output_dir", ""),
         "cd2": str(cd2_browser_root),
+        "cd2_finished": str(cd2_finished_root),
     }
     return render_template("compare.html", **context)
 

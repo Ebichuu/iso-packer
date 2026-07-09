@@ -24,10 +24,8 @@
 
   function kindLabel(kind) {
     return {
-      disc: "原盘目录",
       iso: "ISO",
       video: "视频文件",
-      folder: "目录",
       file: "文件",
     }[kind || "file"] || kind || "文件";
   }
@@ -85,7 +83,7 @@
     const root = helper().qs("#compare-groups");
     helper().clearNode(root);
     if (!groups || !groups.length) {
-      root.appendChild(node("div", "p-8 text-center text-sm font-bold text-zinc-400", "没有扫描到可用于比对的候选。"));
+      root.appendChild(node("div", "p-8 text-center text-sm font-bold text-zinc-400", "没有扫描到可用于比对的成品电影文件。"));
       return;
     }
     groups.forEach((group) => {
@@ -95,7 +93,7 @@
       const titleBox = node("div", "min-w-0 space-y-2");
       const kicker = node("div", "flex flex-wrap items-center gap-2");
       kicker.append(
-        tag(group.multi_group ? "多组线索" : `${group.count || 0} 个候选`, group.multi_group ? "amber" : "zinc"),
+        tag(group.multi_group ? "多组影片" : `${group.count || 0} 个成品`, group.multi_group ? "amber" : "zinc"),
         tag(`${group.group_count || 0} 个发布组`, "blue")
       );
       const title = node("h4", "truncate text-base font-black tracking-tight text-zinc-950", `${group.title || "未命名"}${group.year ? ` (${group.year})` : ""}`);
@@ -145,7 +143,7 @@
       const payload = await helper().fetchJson(`/api/compare?${params.toString()}`);
       renderStats(payload.summary);
       renderGroups(payload.groups || []);
-      setText("#compare-summary", `${payload.summary?.group_count || 0} 个分组 · ${payload.summary?.candidate_count || 0} 个候选${payload.summary?.truncated ? " · 已达到本轮上限" : ""}`);
+      setText("#compare-summary", `${payload.summary?.group_count || 0} 个分组 · ${payload.summary?.candidate_count || 0} 个成品文件${payload.summary?.truncated ? " · 已达到本轮上限" : ""}`);
       setText("#compare-current-path", payload.path || state.path || "--");
     } catch (error) {
       helper().notify(error.message || "扫描失败", true);
