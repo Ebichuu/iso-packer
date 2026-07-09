@@ -21,18 +21,18 @@
             <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">参与比对</div>
             <div id="compare-stat-candidates" class="mt-1 font-mono text-xl font-black text-zinc-950">--</div>
         </div>
-        <div class="rounded-xl border border-zinc-200 bg-white p-3 shadow-sm">
+        <button type="button" data-compare-filter="all" data-active="true" class="compare-filter-card rounded-xl border border-zinc-200 bg-white p-3 text-left shadow-sm">
             <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">分组</div>
             <div id="compare-stat-groups" class="mt-1 font-mono text-xl font-black text-zinc-950">--</div>
-        </div>
-        <div class="rounded-xl border border-amber-200 bg-amber-50/70 p-3 shadow-sm">
+        </button>
+        <button type="button" data-compare-filter="multi" data-active="false" class="compare-filter-card rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-left shadow-sm">
             <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-amber-500">多组影片</div>
             <div id="compare-stat-multi" class="mt-1 font-mono text-xl font-black text-amber-700">--</div>
-        </div>
-        <div class="rounded-xl border border-blue-200 bg-blue-50/70 p-3 shadow-sm">
+        </button>
+        <button type="button" data-compare-filter="versions" data-active="false" class="compare-filter-card rounded-xl border border-blue-200 bg-blue-50/70 p-3 text-left shadow-sm">
             <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-blue-500">同片多版</div>
             <div id="compare-stat-duplicates" class="mt-1 font-mono text-xl font-black text-blue-700">--</div>
-        </div>
+        </button>
         <div class="rounded-xl border border-zinc-200 bg-white p-3 shadow-sm">
             <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">扫描目录</div>
             <div id="compare-stat-scanned" class="mt-1 font-mono text-xl font-black text-zinc-950">--</div>
@@ -114,6 +114,10 @@
 
 {% block script %}
 <style>
+    .compare-filter-card { transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s, background-color 0.15s; }
+    .compare-filter-card:hover:not(:disabled) { transform: translateY(-1px); border-color: #a1a1aa; box-shadow: 0 8px 22px rgba(24,24,27,0.08); }
+    .compare-filter-card[data-active="true"] { border-color: #18181b; background: #fafafa; box-shadow: inset 0 0 0 1px rgba(24,24,27,0.08), 0 8px 24px rgba(24,24,27,0.08); }
+    .compare-filter-card:disabled { opacity: 0.45; cursor: default; }
     .compare-directory-row { display: grid; grid-template-columns: 2.25rem minmax(0,1fr) auto; align-items: center; gap: 0.75rem; width: 100%; border: 1px solid #e4e4e7; border-radius: 0.8rem; background: #fff; padding: 0.75rem; text-align: left; }
     .compare-directory-row:hover { border-color: #a1a1aa; background: #fafafa; }
     .compare-directory-row[data-selected="true"] { border-color: #a1a1aa; background: #f4f4f5; }

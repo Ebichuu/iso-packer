@@ -7,6 +7,9 @@
     depth: 1,
     query: "",
     loading: false,
+    resultFilter: "all",
+    groups: [],
+    summary: {},
     pickerPath: DIRECTORY_ROOT,
     pickerParent: null,
   };
@@ -94,6 +97,44 @@
     setText("#compare-stat-scanned", data.scanned_dirs ?? 0);
   }
 
+  function filterLabel(filter = state.resultFilter) {
+    return {
+      all: "全部分组",
+      multi: "多组影片",
+      versions: "同片多版",
+    }[filter] || "全部分组";
+  }
+
+  function isMultiReleaseGroup(group) {
+    return Number(group?.group_count || 0) > 1;
+  }
+
+  function visibleGroups() {
+    const groups = Array.isArray(state.groups) ? state.groups : [];
+    if (state.resultFilter === "multi" || state.resultFilter === "versions") {
+      return groups.filter(isMultiReleaseGroup);
+    }
+    return groups;
+  }
+
+  function visibleCandidateCount(groups) {
+    return (groups || []).reduce((total, group) => total + Number(group?.count || 0), 0);
+  }
+
+  function syncFilterButtons() {
+    const counts = {
+      all: Number(state.summary?.group_count || 0),
+      multi: Number(state.summary?.multi_group_count || 0),
+      versions: Number(state.summary?.duplicate_like_count || 0),
+    };
+    helper().qsa("[data-compare-filter]").forEach((button) => {
+      const filter = button.dataset.compareFilter || "all";
+      button.dataset.active = String(filter === state.resultFilter);
+      button.disabled = filter !== "all" && Number(counts[filter] || 0) <= 0;
+      button.title = `${filterLabel(filter)}筛选`;
+    });
+  }
+
   function tag(text, tone) {
     const classes = {
       amber: "border-amber-200 bg-amber-50 text-amber-700",
@@ -122,11 +163,18 @@
     return row;
   }
 
+  function emptyGroupsText() {
+    if (state.resultFilter === "multi" || state.resultFilter === "versions") {
+      return `没有发现${filterLabel()}。`;
+    }
+    return "没有发现同片多版本或多组的成品电影文件。";
+  }
+
   function renderGroups(groups) {
     const root = helper().qs("#compare-groups");
     helper().clearNode(root);
     if (!groups || !groups.length) {
-      root.appendChild(node("div", "p-8 text-center text-sm font-bold text-zinc-400", "没有发现同片多版本或多组的成品电影文件。"));
+      root.appendChild(node("div", "p-8 text-center text-sm font-bold text-zinc-400", emptyGroupsText()));
       return;
     }
     groups.forEach((group) => {
@@ -168,7 +216,7 @@
     });
   }
 
-  function summaryText(summary) {
+  function summaryText(summary, groups) {
     const data = summary || {};
     const groupCount = data.group_count || 0;
     const candidateCount = data.candidate_count || 0;
@@ -176,7 +224,19 @@
     const hiddenCount = Math.max(0, scannedCount - candidateCount);
     const hiddenText = hiddenCount ? ` · 已忽略 ${hiddenCount} 个单片` : "";
     const truncatedText = data.truncated ? " · 已达到本轮上限" : "";
+    if (state.resultFilter !== "all") {
+      const visibleCount = (groups || []).length;
+      return `${filterLabel()}：当前显示 ${visibleCount} / ${groupCount} 个分组 · ${visibleCandidateCount(groups)} 个成品${hiddenText}${truncatedText}`;
+    }
     return `${groupCount} 个多版本分组 · ${candidateCount} 个参与比对的成品${hiddenText}${truncatedText}`;
+  }
+
+  function renderFilteredResults() {
+    const groups = visibleGroups();
+    renderStats(state.summary);
+    syncFilterButtons();
+    renderGroups(groups);
+    setText("#compare-summary", summaryText(state.summary, groups));
   }
 
   async function scan() {
@@ -199,11 +259,13 @@
         state.path = payload.path;
         updatePathInput();
       }
-      renderStats(payload.summary);
-      renderGroups(payload.groups || []);
-      setText("#compare-summary", summaryText(payload.summary));
+      state.summary = payload.summary || {};
+      state.groups = Array.isArray(payload.groups) ? payload.groups : [];
+      renderFilteredResults();
       setText("#compare-current-path", payload.path || state.path || "--");
     } catch (error) {
+      state.summary = {};
+      state.groups = [];
       helper().notify(error.message || "扫描失败", true);
       renderStats({});
       renderGroups([]);
@@ -341,6 +403,13 @@
     helper().qs("#compare-scan")?.addEventListener("click", () => {
       const input = helper().qs("#compare-path");
       setComparePath((input && input.value.trim()) || activeRootPath(), true);
+    });
+    helper().qsa("[data-compare-filter]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (button.disabled) return;
+        state.resultFilter = button.dataset.compareFilter || "all";
+        renderFilteredResults();
+      });
     });
     helper().qs("#compare-pick-directory")?.addEventListener("click", openPicker);
     helper().qs("#compare-directory-list")?.addEventListener("click", (event) => {

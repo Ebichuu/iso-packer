@@ -3821,7 +3821,7 @@ def detect_media_group(name: str) -> str:
         return ""
     patterns = [
         r"[\[\(]([A-Za-z0-9][A-Za-z0-9._@-]{1,47})[\]\)]\s*$",
-        r"[-–—]\s*([A-Za-z0-9][A-Za-z0-9._@-]{1,47})$",
+        r"[-–—]\s*([A-Za-z0-9][A-Za-z0-9._@]{1,47})$",
     ]
     for pattern in patterns:
         match = re.search(pattern, text)
@@ -4011,7 +4011,7 @@ def scan_media_compare_payload() -> tuple[Dict, int]:
         "scanned_candidate_count": len(candidates),
         "group_count": len(groups),
         "multi_group_count": sum(1 for group in groups if group.get("multi_group")),
-        "duplicate_like_count": sum(1 for group in groups if int(group.get("count") or 0) > 1),
+        "duplicate_like_count": sum(1 for group in groups if int(group.get("group_count") or 0) > 1),
         "scanned_dirs": scanned_dirs,
         "truncated": truncated,
     }
