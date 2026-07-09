@@ -157,6 +157,146 @@ def file_browser_roots_from_config(cfg: Dict) -> Dict[str, Path]:
     }
 
 
+def looks_like_disc_structure_dir(path: Path) -> bool:
+    if not path.is_dir() or path.name.lower() not in DISC_STRUCTURE_DIRS:
+        return False
+    try:
+        child_names = {child.name.lower() for child in path.iterdir()}
+    except (FileNotFoundError, PermissionError, OSError):
+        return False
+    if path.name.lower() == "bdmv":
+        return bool(child_names & {"index.bdmv", "movieobject.bdmv", "stream", "playlist", "clipinf"})
+    if path.name.lower() == "video_ts":
+        return any(name.endswith(".ifo") for name in child_names)
+    return False
+
+
+def file_browser_disc_type(path: Path) -> str:
+    if not path.is_dir():
+        return ""
+    if looks_like_disc_structure_dir(path):
+        return path.name.upper()
+    if path.name.lower() in DISC_STRUCTURE_DIRS:
+        return ""
+    try:
+        children = [child for child in path.iterdir() if child.is_dir()]
+    except (FileNotFoundError, PermissionError, OSError):
+        return ""
+    for child in children:
+        if looks_like_disc_structure_dir(child):
+            return child.name.upper()
+    if len(children) == 1:
+        try:
+            for grandchild in children[0].iterdir():
+                if grandchild.is_dir() and looks_like_disc_structure_dir(grandchild):
+                    return grandchild.name.upper()
+        except (FileNotFoundError, PermissionError, OSError):
+            return ""
+    return ""
+
+
+def file_browser_pack_lookup(cfg: Dict) -> Dict[str, Dict]:
+    aliases = cd2_path_aliases_from_cfg(cfg or {})
+
+    def variants_for(value: str) -> list[str]:
+        variants = list(alias_variants_for_path(value, aliases))
+        text = str(value or "")
+        should_resolve = (
+            bool(re.match(r"^[A-Za-z]:[\\/]", text))
+            or "\\" in text
+            or (os.name != "nt" and text.startswith("/"))
+        )
+        if should_resolve:
+            try:
+                variants.extend(alias_variants_for_path(str(Path(text).expanduser().resolve()), aliases))
+            except (OSError, RuntimeError, ValueError):
+                pass
+        result = []
+        seen = set()
+        for variant in variants:
+            normalized = normalize_path_text(variant)
+            key = normalized.lower()
+            if normalized and key not in seen:
+                seen.add(key)
+                result.append(normalized)
+        return result
+
+    with lock:
+        items = {str(key): dict(value or {}) for key, value in (state.get("items") or {}).items()}
+    lookup: Dict[str, Dict] = {}
+    for key, item in items.items():
+        candidates = [
+            key,
+            str(item.get("source") or ""),
+            str(item.get("cd2_pull_source") or ""),
+        ]
+        for candidate in candidates:
+            for variant in variants_for(candidate):
+                normalized = variant.lower()
+                if normalized not in lookup:
+                    lookup[normalized] = item
+    return lookup
+
+
+def file_browser_item_for_path(path: Path, lookup: Dict[str, Dict], cfg: Dict) -> Optional[Dict]:
+    aliases = cd2_path_aliases_from_cfg(cfg or {})
+    variants = list(alias_variants_for_path(str(path), aliases))
+    try:
+        variants.extend(alias_variants_for_path(str(path.expanduser().resolve()), aliases))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    for variant in variants:
+        item = lookup.get(normalize_path_text(variant).lower())
+        if item:
+            return dict(item)
+    return None
+
+
+def file_browser_existing_iso_target(path: Path, cfg: Dict) -> str:
+    targets: list[Path] = []
+    output_dir = Path(str((cfg or {}).get("output_dir") or DEFAULT_CONFIG["output_dir"])).expanduser()
+    targets.append(iso_path_for(path, output_dir))
+    cd2_target = normalize_path_text((cfg or {}).get("cd2_target_dir") or "")
+    if cd2_target:
+        targets.append(Path(cd2_target).expanduser() / f"{safe_filename(path.name)}.iso")
+    seen = set()
+    for target in targets:
+        key = normalize_path_text(str(target)).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        try:
+            if target.exists() and target.is_file():
+                return str(target)
+        except OSError:
+            continue
+    return ""
+
+
+def file_browser_pack_payload(path: Path, disc_type: str, lookup: Dict[str, Dict], cfg: Dict) -> Dict:
+    if not disc_type:
+        return {}
+    source_path = path.parent if looks_like_disc_structure_dir(path) else path
+    item = file_browser_item_for_path(source_path, lookup, cfg)
+    status = str((item or {}).get("status") or "")
+    target = str((item or {}).get("target") or "")
+    packed_statuses = {"done", "transfer_done", "waiting_cd2_upload"}
+    if status in packed_statuses:
+        packed = True
+    else:
+        existing_target = file_browser_existing_iso_target(source_path, cfg)
+        packed = bool(existing_target)
+        if existing_target and not target:
+            target = existing_target
+    return {
+        "pack_state": "packed" if packed else "unpacked",
+        "pack_label": "已封装" if packed else "未封装",
+        "pack_target": target,
+        "pack_task_status": status,
+        "pack_task_label": status_label(status) if status else "",
+    }
+
+
 def resolve_file_browser_path(cfg: Dict, root_name: str, raw_path: str) -> tuple[Path, Path]:
     roots = file_browser_roots_from_config(cfg)
     root = roots.get(root_name)
@@ -263,7 +403,8 @@ def directory_size_summary(path: Path) -> Dict:
     }
 
 
-def file_property_payload(path: Path, root_name: str, root: Path) -> Dict:
+def file_property_payload(path: Path, root_name: str, root: Path, cfg: Optional[Dict] = None) -> Dict:
+    cfg = cfg or load_config()
     stat = path.stat()
     is_dir = path.is_dir()
     summary = directory_size_summary(path) if is_dir else {
@@ -281,7 +422,8 @@ def file_property_payload(path: Path, root_name: str, root: Path) -> Dict:
         }
     except OSError:
         disk = None
-    return {
+    disc_type = file_browser_disc_type(path) if is_dir else ""
+    payload = {
         "ok": True,
         "root": root_name,
         "root_path": str(root),
@@ -299,6 +441,10 @@ def file_property_payload(path: Path, root_name: str, root: Path) -> Dict:
         "writable": os.access(path, os.W_OK),
         "disk": disk,
     }
+    if disc_type:
+        payload["disc_type"] = disc_type
+        payload.update(file_browser_pack_payload(path, disc_type, file_browser_pack_lookup(cfg), cfg))
+    return payload
 
 
 def run_file_operation_task(task_id: str, action: str, sources: list[Path], destination: Optional[Path]) -> None:
@@ -426,6 +572,7 @@ def classify_log_message(message: str) -> str:
 def log_category_label(category: str) -> str:
     return {
         "error": "异常",
+        "duplicate": "重复",
         "pack": "封装",
         "cd2": "CD2",
         "file": "文件",
@@ -572,18 +719,25 @@ def cd2_state_log_events(snapshot: Dict) -> list[Dict]:
         for item in ((cd2_state.get(section) or {}).get(list_key) or [])[-20:]:
             timestamp = str((item or {}).get(time_key) or (item or {}).get("created_at") or "")
             ok = bool((item or {}).get("ok", True))
-            message = f"{label} · {(item or {}).get('message') or ('完成' if ok else '失败')}"
+            raw_message = str((item or {}).get("message") or "")
+            status = str((item or {}).get("status") or "")
+            is_duplicate = status == "duplicate" or cd2_already_exists_message(raw_message)
+            if is_duplicate:
+                message = f"{label} · 目标已存在，跳过转存"
+            else:
+                message = f"{label} · {raw_message or ('完成' if ok else '失败')}"
             path = str((item or {}).get("source_path") or (item or {}).get("source") or (item or {}).get("dest_dir") or "")
-            category = "cd2" if ok else "error"
+            category = "duplicate" if is_duplicate else ("cd2" if ok else "error")
             events.append({
                 "id": log_event_id(f"cd2_{section}", timestamp, message, path),
                 "time": timestamp,
                 "category": category,
                 "category_label": log_category_label(category),
-                "level": log_event_level(category, "done" if ok else "failed"),
+                "level": log_event_level(category, "done" if ok or is_duplicate else "failed"),
                 "message": message,
                 "path": path,
                 "source": f"cd2_{section}",
+                "status": "duplicate" if is_duplicate else ("done" if ok else "failed"),
             })
     for item in ((cd2_state.get("webhook") or {}).get("recent_events") or [])[-30:]:
         timestamp = str((item or {}).get("received_at") or "")
@@ -631,6 +785,7 @@ def logs_payload() -> Dict:
     summary = {
         "total": len(events),
         "error": sum(1 for event in events if event.get("category") == "error"),
+        "duplicate": sum(1 for event in events if event.get("category") == "duplicate"),
         "pack": sum(1 for event in events if event.get("category") == "pack"),
         "cd2": sum(1 for event in events if event.get("category") == "cd2"),
         "file": sum(1 for event in events if event.get("category") == "file"),
@@ -1213,6 +1368,7 @@ def create_cd2_monitor_copy_tasks_for_browser_sources(cfg: Dict, sources: list[P
 
     results = []
     ok_count = 0
+    duplicate_count = 0
     last_status = 400
     for source in sources:
         remote_path = cd2_local_path_to_remote(str(source), cfg)
@@ -1240,8 +1396,13 @@ def create_cd2_monitor_copy_tasks_for_browser_sources(cfg: Dict, sources: list[P
             ok, message, result_paths = cd2_result_success(copy_result)
         except Exception as exc:
             ok, message, result_paths = False, cd2_error_message(exc), []
+        duplicate = (not ok) and cd2_already_exists_message(message)
+        if duplicate:
+            ok = True
+            message = "目标已存在，跳过转存"
         result = {
             "ok": ok,
+            "status": "duplicate" if duplicate else ("done" if ok else "failed"),
             "source": str(source),
             "source_path": remote_path,
             "dest_dir": dest_dir,
@@ -1252,32 +1413,42 @@ def create_cd2_monitor_copy_tasks_for_browser_sources(cfg: Dict, sources: list[P
         results.append(result)
         record_cd2_monitor_copy_result(result)
         if ok:
-            ok_count += 1
+            if duplicate:
+                duplicate_count += 1
+            else:
+                ok_count += 1
             last_status = 200
         else:
             last_status = 400
 
-    failed_count = len(results) - ok_count
-    if ok_count == 0:
+    failed_count = len(results) - ok_count - duplicate_count
+    if ok_count == 0 and duplicate_count == 0:
         message = (results[0].get("message") if results else "") or "CD2 网盘复制任务创建失败"
         return {
             "ok": False,
             "remote_copy": True,
             "message": message,
             "created_count": 0,
+            "skipped_count": 0,
             "failed_count": failed_count,
             "dest_dir": dest_dir,
             "copies": results,
         }, last_status or 400
 
-    message = f"已提交 {ok_count} 个 CD2 网盘复制任务"
+    if ok_count:
+        message = f"已提交 {ok_count} 个 CD2 网盘复制任务"
+    else:
+        message = ""
+    if duplicate_count:
+        message = f"{message}，{duplicate_count} 个目标已存在已跳过" if message else f"{duplicate_count} 个目标已存在，已跳过转存"
     if failed_count:
-        message += f"，{failed_count} 个失败"
+        message = f"{message}，{failed_count} 个失败" if message else f"{failed_count} 个失败"
     return {
         "ok": True,
         "remote_copy": True,
         "message": message,
         "created_count": ok_count,
+        "skipped_count": duplicate_count,
         "failed_count": failed_count,
         "dest_dir": dest_dir,
         "copies": results,
@@ -1300,6 +1471,11 @@ def remote_path_under(path: str, root: str) -> bool:
     value = normalize_path_text(path).lower()
     base = normalize_path_text(root).lower()
     return bool(value and base and (value == base or value.startswith(base + "/")))
+
+
+def cd2_already_exists_message(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return "already_exists" in lowered or "already exists" in lowered or "已存在" in lowered
 
 
 def cd2_remote_source_allowed(path: str, cfg: Dict) -> bool:
@@ -5262,17 +5438,24 @@ def api_browse():
     except OSError as exc:
         return jsonify({"ok": False, "message": f"无法读取目录: {exc}"}), 400
     entries = []
+    pack_lookup = file_browser_pack_lookup(cfg)
     for child in children:
         try:
             stat = child.stat()
-            entries.append({
+            is_dir = child.is_dir()
+            disc_type = file_browser_disc_type(child) if is_dir else ""
+            entry = {
                 "name": child.name,
                 "path": str(child),
-                "type": "dir" if child.is_dir() else "file",
+                "type": "dir" if is_dir else "file",
+                "disc_type": disc_type,
                 "size": stat.st_size,
                 "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 "readable": os.access(child, os.R_OK | os.X_OK),
-            })
+            }
+            if disc_type:
+                entry.update(file_browser_pack_payload(child, disc_type, pack_lookup, cfg))
+            entries.append(entry)
         except OSError:
             continue
     parent = path.parent if path.parent != path and path_in_root(path.parent, root) else None
@@ -5302,7 +5485,7 @@ def api_file_properties():
     if not path.exists():
         return jsonify({"ok": False, "message": "路径不存在"}), 404
     try:
-        return jsonify(file_property_payload(path, root_name, root))
+        return jsonify(file_property_payload(path, root_name, root, cfg))
     except OSError as exc:
         return jsonify({"ok": False, "message": f"无法读取属性: {exc}"}), 400
 

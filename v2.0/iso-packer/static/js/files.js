@@ -14,6 +14,13 @@
     rename: "重命名",
   };
 
+  const FILTER_LABELS = {
+    all: "全部",
+    disc: "原盘",
+    dir: "目录",
+    file: "文件",
+  };
+
   const state = {
     root: "watch",
     path: "/",
@@ -75,6 +82,9 @@
   }
 
   function isDiscHint(entry) {
+    if (entry && Object.prototype.hasOwnProperty.call(entry, "disc_type")) {
+      return Boolean(entry.disc_type);
+    }
     const name = String((entry && entry.name) || "").toUpperCase();
     const path = String((entry && entry.path) || "").toUpperCase();
     return entry && entry.type === "dir" && (
@@ -86,6 +96,10 @@
       path.includes("BLURAY") ||
       path.includes("BLU-RAY")
     );
+  }
+
+  function filterLabel(filter = state.filter) {
+    return FILTER_LABELS[filter] || "当前";
   }
 
   function entryGroup(entry) {
@@ -221,6 +235,7 @@
     helper().setText(helper().qs("#file-current-root"), state.rootPath ? `${rootLabel()} · ${state.rootPath}` : rootLabel());
     helper().setText(helper().qs("#file-entry-count"), `${filteredEntries().length} / ${state.entries.length} 项`);
     helper().setText(helper().qs("#file-selected-count"), `${state.selected.size} 项已选`);
+    helper().setText(helper().qs("#file-filter-status"), `${filterLabel()} · 仅筛选当前路径，不切换位置`);
   }
 
   function renderOperationBar() {
@@ -268,7 +283,13 @@
     if (!entries.length) {
       const empty = document.createElement("div");
       empty.className = "empty-state slim";
-      empty.textContent = state.entries.length ? "当前筛选条件下没有内容。" : "当前目录为空，或没有可读取的内容。";
+      if (!state.entries.length) {
+        empty.textContent = "当前目录为空，或没有可读取的内容。";
+      } else if (state.filter === "disc") {
+        empty.textContent = "当前路径下没有可直接封装的原盘目录；可先进入影片父目录，或切换到“全部/目录”继续浏览。";
+      } else {
+        empty.textContent = `当前路径下没有${filterLabel()}条目；这里是类型筛选，不会切换根位置。`;
+      }
       list.appendChild(empty);
       return;
     }
@@ -319,6 +340,14 @@
       const attr = document.createElement("div");
       attr.className = "file-attrs";
       attr.appendChild(kind);
+      if (isDiscHint(entry)) {
+        const pack = document.createElement("span");
+        pack.className = "file-pack-state";
+        pack.dataset.state = entry.pack_state || "unpacked";
+        pack.textContent = entry.pack_label || "未封装";
+        if (entry.pack_target) pack.title = entry.pack_target;
+        attr.appendChild(pack);
+      }
 
       const size = document.createElement("span");
       size.className = "file-size";
@@ -472,6 +501,12 @@
       helper().clearNode(body);
       appendPropertyRow(body, "名称", payload.name || "-");
       appendPropertyRow(body, "类型", payload.type === "dir" ? "文件夹" : "文件");
+      if (payload.disc_type) {
+        appendPropertyRow(body, "原盘结构", payload.disc_type || "DISC");
+        appendPropertyRow(body, "是否封装", payload.pack_label || "未封装");
+        if (payload.pack_task_label) appendPropertyRow(body, "封装状态", payload.pack_task_label);
+        if (payload.pack_target) appendPropertyRow(body, "ISO 位置", payload.pack_target);
+      }
       appendPropertyRow(body, "大小", helper().formatBytes(payload.size));
       if (payload.type === "dir") {
         const count = `${payload.file_count || 0} 个文件 / ${payload.dir_count || 0} 个子目录${payload.partial ? "（部分目录不可读）" : ""}`;
