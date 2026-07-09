@@ -195,16 +195,48 @@ def file_browser_disc_type(path: Path) -> str:
     return ""
 
 
-def file_browser_pack_lookup(cfg: Dict) -> Dict[str, Dict]:
+def file_browser_listing_disc_type(path: Path, parent: Path, root_name: str, is_dir: bool) -> str:
+    if not is_dir:
+        return ""
+    if root_name == "cd2":
+        name = path.name.lower()
+        parent_name = parent.name.lower()
+        if name in DISC_STRUCTURE_DIRS:
+            return path.name.upper()
+        if parent_name in DISC_STRUCTURE_DIRS:
+            return parent.name.upper()
+        return ""
+    return file_browser_disc_type(path)
+
+
+def file_browser_name_keys(value: str) -> set[str]:
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    name = text.replace("\\", "/").rsplit("/", 1)[-1]
+    stem = name[:-4] if name.lower().endswith(".iso") else name
+    keys = {
+        name.lower(),
+        stem.lower(),
+        safe_filename(name).lower(),
+        safe_filename(stem).lower(),
+    }
+    return {key for key in keys if key}
+
+
+def file_browser_pack_lookup(cfg: Dict, resolve_paths: bool = True, include_names: bool = False) -> Dict[str, Dict]:
     aliases = cd2_path_aliases_from_cfg(cfg or {})
 
     def variants_for(value: str) -> list[str]:
         variants = list(alias_variants_for_path(value, aliases))
         text = str(value or "")
         should_resolve = (
-            bool(re.match(r"^[A-Za-z]:[\\/]", text))
-            or "\\" in text
-            or (os.name != "nt" and text.startswith("/"))
+            resolve_paths
+            and (
+                bool(re.match(r"^[A-Za-z]:[\\/]", text))
+                or "\\" in text
+                or (os.name != "nt" and text.startswith("/"))
+            )
         )
         if should_resolve:
             try:
@@ -235,20 +267,30 @@ def file_browser_pack_lookup(cfg: Dict) -> Dict[str, Dict]:
                 normalized = variant.lower()
                 if normalized not in lookup:
                     lookup[normalized] = item
+        if include_names:
+            for candidate in candidates + [str(item.get("target") or "")]:
+                for name_key in file_browser_name_keys(candidate):
+                    lookup.setdefault(f"name:{name_key}", item)
     return lookup
 
 
-def file_browser_item_for_path(path: Path, lookup: Dict[str, Dict], cfg: Dict) -> Optional[Dict]:
+def file_browser_item_for_path(path: Path, lookup: Dict[str, Dict], cfg: Dict, resolve_path: bool = True, match_name: bool = False) -> Optional[Dict]:
     aliases = cd2_path_aliases_from_cfg(cfg or {})
     variants = list(alias_variants_for_path(str(path), aliases))
-    try:
-        variants.extend(alias_variants_for_path(str(path.expanduser().resolve()), aliases))
-    except (OSError, RuntimeError, ValueError):
-        pass
+    if resolve_path:
+        try:
+            variants.extend(alias_variants_for_path(str(path.expanduser().resolve()), aliases))
+        except (OSError, RuntimeError, ValueError):
+            pass
     for variant in variants:
         item = lookup.get(normalize_path_text(variant).lower())
         if item:
             return dict(item)
+    if match_name:
+        for name_key in file_browser_name_keys(path.name):
+            item = lookup.get(f"name:{name_key}")
+            if item:
+                return dict(item)
     return None
 
 
@@ -273,18 +315,30 @@ def file_browser_existing_iso_target(path: Path, cfg: Dict) -> str:
     return ""
 
 
-def file_browser_pack_payload(path: Path, disc_type: str, lookup: Dict[str, Dict], cfg: Dict) -> Dict:
+def file_browser_pack_payload(
+    path: Path,
+    disc_type: str,
+    lookup: Dict[str, Dict],
+    cfg: Dict,
+    check_existing: bool = True,
+    match_name: bool = False,
+) -> Dict:
     if not disc_type:
         return {}
-    source_path = path.parent if looks_like_disc_structure_dir(path) else path
-    item = file_browser_item_for_path(source_path, lookup, cfg)
+    if path.name.lower() in DISC_STRUCTURE_DIRS:
+        source_path = path.parent
+    elif check_existing and looks_like_disc_structure_dir(path):
+        source_path = path.parent
+    else:
+        source_path = path
+    item = file_browser_item_for_path(source_path, lookup, cfg, resolve_path=check_existing, match_name=match_name)
     status = str((item or {}).get("status") or "")
     target = str((item or {}).get("target") or "")
     packed_statuses = {"done", "transfer_done", "waiting_cd2_upload"}
     if status in packed_statuses:
         packed = True
     else:
-        existing_target = file_browser_existing_iso_target(source_path, cfg)
+        existing_target = file_browser_existing_iso_target(source_path, cfg) if check_existing else ""
         packed = bool(existing_target)
         if existing_target and not target:
             target = existing_target
@@ -5033,6 +5087,7 @@ def files():
         "watch": context["cfg"].get("watch_dir", ""),
         "output": context["cfg"].get("output_dir", ""),
         "cd2": str(cd2_browser_root),
+        "cd2_default": str(Path(str(context["cfg"].get("cd2_target_dir") or DEFAULT_CONFIG["cd2_target_dir"])).expanduser()),
     }
     return render_template("files.html", **context)
 
@@ -5431,30 +5486,47 @@ def api_browse():
         path = path.parent
     if not path_in_root(path, root):
         return jsonify({"ok": False, "message": "禁止访问根目录外路径"}), 403
+    fast_cd2_listing = root_name == "cd2"
     try:
-        children = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        children = []
+        with os.scandir(path) as scan:
+            for child in scan:
+                try:
+                    is_dir = child.is_dir()
+                    stat = None if fast_cd2_listing and is_dir else child.stat()
+                    children.append((child.name, Path(child.path), is_dir, stat))
+                except OSError:
+                    continue
+        children.sort(key=lambda item: (not item[2], item[0].lower()))
     except PermissionError:
         children = []
     except OSError as exc:
         return jsonify({"ok": False, "message": f"无法读取目录: {exc}"}), 400
     entries = []
-    pack_lookup = file_browser_pack_lookup(cfg)
-    for child in children:
+    pack_lookup = file_browser_pack_lookup(cfg, resolve_paths=not fast_cd2_listing, include_names=fast_cd2_listing)
+    for child_name, child_path, is_dir, stat in children:
         try:
-            stat = child.stat()
-            is_dir = child.is_dir()
-            disc_type = file_browser_disc_type(child) if is_dir else ""
+            disc_type = file_browser_listing_disc_type(child_path, path, root_name, is_dir)
+            stat_size = stat.st_size if stat else 0
+            stat_mtime = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S") if stat else ""
             entry = {
-                "name": child.name,
-                "path": str(child),
+                "name": child_name,
+                "path": str(child_path),
                 "type": "dir" if is_dir else "file",
                 "disc_type": disc_type,
-                "size": stat.st_size,
-                "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                "readable": os.access(child, os.R_OK | os.X_OK),
+                "size": stat_size,
+                "mtime": stat_mtime,
+                "readable": True if fast_cd2_listing else os.access(child_path, os.R_OK | os.X_OK),
             }
             if disc_type:
-                entry.update(file_browser_pack_payload(child, disc_type, pack_lookup, cfg))
+                entry.update(file_browser_pack_payload(
+                    child_path,
+                    disc_type,
+                    pack_lookup,
+                    cfg,
+                    check_existing=not fast_cd2_listing,
+                    match_name=fast_cd2_listing,
+                ))
             entries.append(entry)
         except OSError:
             continue

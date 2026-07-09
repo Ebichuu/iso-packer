@@ -20,7 +20,7 @@
         <div id="file-dir-count" class="text-xs font-bold text-zinc-700 mt-0.5 font-mono">0</div>
     </div>
     <div class="bg-white border border-zinc-200/80 shadow-[0_4px_12px_rgba(0,0,0,0.01)] rounded-xl p-3 ring-1 ring-black/[0.01]">
-        <div class="text-[10px] text-zinc-400 font-bold uppercase tracking-wider font-mono">筛选 / 已选</div>
+        <div class="text-[10px] text-zinc-400 font-bold uppercase tracking-wider font-mono">列表 / 已选</div>
         <div id="file-entry-count" class="text-xs font-bold text-zinc-700 mt-0.5 font-mono">0</div>
         <div id="file-selected-count" class="mt-1 text-[10px] font-bold text-emerald-700">0 项已选</div>
     </div>
@@ -46,16 +46,16 @@
             <button type="button" id="file-refresh" class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-bold text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 transition" title="刷新当前目录">刷新</button>
         </div>
     </div>
-    <div class="flex flex-col gap-3 border-t border-zinc-100 pt-3 md:flex-row md:items-center md:justify-between">
-        <div class="flex flex-wrap items-center gap-2">
-            <span class="text-[10px] font-black tracking-[0.12em] text-zinc-400">类型筛选</span>
-            <div id="file-filters" class="flex w-fit p-0.5 bg-zinc-100 rounded-lg border border-zinc-200/60 font-medium">
-                <button type="button" data-file-filter="all" data-active="true" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">全部</button>
-                <button type="button" data-file-filter="disc" data-active="false" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">原盘</button>
-                <button type="button" data-file-filter="dir" data-active="false" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">目录</button>
-                <button type="button" data-file-filter="file" data-active="false" class="px-2.5 py-1 rounded-md text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">文件</button>
+    <div class="flex flex-col gap-3 border-t border-zinc-100 pt-3 xl:flex-row xl:items-center xl:justify-between">
+        <div class="flex min-w-0 flex-wrap items-center gap-2">
+            <span class="text-[10px] font-black tracking-[0.12em] text-zinc-400">快捷入口</span>
+            <div id="file-shortcuts" class="flex min-w-0 flex-wrap gap-1.5 font-medium">
+                <button type="button" data-file-shortcut="watch" class="file-shortcut-button">本机监控</button>
+                <button type="button" data-file-shortcut="output" class="file-shortcut-button">本机输出</button>
+                <button type="button" data-file-shortcut="cd2" data-default-path="{{ browser_roots.cd2_default|e }}" class="file-shortcut-button">CD2 快捷</button>
             </div>
-            <span id="file-filter-status" class="font-mono text-[10px] font-bold text-zinc-400">仅筛选当前路径，不切换位置</span>
+            <button type="button" id="file-save-cd2-shortcut" class="file-shortcut-save hidden">设为当前</button>
+            <span id="file-shortcut-status" class="max-w-[26rem] truncate font-mono text-[10px] font-bold text-zinc-400">CD2 快捷默认使用上传目录</span>
         </div>
         <div id="file-operation-bar" class="hidden flex flex-wrap items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
             <span id="file-selected-count-inline" class="hidden text-[11px] font-black text-zinc-700"></span>
@@ -241,7 +241,13 @@
     .file-page-button:disabled { opacity: 0.45; cursor: default; }
     .root-switcher [data-root][data-active="true"] { background: #f4f4f5 !important; color: #18181b !important; border-color: #d4d4d8 !important; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.72); }
     .root-switcher [data-root][data-active="false"] { background: #fff !important; color: #52525b !important; border-color: #e4e4e7 !important; }
-    #file-filters button:focus-visible,
+    .file-shortcut-button { border: 1px solid #e4e4e7; border-radius: 0.55rem; background: #fff; color: #52525b; font-weight: 800; padding: 0.38rem 0.7rem; transition: border-color 0.15s, color 0.15s, background-color 0.15s; }
+    .file-shortcut-button:hover { border-color: #a1a1aa; color: #18181b; }
+    .file-shortcut-button[data-active="true"] { border-color: #d4d4d8; background: #f4f4f5; color: #18181b; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.72); }
+    .file-shortcut-save { border: 1px solid #bbf7d0; border-radius: 0.55rem; background: #ecfdf5; color: #047857; font-weight: 900; padding: 0.38rem 0.7rem; }
+    .file-shortcut-save:hover { border-color: #34d399; color: #065f46; }
+    .file-shortcut-button:focus-visible,
+    .file-shortcut-save:focus-visible,
     .root-switcher button:focus-visible,
     #file-up:focus-visible,
     #file-refresh:focus-visible,

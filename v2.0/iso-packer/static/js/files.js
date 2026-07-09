@@ -14,20 +14,12 @@
     rename: "重命名",
   };
 
-  const FILTER_LABELS = {
-    all: "全部",
-    disc: "原盘",
-    dir: "目录",
-    file: "文件",
-  };
-
   const state = {
     root: "watch",
     path: "/",
     parent: null,
     entries: [],
     query: "",
-    filter: "all",
     rootPath: "",
     selected: new Set(),
     operationTimer: null,
@@ -65,6 +57,19 @@
     } catch (_) {}
   }
 
+  function savedCd2Shortcut() {
+    const saved = readSavedLocation();
+    return String(((saved.shortcuts || {}).cd2) || "").trim();
+  }
+
+  function saveCd2Shortcut(path) {
+    try {
+      const saved = readSavedLocation();
+      saved.shortcuts = Object.assign({}, saved.shortcuts || {}, { cd2: path || "" });
+      window.localStorage.setItem(LOCATION_STORE, JSON.stringify(saved));
+    } catch (_) {}
+  }
+
   function clearSavedPath(rootName) {
     try {
       const saved = readSavedLocation();
@@ -79,6 +84,18 @@
 
   function rootLabel(rootName = state.root) {
     return ROOT_LABELS[rootName] || rootName;
+  }
+
+  function normalizeBrowserPath(path) {
+    return String(path || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  }
+
+  function cd2ShortcutDefaultPath() {
+    return String((helper().qs('[data-file-shortcut="cd2"]') || {}).dataset?.defaultPath || rootPathFor("cd2") || "");
+  }
+
+  function cd2ShortcutPath() {
+    return savedCd2Shortcut() || cd2ShortcutDefaultPath() || rootPathFor("cd2") || "/";
   }
 
   function isDiscHint(entry) {
@@ -98,10 +115,6 @@
     );
   }
 
-  function filterLabel(filter = state.filter) {
-    return FILTER_LABELS[filter] || "当前";
-  }
-
   function entryGroup(entry) {
     if (isDiscHint(entry)) return "disc";
     return entry && entry.type === "dir" ? "dir" : "file";
@@ -110,8 +123,6 @@
   function filteredEntries() {
     const query = state.query.trim().toLowerCase();
     return state.entries.filter((entry) => {
-      const group = entryGroup(entry);
-      if (state.filter !== "all" && group !== state.filter) return false;
       if (!query) return true;
       return [entry.name, entry.path, entry.type].some((value) => String(value || "").toLowerCase().includes(query));
     });
@@ -235,7 +246,32 @@
     helper().setText(helper().qs("#file-current-root"), state.rootPath ? `${rootLabel()} · ${state.rootPath}` : rootLabel());
     helper().setText(helper().qs("#file-entry-count"), `${filteredEntries().length} / ${state.entries.length} 项`);
     helper().setText(helper().qs("#file-selected-count"), `${state.selected.size} 项已选`);
-    helper().setText(helper().qs("#file-filter-status"), `${filterLabel()} · 仅筛选当前路径，不切换位置`);
+    renderShortcutState();
+  }
+
+  function renderShortcutState() {
+    helper().qsa("[data-file-shortcut]").forEach((button) => {
+      const shortcut = button.dataset.fileShortcut || "";
+      let targetRoot = shortcut;
+      let targetPath = rootPathFor(shortcut);
+      if (shortcut === "cd2") {
+        targetRoot = "cd2";
+        targetPath = cd2ShortcutPath();
+      }
+      const active = state.root === targetRoot && normalizeBrowserPath(state.path) === normalizeBrowserPath(targetPath);
+      button.dataset.active = active ? "true" : "false";
+      if (shortcut === "cd2") {
+        button.title = `CD2 快捷：${targetPath || rootPathFor("cd2") || "-"}`;
+      }
+    });
+    const save = helper().qs("#file-save-cd2-shortcut");
+    if (save) save.classList.toggle("hidden", state.root !== "cd2");
+    const status = helper().qs("#file-shortcut-status");
+    if (status) {
+      const shortcut = cd2ShortcutPath();
+      status.textContent = state.root === "cd2" ? `CD2 快捷：${shortcut || "-"}` : "CD2 快捷可保存当前网盘位置";
+      status.title = shortcut || "";
+    }
   }
 
   function renderOperationBar() {
@@ -283,13 +319,7 @@
     if (!entries.length) {
       const empty = document.createElement("div");
       empty.className = "empty-state slim";
-      if (!state.entries.length) {
-        empty.textContent = "当前目录为空，或没有可读取的内容。";
-      } else if (state.filter === "disc") {
-        empty.textContent = "当前路径下没有可直接封装的原盘目录；可先进入影片父目录，或切换到“全部/目录”继续浏览。";
-      } else {
-        empty.textContent = `当前路径下没有${filterLabel()}条目；这里是类型筛选，不会切换根位置。`;
-      }
+      empty.textContent = state.entries.length ? "当前搜索条件下没有内容。" : "当前目录为空，或没有可读取的内容。";
       list.appendChild(empty);
       return;
     }
@@ -414,19 +444,61 @@
     state.parent = null;
     state.entries = [];
     state.query = "";
-    state.filter = "all";
     state.rootPath = rootPathFor(root);
     state.selected.clear();
     state.page = 1;
     const search = helper().qs("#file-search");
     if (search) search.value = "";
-    helper().qsa("[data-file-filter]").forEach((button) => {
-      button.dataset.active = button.dataset.fileFilter === "all" ? "true" : "false";
-    });
     helper().qsa("[data-root]").forEach((button) => {
       button.dataset.active = button.dataset.root === root ? "true" : "false";
     });
     loadDirectory(state.path || "/");
+  }
+
+  function openShortcut(shortcut) {
+    if (shortcut === "watch" || shortcut === "output") {
+      state.root = shortcut;
+      state.path = "/";
+      state.parent = null;
+      state.entries = [];
+      state.query = "";
+      state.rootPath = rootPathFor(shortcut);
+      state.selected.clear();
+      state.page = 1;
+      const search = helper().qs("#file-search");
+      if (search) search.value = "";
+      helper().qsa("[data-root]").forEach((button) => {
+        button.dataset.active = button.dataset.root === shortcut ? "true" : "false";
+      });
+      loadDirectory("/");
+      return;
+    }
+    if (shortcut === "cd2") {
+      state.root = "cd2";
+      state.path = cd2ShortcutPath();
+      state.parent = null;
+      state.entries = [];
+      state.query = "";
+      state.rootPath = rootPathFor("cd2");
+      state.selected.clear();
+      state.page = 1;
+      const search = helper().qs("#file-search");
+      if (search) search.value = "";
+      helper().qsa("[data-root]").forEach((button) => {
+        button.dataset.active = button.dataset.root === "cd2" ? "true" : "false";
+      });
+      loadDirectory(state.path || "/");
+    }
+  }
+
+  function saveCurrentCd2Shortcut() {
+    if (state.root !== "cd2" || !state.path) {
+      helper().notify("请先进入一个网盘挂载目录", true);
+      return;
+    }
+    saveCd2Shortcut(state.path);
+    renderShortcutState();
+    helper().notify("已保存 CD2 快捷入口");
   }
 
   function toggleSelected(path, checked) {
@@ -870,6 +942,11 @@
       const button = event.target.closest("[data-root]");
       if (button) switchRoot(button.dataset.root);
     });
+    helper().qs("#file-shortcuts")?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-file-shortcut]");
+      if (button) openShortcut(button.dataset.fileShortcut);
+    });
+    helper().qs("#file-save-cd2-shortcut")?.addEventListener("click", saveCurrentCd2Shortcut);
     helper().qs("#file-browser-list")?.addEventListener("click", (event) => {
       hideContextMenu();
       const checkbox = event.target.closest("[data-select-path]");
@@ -1014,16 +1091,6 @@
     helper().qs("#file-search")?.addEventListener("input", (event) => {
       state.query = event.target.value || "";
       state.page = 1;
-      renderEntryList();
-    });
-    helper().qs("#file-filters")?.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-file-filter]");
-      if (!button) return;
-      state.filter = button.dataset.fileFilter || "all";
-      state.page = 1;
-      helper().qsa("[data-file-filter]").forEach((item) => {
-        item.dataset.active = item === button ? "true" : "false";
-      });
       renderEntryList();
     });
     helper().qs("#file-up")?.addEventListener("click", () => {
