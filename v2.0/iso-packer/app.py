@@ -5493,7 +5493,7 @@ def api_browse():
             for child in scan:
                 try:
                     is_dir = child.is_dir()
-                    stat = None if fast_cd2_listing and is_dir else child.stat()
+                    stat = child.stat()
                     children.append((child.name, Path(child.path), is_dir, stat))
                 except OSError:
                     continue
