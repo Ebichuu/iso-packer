@@ -1,6 +1,6 @@
-# ISO Packer v2.0
+# ISO Packer v2.1.0
 
-蓝光原盘自动封装与归档工具。v2.0 是基于 `D:\Projects\makeiso` 旧版 v1.19 的重构版本；v1.19 只作为只读验收基线，实际改动只落在 `D:\Projects\makeiso\v2.0`。
+蓝光原盘自动封装与归档工具。v2.x 是基于 `D:\Projects\makeiso` 旧版 v1.19 的重构版本；v1.19 只作为只读验收基线，实际改动只落在 `D:\Projects\makeiso\v2.0`。
 
 ## 当前状态
 
@@ -13,6 +13,8 @@
 - 文件浏览支持多选、右键菜单、重命名、嵌入式属性面板、目录大小统计、排序、分页和目录选择弹层。
 - 文件浏览“复制到监控目录”走 CD2 网盘内复制任务：从当前网盘位置复制到设置里的网盘监控目录。
 - 文件浏览“复制到输出目录 / 复制到其他目录 / 移动 / 删除”仍是本机文件操作，并有路径边界和确认保护。
+- 日志中心集中展示封装日志、CD2 拉取/转存/事件、文件操作和异常时间线，并支持类型筛选与搜索。
+- 媒体检测页提供同片不同组的轻量候选分组：只按名称、年份、分辨率、来源、发布组、大小和修改时间比对，不做 BDMV 指纹。
 - 设置页按“本地目录 / CD2 设置 / 系统设置”三类组织。
 - Docker Hub 测试镜像使用 `ebichu/iso-packer:test`；`latest` 只在正式发布时更新。
 
@@ -126,6 +128,8 @@ node --check static\js\index.js
 node --check static\js\workspace.js
 node --check static\js\files.js
 node --check static\js\settings.js
+node --check static\js\logs.js
+node --check static\js\compare.js
 
 cd D:\Projects\makeiso\v2.0
 docker-compose config --quiet
@@ -135,6 +139,8 @@ docker-compose config --quiet
 
 ```text
 GET  /api/status
+GET  /api/logs
+GET  /api/compare
 GET  /api/cd2/remote-candidates
 POST /api/cd2/directories
 POST /api/cd2/test
@@ -149,6 +155,8 @@ POST /api/file-actions
 接口语义：
 
 - `/api/status` 返回当前封装、CD2 拉取、CD2 上传、产出和文件操作摘要。
+- `/api/logs` 聚合 `iso-packer.log`、内存事件、任务状态、CD2 最近事件和文件操作，供日志中心筛选展示。
+- `/api/compare` 在指定文件浏览根目录内做最多两层轻量扫描，返回同片候选分组，不触发封装、拉取或删除。
 - `/api/cd2/pull` 只用于 CD2 远程候选拉取。
 - `/api/file-actions` 承载文件浏览里的复制、移动、删除和重命名。
 - 文件浏览“复制到监控目录”由 `/api/file-actions` 发起 CD2 网盘内复制任务。
@@ -169,7 +177,7 @@ POST /api/file-actions
 3. 验证文件浏览“复制到监控目录”确实进入 CD2 网盘内复制任务。
 4. 验证封装中心能正确显示：生成 ISO、校验、转存、CD2 上传云端、已交付。
 5. 修复封装/转存 worker 与 Web 服务耦合问题，避免 CloudDrive2 大文件 I/O 堵住页面和 `/healthz`。
-6. 新增独立“日志中心”，承载封装日志、CD2 拉取记录、CD2 上传等待、后台文件操作事件和失败原因。
+6. 实机验证 v2.1.0 的日志中心与媒体检测页，确认大目录下的扫描范围和页面响应符合预期。
 7. 正式发布前再更新 Docker Hub `latest`；测试阶段继续只更新 `test`。
 
 ## 不应提交

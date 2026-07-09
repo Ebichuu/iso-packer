@@ -1,9 +1,9 @@
 #!/bin/bash
-# ISO Packer v2.0 - Docker 部署脚本
+# ISO Packer v2.1.0 - Docker 部署脚本
 
 set -e
 
-echo "ISO Packer v2.0 - Docker 部署"
+echo "ISO Packer v2.1.0 - Docker 部署"
 echo "================================================"
 echo ""
 
@@ -23,7 +23,7 @@ else
     exit 1
 fi
 
-# 进入 v2.0 目录
+# 进入当前 v2.x 工作目录
 cd "$(dirname "$0")"
 
 echo "[信息] 当前目录: $(pwd)"

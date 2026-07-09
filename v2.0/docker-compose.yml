@@ -4,7 +4,7 @@ services:
       context: ..
       dockerfile: v2.0/Dockerfile
 
-    image: iso-packer:v2.0-tailwind
+    image: iso-packer:v2.1.0-test
     container_name: iso-packer-v2
     restart: unless-stopped
 

@@ -60,6 +60,12 @@ LOG_PATH = APP_DIR / "iso-packer.log"
 RELEASE_CALENDAR_PATH = PROJECT_DIR / "data" / "release_calendar.json"
 LOG_LINE_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
 LOCAL_MEDIA_POSTER_CACHE_LIMIT = 300
+LOG_ERROR_TOKENS = ("失败", "异常", "错误", "报错", "failed", "error", "exception", "traceback")
+LOG_CD2_TOKENS = ("cd2", "clouddrive", "网盘", "远程候选", "拉取", "上传")
+LOG_FILE_TOKENS = ("文件浏览", "复制", "移动", "删除", "重命名", "file_", "copy", "move", "delete", "rename")
+LOG_PACK_TOKENS = ("iso", "封装", "校验", "转存", "转移", "genisoimage", "xorriso")
+MEDIA_FILE_EXTENSIONS = VIDEO_EXTENSIONS | {".iso"}
+MEDIA_SCAN_MAX_ITEMS = 500
 
 
 def ensure_app_dir() -> None:
@@ -382,6 +388,274 @@ def log(message: str) -> None:
     ensure_app_dir()
     with LOG_PATH.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
+
+
+def clamp_int_arg(name: str, fallback: int, minimum: int = 1, maximum: int = 500) -> int:
+    try:
+        value = int(request.args.get(name) or fallback)
+    except (TypeError, ValueError):
+        value = fallback
+    return max(minimum, min(maximum, value))
+
+
+def token_in_text(tokens, text: str, lowered: str) -> bool:
+    for token in tokens:
+        raw = str(token or "")
+        if not raw:
+            continue
+        if raw.lower() in lowered or raw in text:
+            return True
+    return False
+
+
+def classify_log_message(message: str) -> str:
+    text = str(message or "")
+    lowered = text.lower()
+    if token_in_text(LOG_ERROR_TOKENS, text, lowered):
+        return "error"
+    if token_in_text(LOG_CD2_TOKENS, text, lowered):
+        return "cd2"
+    if token_in_text(LOG_FILE_TOKENS, text, lowered):
+        return "file"
+    if token_in_text(LOG_PACK_TOKENS, text, lowered):
+        return "pack"
+    return "system"
+
+
+def log_category_label(category: str) -> str:
+    return {
+        "error": "异常",
+        "pack": "封装",
+        "cd2": "CD2",
+        "file": "文件",
+        "system": "系统",
+    }.get(category or "system", "系统")
+
+
+def log_event_level(category: str, status: str = "") -> str:
+    if category == "error" or status in {"failed", "verify_failed", "transfer_failed", "partial"}:
+        return "error"
+    if status in {"done", "transfer_done", "completed", "complete", "success", "succeeded"}:
+        return "success"
+    if status in {"running", "queued", "waiting_cd2_pull", "waiting_cd2_upload", "transferring", "refreshing_cd2_dir"}:
+        return "active"
+    return "info"
+
+
+def extract_log_path_hint(message: str) -> str:
+    text = str(message or "")
+    pattern = r"([A-Za-z]:[\\/][^\s，,；;]+|/[^\s，,；;]+(?:/[^\s，,；;]+)*)"
+    for match in re.finditer(pattern, text):
+        value = match.group(1).strip().strip("。.,，；;")
+        if len(value) > 2:
+            return value
+    return ""
+
+
+def log_event_id(source: str, timestamp: str, message: str, path: str = "") -> str:
+    raw = f"{source}|{timestamp}|{message}|{path}".encode("utf-8", errors="ignore")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def parse_log_line_event(line: str, source: str = "log_file") -> Dict:
+    raw = str(line or "").strip()
+    match = LOG_LINE_RE.match(raw)
+    timestamp = match.group(1) if match else ""
+    message = raw[match.end():].strip() if match else raw
+    category = classify_log_message(message)
+    path = extract_log_path_hint(message)
+    return {
+        "id": log_event_id(source, timestamp, message, path),
+        "time": timestamp,
+        "category": category,
+        "category_label": log_category_label(category),
+        "level": log_event_level(category),
+        "message": message,
+        "path": path,
+        "source": source,
+    }
+
+
+def append_unique_log_event(events: list[Dict], seen: set[str], event: Dict) -> None:
+    message = str(event.get("message") or "").strip()
+    if not message:
+        return
+    key = f"{event.get('time') or ''}|{message}|{event.get('path') or ''}"
+    if key in seen:
+        return
+    seen.add(key)
+    events.append(event)
+
+
+def recent_log_file_lines(limit: int) -> list[str]:
+    if not LOG_PATH.exists():
+        return []
+    try:
+        return LOG_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()[-limit:]
+    except OSError:
+        return []
+
+
+def task_log_event(source: str, item: Dict) -> Dict:
+    status = str((item or {}).get("status") or "")
+    category = "error" if status in {"failed", "verify_failed", "transfer_failed"} else "pack"
+    timestamp = ""
+    parsed = item_timestamp(item)
+    if parsed:
+        timestamp = parsed.strftime("%Y-%m-%d %H:%M:%S")
+    elif (item or {}).get("first_seen"):
+        timestamp = str(item.get("first_seen"))
+    name = item_display_name(source)
+    message = f"{status_label(status)} · {name}" if status else name
+    detail = (item or {}).get("error") or (item or {}).get("failure_message") or (item or {}).get("warning") or ""
+    if detail:
+        message = f"{message}：{detail}"
+    return {
+        "id": log_event_id("task", timestamp, message, source),
+        "time": timestamp,
+        "category": category,
+        "category_label": log_category_label(category),
+        "level": log_event_level(category, status),
+        "message": message,
+        "path": source,
+        "source": "task",
+        "status": status,
+        "target": (item or {}).get("target") or "",
+        "size": (item or {}).get("last_size") or (item or {}).get("size") or 0,
+        "size_human": format_size((item or {}).get("last_size") or (item or {}).get("size") or 0),
+    }
+
+
+def file_operation_log_events(limit: int = 20) -> list[Dict]:
+    action_labels = {"copy": "复制", "move": "移动", "delete": "删除", "rename": "重命名"}
+    events = []
+    for task in file_operation_status_payload(limit=limit).get("items") or []:
+        timestamp = str(task.get("updated_at") or task.get("created_at") or "")
+        status = str(task.get("status") or "")
+        action = str(task.get("action") or "")
+        label = action_labels.get(action, action or "操作")
+        message = f"文件{label} · {task.get('message') or status or '进行中'}"
+        if task.get("total"):
+            message = f"{message}（{task.get('done') or 0}/{task.get('total')}）"
+        path = ""
+        sources = task.get("sources") or []
+        if sources:
+            path = str(sources[0] or "")
+        elif task.get("destination"):
+            path = str(task.get("destination"))
+        category = "error" if status in {"failed", "partial"} else "file"
+        events.append({
+            "id": log_event_id("file_operation", timestamp, message, path),
+            "time": timestamp,
+            "category": category,
+            "category_label": log_category_label(category),
+            "level": log_event_level(category, status),
+            "message": message,
+            "path": path,
+            "source": "file_operation",
+            "status": status,
+            "progress": task.get("progress") or 0,
+        })
+    return events
+
+
+def cd2_state_log_events(snapshot: Dict) -> list[Dict]:
+    cd2_state = (snapshot or {}).get("cd2") or {}
+    events = []
+    sources = [
+        ("pull", "recent_results", "CD2 拉取", "created_at"),
+        ("monitor_copy", "recent_results", "CD2 转存到监控", "checked_at"),
+        ("refresh", "recent_results", "CD2 目录刷新", "checked_at"),
+    ]
+    for section, list_key, label, time_key in sources:
+        for item in ((cd2_state.get(section) or {}).get(list_key) or [])[-20:]:
+            timestamp = str((item or {}).get(time_key) or (item or {}).get("created_at") or "")
+            ok = bool((item or {}).get("ok", True))
+            message = f"{label} · {(item or {}).get('message') or ('完成' if ok else '失败')}"
+            path = str((item or {}).get("source_path") or (item or {}).get("source") or (item or {}).get("dest_dir") or "")
+            category = "cd2" if ok else "error"
+            events.append({
+                "id": log_event_id(f"cd2_{section}", timestamp, message, path),
+                "time": timestamp,
+                "category": category,
+                "category_label": log_category_label(category),
+                "level": log_event_level(category, "done" if ok else "failed"),
+                "message": message,
+                "path": path,
+                "source": f"cd2_{section}",
+            })
+    for item in ((cd2_state.get("webhook") or {}).get("recent_events") or [])[-30:]:
+        timestamp = str((item or {}).get("received_at") or "")
+        path = str((item or {}).get("path") or "")
+        message = f"CD2 事件 · {(item or {}).get('event') or 'unknown'}"
+        if path:
+            message = f"{message}：{path}"
+        events.append({
+            "id": log_event_id("cd2_webhook", timestamp, message, path),
+            "time": timestamp,
+            "category": "cd2",
+            "category_label": log_category_label("cd2"),
+            "level": "info",
+            "message": message,
+            "path": path,
+            "source": "cd2_webhook",
+        })
+    return events
+
+
+def log_event_sort_value(event: Dict) -> datetime:
+    return parse_time((event or {}).get("time")) or datetime.min
+
+
+def logs_payload() -> Dict:
+    limit = clamp_int_arg("limit", 200, minimum=50, maximum=500)
+    type_filter = str(request.args.get("type") or "all").strip().lower()
+    query = str(request.args.get("q") or "").strip().lower()
+    with lock:
+        snapshot = json.loads(json.dumps(state, ensure_ascii=False))
+    events = []
+    seen = set()
+    for line in recent_log_file_lines(max(limit * 3, 300)):
+        append_unique_log_event(events, seen, parse_log_line_event(line, "log_file"))
+    for line in (snapshot.get("events") or [])[-200:]:
+        append_unique_log_event(events, seen, parse_log_line_event(line, "memory"))
+    for source, item in visible_iso_items(snapshot.get("items", {})).items():
+        append_unique_log_event(events, seen, task_log_event(source, item))
+    for event in file_operation_log_events():
+        append_unique_log_event(events, seen, event)
+    for event in cd2_state_log_events(snapshot):
+        append_unique_log_event(events, seen, event)
+
+    events.sort(key=log_event_sort_value, reverse=True)
+    summary = {
+        "total": len(events),
+        "error": sum(1 for event in events if event.get("category") == "error"),
+        "pack": sum(1 for event in events if event.get("category") == "pack"),
+        "cd2": sum(1 for event in events if event.get("category") == "cd2"),
+        "file": sum(1 for event in events if event.get("category") == "file"),
+        "system": sum(1 for event in events if event.get("category") == "system"),
+    }
+
+    filtered = events
+    if type_filter != "all":
+        filtered = [event for event in filtered if event.get("category") == type_filter]
+    if query:
+        filtered = [
+            event for event in filtered
+            if query in str(event.get("message") or "").lower()
+            or query in str(event.get("path") or "").lower()
+            or query in str(event.get("status") or "").lower()
+        ]
+    with cd2_lock:
+        cached_cd2_status = dict(cd2_client_cache.get("upload_status") or {})
+    return {
+        "ok": True,
+        "events": filtered[:limit],
+        "summary": summary,
+        "filters": {"type": type_filter, "q": query, "limit": limit},
+        "file_operations": file_operation_status_payload(limit=8),
+        "cd2_status": ui_safe_cd2_status(cached_cd2_status),
+    }
 
 
 def load_config() -> Dict:
@@ -3485,6 +3759,250 @@ def local_media_tmdb_query(name: str) -> tuple[str, str]:
     return text or str(name or "").strip(), year
 
 
+def detect_media_resolution(name: str) -> str:
+    upper = str(name or "").upper()
+    if re.search(r"\b(2160P|UHD|4K)\b", upper):
+        return "2160p"
+    if re.search(r"\b1080P\b", upper):
+        return "1080p"
+    if re.search(r"\b720P\b", upper):
+        return "720p"
+    return ""
+
+
+def detect_media_source(name: str) -> str:
+    text = str(name or "")
+    patterns = [
+        ("UHD BluRay", r"\b(UHD[ ._-]*BluRay|Ultra[ ._-]*HD)\b"),
+        ("BluRay Remux", r"\b(BluRay|Blu-Ray)[ ._-]*REMUX\b|\bREMUX\b"),
+        ("BluRay", r"\b(BluRay|Blu-Ray|BDRip|BDMV)\b"),
+        ("WEB-DL", r"\bWEB[ ._-]*DL\b"),
+        ("WEBRip", r"\bWEB[ ._-]*Rip\b"),
+        ("HDTV", r"\bHDTV\b"),
+        ("DVD", r"\b(DVD|VIDEO_TS)\b"),
+    ]
+    for label, pattern in patterns:
+        if re.search(pattern, text, flags=re.I):
+            return label
+    return ""
+
+
+def detect_media_group(name: str) -> str:
+    text = str(name or "").strip()
+    match = re.search(r"-([A-Za-z0-9][A-Za-z0-9._-]{1,24})$", text)
+    if match:
+        return match.group(1).strip("._-")
+    match = re.search(r"\[([A-Za-z0-9][A-Za-z0-9._-]{1,24})\]\s*$", text)
+    return match.group(1).strip("._-") if match else ""
+
+
+def media_identity_key(title: str, year: str) -> str:
+    normalized = re.sub(r"[^\w\u4e00-\u9fff]+", "", str(title or "").lower(), flags=re.U)
+    return f"{normalized}|{year or ''}" if normalized else ""
+
+
+def media_parse_score(name: str, kind: str, resolution: str, source: str, group: str, year: str) -> int:
+    score = 0
+    if year:
+        score += 2
+    if resolution:
+        score += 2
+    if source:
+        score += 2
+    if group:
+        score += 1
+    if kind == "disc":
+        score += 3
+    if Path(str(name or "")).suffix.lower() in MEDIA_FILE_EXTENSIONS:
+        score += 2
+    return score
+
+
+def media_candidate_from_path(path: Path, root_name: str, root: Path, force_kind: str = "") -> Optional[Dict]:
+    try:
+        is_dir = path.is_dir()
+        stat = path.stat()
+    except OSError:
+        return None
+    display_path = path
+    if is_dir and path.name.lower() in DISC_STRUCTURE_DIRS and path.parent != path:
+        display_path = path.parent
+    raw_name = display_path.stem if display_path.is_file() else display_path.name
+    kind = force_kind
+    if not kind:
+        kind = "folder" if display_path.is_dir() else "file"
+        if display_path.is_dir():
+            try:
+                child_names = {child.name.lower() for child in display_path.iterdir()}
+            except OSError:
+                child_names = set()
+            if DISC_STRUCTURE_DIRS & child_names:
+                kind = "disc"
+        elif display_path.suffix.lower() == ".iso":
+            kind = "iso"
+        elif display_path.suffix.lower() in VIDEO_EXTENSIONS:
+            kind = "video"
+    title, year = local_media_tmdb_query(raw_name)
+    resolution = detect_media_resolution(raw_name)
+    source = detect_media_source(raw_name)
+    group = detect_media_group(raw_name)
+    score = media_parse_score(raw_name, kind, resolution, source, group, year)
+    if kind == "folder" and score < 2:
+        return None
+    key = media_identity_key(title, year)
+    try:
+        relative = str(display_path.relative_to(root))
+    except ValueError:
+        relative = display_path.name
+    return {
+        "name": raw_name,
+        "title": title or raw_name,
+        "year": year,
+        "identity_key": key or hashlib.sha1(str(display_path).encode("utf-8", errors="ignore")).hexdigest()[:12],
+        "resolution": resolution,
+        "source": source,
+        "group": group or "未知组",
+        "kind": kind,
+        "type": "dir" if display_path.is_dir() else "file",
+        "path": str(display_path),
+        "relative_path": relative,
+        "root": root_name,
+        "size": stat.st_size,
+        "size_human": format_size(stat.st_size),
+        "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        "score": score,
+    }
+
+
+def media_candidate_matches_query(candidate: Dict, query: str) -> bool:
+    if not query:
+        return True
+    haystack = " ".join(str(candidate.get(key) or "") for key in (
+        "name", "title", "year", "resolution", "source", "group", "path", "relative_path"
+    )).lower()
+    return query.lower() in haystack
+
+
+def build_media_compare_groups(candidates: list[Dict]) -> list[Dict]:
+    grouped = {}
+    for candidate in candidates:
+        grouped.setdefault(candidate.get("identity_key") or candidate.get("name"), []).append(candidate)
+    groups = []
+    for key, items in grouped.items():
+        items.sort(key=lambda item: item.get("mtime") or "", reverse=True)
+        groups_seen = sorted({str(item.get("group") or "未知组") for item in items})
+        resolutions = sorted({str(item.get("resolution") or "未知") for item in items})
+        sources = sorted({str(item.get("source") or "未知来源") for item in items})
+        groups.append({
+            "key": key,
+            "title": items[0].get("title") or items[0].get("name"),
+            "year": items[0].get("year") or "",
+            "count": len(items),
+            "group_count": len(groups_seen),
+            "groups": groups_seen,
+            "resolutions": resolutions,
+            "sources": sources,
+            "multi_group": len(items) > 1 and len(groups_seen) > 1,
+            "items": items,
+            "latest_mtime": items[0].get("mtime") or "",
+        })
+    groups.sort(key=lambda group: (
+        not group.get("multi_group"),
+        -int(group.get("count") or 0),
+        str(group.get("title") or "").lower(),
+    ))
+    return groups
+
+
+def scan_media_compare_payload() -> tuple[Dict, int]:
+    cfg = load_config()
+    roots = file_browser_roots_from_config(cfg)
+    root_name = str(request.args.get("root") or "cd2").strip()
+    root = roots.get(root_name)
+    if not root:
+        return {"ok": False, "message": "无效的根目录"}, 400
+    raw_path = str(request.args.get("path") or str(root)).strip() or str(root)
+    if raw_path == "/":
+        raw_path = str(root)
+    try:
+        path = Path(raw_path).expanduser().resolve()
+        root = root.resolve()
+    except Exception as exc:
+        return {"ok": False, "message": f"路径无效: {exc}"}, 400
+    if not path.exists():
+        return {"ok": False, "message": "目录不存在"}, 404
+    if not path.is_dir():
+        path = path.parent
+    if not path_in_root(path, root):
+        return {"ok": False, "message": "禁止访问根目录外路径"}, 403
+
+    depth = clamp_int_arg("depth", 1, minimum=1, maximum=2)
+    query = str(request.args.get("q") or "").strip()
+    queue = [(path, 0)]
+    candidates = []
+    seen_paths = set()
+    scanned_dirs = 0
+    truncated = False
+
+    initial = media_candidate_from_path(path, root_name, root)
+    if initial and media_candidate_matches_query(initial, query):
+        candidates.append(initial)
+        seen_paths.add(initial["path"])
+
+    while queue and len(candidates) < MEDIA_SCAN_MAX_ITEMS:
+        current, level = queue.pop(0)
+        scanned_dirs += 1
+        try:
+            children = sorted(current.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except (OSError, PermissionError):
+            continue
+        for child in children:
+            if len(candidates) >= MEDIA_SCAN_MAX_ITEMS:
+                truncated = True
+                break
+            try:
+                is_dir = child.is_dir()
+            except OSError:
+                continue
+            force_kind = "disc" if is_dir and child.name.lower() in DISC_STRUCTURE_DIRS else ""
+            target = child.parent if force_kind == "disc" else child
+            if str(target) not in seen_paths:
+                candidate = None
+                if force_kind:
+                    candidate = media_candidate_from_path(target, root_name, root, force_kind="disc")
+                elif is_dir:
+                    candidate = media_candidate_from_path(child, root_name, root)
+                elif child.suffix.lower() in MEDIA_FILE_EXTENSIONS:
+                    candidate = media_candidate_from_path(child, root_name, root)
+                if candidate and media_candidate_matches_query(candidate, query):
+                    candidates.append(candidate)
+                    seen_paths.add(candidate["path"])
+            if is_dir and not force_kind and level + 1 < depth:
+                queue.append((child, level + 1))
+        if truncated:
+            break
+
+    groups = build_media_compare_groups(candidates)
+    summary = {
+        "candidate_count": len(candidates),
+        "group_count": len(groups),
+        "multi_group_count": sum(1 for group in groups if group.get("multi_group")),
+        "duplicate_like_count": sum(1 for group in groups if int(group.get("count") or 0) > 1),
+        "scanned_dirs": scanned_dirs,
+        "truncated": truncated,
+    }
+    return {
+        "ok": True,
+        "root": root_name,
+        "root_path": str(root),
+        "path": str(path),
+        "depth": depth,
+        "query": query,
+        "summary": summary,
+        "groups": groups,
+    }, 200
+
+
 def local_media_cached_poster(cache_key: str) -> Dict:
     with lock:
         return dict((state.get("local_media_posters") or {}).get(cache_key) or {})
@@ -4318,6 +4836,24 @@ def files():
     return render_template("files.html", **context)
 
 
+@app.route("/logs")
+def logs():
+    context = ui_state_context()
+    return render_template("logs.html", **context)
+
+
+@app.route("/compare")
+def compare():
+    context = ui_state_context()
+    cd2_browser_root = resolve_cd2_browser_root(context["cfg"])
+    context["browser_roots"] = {
+        "watch": context["cfg"].get("watch_dir", ""),
+        "output": context["cfg"].get("output_dir", ""),
+        "cd2": str(cd2_browser_root),
+    }
+    return render_template("compare.html", **context)
+
+
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     cfg = load_config()
@@ -4604,6 +5140,17 @@ def api_status():
         "file_operations": file_operations,
         "stats": stats,
     })
+
+
+@app.route("/api/logs")
+def api_logs():
+    return jsonify(logs_payload())
+
+
+@app.route("/api/compare")
+def api_compare():
+    payload, status_code = scan_media_compare_payload()
+    return jsonify(payload), status_code
 
 
 @app.route("/api/directories")

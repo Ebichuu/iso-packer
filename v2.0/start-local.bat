@@ -1,8 +1,8 @@
 @echo off
-REM ISO Packer v2.0 - 本地测试启动脚本（Windows）
+REM ISO Packer v2.1.0 - 本地测试启动脚本（Windows）
 
 echo ========================================
-echo  ISO Packer v2.0
+echo  ISO Packer v2.1.0
 echo  本地测试模式
 echo ========================================
 echo.
@@ -47,7 +47,7 @@ set ISO_PACKER_DISABLE_CD2_PULL=1
 set ISO_PACKER_DISABLE_CD2_STATUS_POLL=1
 
 echo ========================================
-echo  启动 ISO Packer v2.0
+echo  启动 ISO Packer v2.1.0
 echo ========================================
 echo.
 echo [访问] http://localhost:15865

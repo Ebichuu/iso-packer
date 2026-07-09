@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}媒体检测 · ISO Packer{% endblock %}
+
+{% block content %}
+<section class="space-y-5" aria-labelledby="compare-title">
+    <div class="flex flex-col gap-4 border-b border-zinc-200 pb-5 lg:flex-row lg:items-end lg:justify-between">
+        <div class="max-w-3xl space-y-2">
+            <p class="text-[11px] font-black uppercase tracking-[0.24em] text-amber-600">轻量比对</p>
+            <h2 id="compare-title" class="text-2xl font-black tracking-tight text-zinc-950">媒体检测</h2>
+            <p class="text-sm font-medium leading-6 text-zinc-500">按名称、年份、分辨率、来源和发布组聚合同片候选，用来先发现不同组或不同版本的线索。</p>
+        </div>
+        <button type="button" id="compare-scan" class="inline-flex min-h-9 items-center gap-2 rounded-lg bg-zinc-900 px-4 py-2 text-xs font-black text-white shadow-sm transition hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-2">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h10"/><path d="M4 17h7"/><path d="m17 14 3 3-3 3"/></svg>
+            开始扫描
+        </button>
+    </div>
+
+    <div class="grid grid-cols-2 gap-3 text-xs lg:grid-cols-5">
+        <div class="rounded-xl border border-zinc-200 bg-white p-3 shadow-sm">
+            <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">候选</div>
+            <div id="compare-stat-candidates" class="mt-1 font-mono text-xl font-black text-zinc-950">--</div>
+        </div>
+        <div class="rounded-xl border border-zinc-200 bg-white p-3 shadow-sm">
+            <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">分组</div>
+            <div id="compare-stat-groups" class="mt-1 font-mono text-xl font-black text-zinc-950">--</div>
+        </div>
+        <div class="rounded-xl border border-amber-200 bg-amber-50/70 p-3 shadow-sm">
+            <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-amber-500">多组线索</div>
+            <div id="compare-stat-multi" class="mt-1 font-mono text-xl font-black text-amber-700">--</div>
+        </div>
+        <div class="rounded-xl border border-blue-200 bg-blue-50/70 p-3 shadow-sm">
+            <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-blue-500">重复候选</div>
+            <div id="compare-stat-duplicates" class="mt-1 font-mono text-xl font-black text-blue-700">--</div>
+        </div>
+        <div class="rounded-xl border border-zinc-200 bg-white p-3 shadow-sm">
+            <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">扫描目录</div>
+            <div id="compare-stat-scanned" class="mt-1 font-mono text-xl font-black text-zinc-950">--</div>
+        </div>
+    </div>
+
+    <section class="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm" aria-labelledby="compare-control-title">
+        <div class="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+            <div class="min-w-0 flex-1 space-y-3">
+                <div class="flex flex-wrap items-center gap-2 text-[11px]">
+                    <span id="compare-control-title" class="font-black uppercase tracking-[0.14em] text-zinc-400">扫描位置</span>
+                    <div id="compare-root-switcher" class="flex gap-1 rounded-xl border border-zinc-200 bg-zinc-50 p-1 font-bold">
+                        <button type="button" data-compare-root="watch" data-root-path="{{ browser_roots.watch|e }}" data-active="false" class="rounded-lg px-3 py-1.5 text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">本机监控</button>
+                        <button type="button" data-compare-root="output" data-root-path="{{ browser_roots.output|e }}" data-active="false" class="rounded-lg px-3 py-1.5 text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">本机输出</button>
+                        <button type="button" data-compare-root="cd2" data-root-path="{{ browser_roots.cd2|e }}" data-active="true" class="rounded-lg px-3 py-1.5 text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">网盘挂载</button>
+                    </div>
+                </div>
+                <label class="sr-only" for="compare-path">扫描路径</label>
+                <input id="compare-path" type="text" value="{{ browser_roots.cd2|e }}" class="w-full rounded-lg border border-zinc-200 bg-[#fbfbfa] px-3 py-2 font-mono text-xs font-bold text-zinc-800 shadow-inner focus:border-zinc-400 focus:outline-none">
+            </div>
+            <div class="grid gap-2 sm:grid-cols-[160px_1fr] xl:w-[420px]">
+                <label class="block">
+                    <span class="block text-[10px] font-black uppercase tracking-[0.14em] text-zinc-400">深度</span>
+                    <select id="compare-depth" class="mt-2 min-h-10 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-bold text-zinc-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-2">
+                        <option value="1" selected>一层</option>
+                        <option value="2">两层</option>
+                    </select>
+                </label>
+                <label class="block">
+                    <span class="block text-[10px] font-black uppercase tracking-[0.14em] text-zinc-400">搜索</span>
+                    <input id="compare-search" type="search" placeholder="片名 / 年份 / 组名" class="mt-2 min-h-10 w-full rounded-lg border border-zinc-200 bg-[#fbfbfa] px-3 py-2 font-mono text-xs font-bold text-zinc-800 shadow-inner focus:border-zinc-400 focus:outline-none">
+                </label>
+            </div>
+        </div>
+    </section>
+
+    <section class="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm" aria-labelledby="compare-results-title">
+        <div class="flex flex-col gap-2 border-b border-zinc-200 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+                <h3 id="compare-results-title" class="text-sm font-black tracking-tight text-zinc-950">候选分组</h3>
+                <p id="compare-summary" class="mt-1 text-xs font-medium text-zinc-500">等待扫描。</p>
+            </div>
+            <span id="compare-current-path" class="max-w-full truncate rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 font-mono text-[11px] font-bold text-zinc-500 sm:max-w-[520px]">--</span>
+        </div>
+        <div id="compare-groups" class="divide-y divide-zinc-100 text-xs" aria-live="polite"></div>
+    </section>
+</section>
+{% endblock %}
+
+{% block script %}
+<script src="{{ url_for('static', filename='js/compare.js') }}"></script>
+{% endblock %}

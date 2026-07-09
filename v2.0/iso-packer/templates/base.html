@@ -45,13 +45,13 @@
 </head>
 <body class="min-h-screen text-zinc-700 flex font-sans antialiased selection:bg-blue-500/10">
 
-    <aside class="fixed bottom-0 top-0 left-0 z-30 flex flex-col justify-between w-64 -translate-x-full border-r border-zinc-200 bg-[#f4f4f2] transition-transform duration-200 md:sticky md:translate-x-0 shrink-0" id="sidebar">
+    <aside class="fixed bottom-0 top-0 left-0 z-30 flex w-64 -translate-x-full flex-col justify-between overflow-y-auto border-r border-zinc-200 bg-[#f4f4f2] transition-transform duration-200 md:translate-x-0" id="sidebar">
         <div class="p-6 space-y-7">
             <div class="flex items-center gap-3 px-1">
                 <div class="h-8 w-8 rounded-lg bg-zinc-900 flex items-center justify-center font-bold text-white text-sm shadow-sm">iP</div>
                 <div>
                     <h1 class="font-extrabold tracking-tight text-zinc-900 text-xs uppercase tracking-widest">ISO PACKER</h1>
-                    <p class="text-[10px] text-zinc-400 font-mono mt-0.5">v2.0 · Alabaster Edition</p>
+                    <p class="text-[10px] text-zinc-400 font-mono mt-0.5">v2.1.0 · Alabaster Edition</p>
                 </div>
             </div>
 
@@ -66,6 +66,12 @@
                 <a href="{{ url_for('files') }}" class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all {% if request.endpoint == 'files' %}bg-white text-zinc-900 font-bold shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200{% else %}text-zinc-500 hover:text-zinc-900 hover:bg-white/60 font-semibold{% endif %}">
                     <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-200 text-[10px] font-black text-zinc-700">F</span> 文件浏览
                 </a>
+                <a href="{{ url_for('logs') }}" class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all {% if request.endpoint == 'logs' %}bg-white text-zinc-900 font-bold shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200{% else %}text-zinc-500 hover:text-zinc-900 hover:bg-white/60 font-semibold{% endif %}">
+                    <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-200 text-[10px] font-black text-zinc-700">L</span> 日志中心
+                </a>
+                <a href="{{ url_for('compare') }}" class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all {% if request.endpoint == 'compare' %}bg-white text-zinc-900 font-bold shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200{% else %}text-zinc-500 hover:text-zinc-900 hover:bg-white/60 font-semibold{% endif %}">
+                    <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-200 text-[10px] font-black text-zinc-700">C</span> 媒体检测
+                </a>
                 <a href="{{ url_for('settings') }}" class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs transition-all {% if request.endpoint == 'settings' %}bg-white text-zinc-900 font-bold shadow-[0_2px_8px_rgba(0,0,0,0.02)] border border-zinc-200{% else %}text-zinc-500 hover:text-zinc-900 hover:bg-white/60 font-semibold{% endif %}">
                     <span class="grid h-5 w-5 place-items-center rounded-md bg-zinc-200 text-[10px] font-black text-zinc-700">S</span> 系统设置
                 </a>
@@ -78,7 +84,7 @@
         </div>
     </aside>
 
-    <main class="flex-1 w-full overflow-y-auto p-4 sm:p-5 lg:p-6 2xl:p-8 flex flex-col justify-start">
+    <main class="flex-1 w-full overflow-y-auto p-4 sm:p-5 lg:p-6 2xl:p-8 flex flex-col justify-start md:ml-64">
         <!-- 移动端汉堡包菜单按钮 -->
         <button id="mobile-menu-toggle" type="button" data-mobile-menu-toggle aria-controls="sidebar" aria-expanded="false" aria-label="打开导航菜单" class="md:hidden fixed top-4 left-4 z-40 bg-zinc-900 text-white p-2 rounded-lg shadow-lg">
             <svg class="w-5 h-5" aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24">
