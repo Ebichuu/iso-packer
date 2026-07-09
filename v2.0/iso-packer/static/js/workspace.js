@@ -2,6 +2,10 @@
   const helper = () => window.IsoPacker;
   const state = {
     candidates: [],
+    lastStatus: {},
+    lastCandidatePayload: null,
+    outputSortOrder: "desc",
+    candidateSortOrder: "desc",
     pullConfigured: false,
     pullEnabled: false,
     pullGuardEnabled: false
@@ -19,6 +23,52 @@
   function setText(id, value) {
     const node = document.getElementById(id);
     if (node) node.innerText = value == null || value === "" ? "--" : String(value);
+  }
+
+  function firstPresent(...values) {
+    return values.find((value) => value !== undefined && value !== null && String(value).trim() !== "");
+  }
+
+  function normalizeSortOrder(value) {
+    return value === "asc" ? "asc" : "desc";
+  }
+
+  function parseSortTime(value) {
+    if (value === undefined || value === null || value === "") return 0;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value) || value <= 0) return 0;
+      return value < 1e12 ? value * 1000 : value;
+    }
+    const text = String(value).trim();
+    if (!text) return 0;
+    if (/^\d+(\.\d+)?$/.test(text)) {
+      const numeric = Number(text);
+      if (Number.isFinite(numeric) && numeric > 0) return numeric < 1e12 ? numeric * 1000 : numeric;
+    }
+    const parsed = Date.parse(text);
+    if (Number.isFinite(parsed)) return parsed;
+    const normalized = text.replace(" ", "T");
+    const reparsed = Date.parse(normalized);
+    return Number.isFinite(reparsed) ? reparsed : 0;
+  }
+
+  function compareSortTime(left, right, order) {
+    const leftTime = Number(left || 0);
+    const rightTime = Number(right || 0);
+    if (!leftTime && rightTime) return 1;
+    if (leftTime && !rightTime) return -1;
+    if (leftTime !== rightTime) {
+      return normalizeSortOrder(order) === "asc" ? leftTime - rightTime : rightTime - leftTime;
+    }
+    return 0;
+  }
+
+  function formatSortTime(value) {
+    const timestamp = parseSortTime(value);
+    if (!timestamp) return "--";
+    const date = new Date(timestamp);
+    const pad = (part) => String(part).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
 
   function showFeedback(message, isError = false) {
@@ -333,19 +383,31 @@
 
   function fileOperationRows(status) {
     const operations = (status && status.file_operations && status.file_operations.items) || [];
-    return operations.map((operation) => ({
-      name: fileOperationName(operation),
-      source: (operation.sources || []).join(" / "),
-      output_iso: fileOperationTarget(operation),
-      phase: `file_${operation.action || "operation"}`,
-      status: operation.status || "queued",
-      progress: Number(operation.progress || 0),
-      current: Number(operation.done || 0),
-      total: Number(operation.total || 0),
-      stage_text: operation.message || "文件操作进行中",
-      is_file_operation: true,
-      is_current: ["queued", "running"].includes(operation.status)
-    }));
+    return operations.map((operation) => {
+      const sortSource = firstPresent(
+        operation.finished_at,
+        operation.completed_at,
+        operation.updated_at,
+        operation.started_at,
+        operation.created_at
+      );
+      return {
+        name: fileOperationName(operation),
+        source: (operation.sources || []).join(" / "),
+        output_iso: fileOperationTarget(operation),
+        phase: `file_${operation.action || "operation"}`,
+        status: operation.status || "queued",
+        progress: Number(operation.progress || 0),
+        current: Number(operation.done || 0),
+        total: Number(operation.total || 0),
+        stage_text: operation.message || "文件操作进行中",
+        sort_source: sortSource,
+        sort_time: parseSortTime(sortSource),
+        time_label: formatSortTime(sortSource),
+        is_file_operation: true,
+        is_current: ["queued", "running"].includes(operation.status)
+      };
+    });
   }
 
   function outputQueueItems(status) {
@@ -355,6 +417,13 @@
     const current = status && status.current_job;
     if (current) {
       const source = current.source_path || current.source || "";
+      const sortSource = firstPresent(
+        current.finished_at,
+        current.done_at,
+        current.updated_at,
+        current.started_at,
+        current.task_started_at
+      );
       rows.push({
         name: source.split(/[\\/]/).filter(Boolean).pop() || "当前任务",
         source,
@@ -364,6 +433,9 @@
         current: current.current,
         total: current.total,
         stage_text: current.stage_text,
+        sort_source: sortSource,
+        sort_time: parseSortTime(sortSource),
+        time_label: formatSortTime(sortSource),
         is_current: true
       });
       if (source) seen.add(source);
@@ -378,6 +450,15 @@
       const delivered = phase === "done" || phase === "transfer_done";
       const upload = delivered ? {} : (item.cd2_upload || {});
       const uploadProgress = delivered ? 100 : Number(upload.percent ?? item.progress ?? 0);
+      const sortSource = firstPresent(
+        item.finished_at,
+        item.done_at,
+        item.cd2_upload_done_at,
+        item.transfer_finished_at,
+        item.updated_at,
+        item.last_changed,
+        item.first_seen
+      );
       rows.push({
         name: source.split(/[\\/]/).filter(Boolean).pop() || item.name || "ISO 任务",
         source,
@@ -390,10 +471,19 @@
         stage_text: delivered ? (item.status_label || "已交付") : (upload.human || upload.summary || item.status_label || item.error || ""),
         error: item.error || item.last_error || "",
         issue_text: item.issue_text || "",
-        finished_at: item.finished_at || item.done_at || item.updated_at || item.first_seen || ""
+        finished_at: item.finished_at || item.done_at || item.updated_at || item.first_seen || "",
+        sort_source: sortSource,
+        sort_time: parseSortTime(sortSource),
+        time_label: formatSortTime(sortSource)
       });
     });
-    return rows.slice(0, 6);
+    return rows
+      .sort((left, right) => {
+        if (left.is_current !== right.is_current) return left.is_current ? -1 : 1;
+        return compareSortTime(left.sort_time, right.sort_time, state.outputSortOrder)
+          || String(left.name || "").localeCompare(String(right.name || ""), "zh-Hans");
+      })
+      .slice(0, 6);
   }
 
   function renderOutputQueue(status) {
@@ -454,6 +544,9 @@
       container.innerHTML = renderStateCard("empty", "暂无任务", "封装、校验、转存和文件浏览的本地文件操作会显示在这里。");
       return;
     }
+    if (summary && rows.length) {
+      summary.textContent = `共 ${rows.length} 条产出 / 文件操作记录，当前任务置顶，其余按时间${state.outputSortOrder === "asc" ? "从旧到新" : "从新到旧"}排列。`;
+    }
     container.innerHTML = rows.map((item) => {
       const view = outputQueueView(item);
       const progress = item.progress_label || (Number.isFinite(Number(item.progress)) ? formatPercent(item.progress) : "--");
@@ -473,6 +566,7 @@
           <div class="min-w-0 space-y-1 font-mono text-[10px] text-zinc-500">
             <div class="truncate" title="${escapeHtml(item.output_iso)}">目标: ${escapeHtml(item.output_iso || "--")}</div>
             <div class="truncate" title="${escapeHtml(item.source)}">来源: ${escapeHtml(item.source || "--")}</div>
+            <div class="truncate" title="${escapeHtml(item.sort_source || item.time_label || "")}">时间: ${escapeHtml(item.time_label || "--")}</div>
           </div>
           <div class="text-left lg:text-right">
             <div class="font-mono text-sm font-black text-zinc-900">${escapeHtml(progress)}</div>
@@ -485,6 +579,7 @@
 
   window.addEventListener("coreStatusUpdated", (event) => {
     const status = event.detail || {};
+    state.lastStatus = status;
     renderPipeline(status);
     renderOutputQueueV2(status);
   });
@@ -512,6 +607,32 @@
     if (size >= 1024 ** 3) return `${(size / 1024 ** 3).toFixed(1)} GB`;
     if (size >= 1024 ** 2) return `${(size / 1024 ** 2).toFixed(1)} MB`;
     return `${Math.max(1, Math.round(size / 1024))} KB`;
+  }
+
+  function candidateSortSource(candidate) {
+    return firstPresent(
+      candidate.modified,
+      candidate.updated_at,
+      candidate.created_at,
+      candidate.pull_created_at
+    );
+  }
+
+  function sortedCandidates(candidates) {
+    return candidates
+      .map((candidate) => {
+        const sortSource = candidateSortSource(candidate);
+        return {
+          ...candidate,
+          sort_source: sortSource,
+          sort_time: parseSortTime(sortSource),
+          time_label: formatSortTime(sortSource)
+        };
+      })
+      .sort((left, right) => (
+        compareSortTime(left.sort_time, right.sort_time, state.candidateSortOrder)
+        || String(left.name || left.path || "").localeCompare(String(right.name || right.path || ""), "zh-Hans")
+      ));
   }
 
   function renderStateCard(kind, title, body) {
@@ -582,12 +703,20 @@
     const container = document.getElementById("workspace-candidates-container");
     if (!container) return;
 
-    const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
-    state.candidates = candidates;
+    const rawCandidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+    const candidates = sortedCandidates(rawCandidates);
+    state.lastCandidatePayload = payload;
+    state.candidates = rawCandidates;
     state.pullConfigured = payload.pull_configured === true || payload.manual_pull_enabled === true || payload.auto_pull_enabled === true;
     state.pullGuardEnabled = payload.pull_guard_enabled === true;
     state.pullEnabled = payload.pull_enabled === true && !state.pullGuardEnabled;
     updateCandidateSummary(payload, candidates);
+    if (candidates.length) {
+      const summaryText = document.getElementById("candidate-summary-text");
+      if (summaryText) {
+        summaryText.textContent = `${summaryText.textContent} 当前按修改时间${state.candidateSortOrder === "asc" ? "从旧到新" : "从新到旧"}排列。`;
+      }
+    }
 
     if (!candidates.length) {
       container.innerHTML = renderStateCard("empty", "无候选", payload.message || "没有扫描到待处理的 CD2 候选原盘。");
@@ -614,6 +743,7 @@
                 <span class="max-w-[420px] truncate" title="${escapeHtml(candidate.path)}">路径: ${escapeHtml(candidate.path || "--")}</span>
                 <span>类型: ${escapeHtml(candidate.disc_type || "--")}</span>
                 <span>大小: ${escapeHtml(candidateSize(candidate))}</span>
+                <span>时间: ${escapeHtml(candidate.time_label || "--")}</span>
               </span>
             </span>
           </label>
@@ -793,6 +923,24 @@
     renderPipeline({});
     renderOutputQueueV2({});
     if (document.getElementById("workspace-candidates-container")) fetchCandidatesQueue();
+
+    const outputSort = document.getElementById("output-sort-order");
+    if (outputSort) {
+      state.outputSortOrder = normalizeSortOrder(outputSort.value);
+      outputSort.addEventListener("change", () => {
+        state.outputSortOrder = normalizeSortOrder(outputSort.value);
+        renderOutputQueueV2(state.lastStatus || {});
+      });
+    }
+
+    const candidateSort = document.getElementById("candidate-sort-order");
+    if (candidateSort) {
+      state.candidateSortOrder = normalizeSortOrder(candidateSort.value);
+      candidateSort.addEventListener("change", () => {
+        state.candidateSortOrder = normalizeSortOrder(candidateSort.value);
+        if (state.lastCandidatePayload) renderCandidates(state.lastCandidatePayload);
+      });
+    }
 
     const refreshButton = document.querySelector("[data-refresh-candidates]");
     if (refreshButton) refreshButton.addEventListener("click", () => fetchCandidatesQueue(true));
