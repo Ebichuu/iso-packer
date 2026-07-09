@@ -1,10 +1,14 @@
 (function () {
+  const DIRECTORY_ROOT = "@roots";
+
   const state = {
     root: "cd2",
     path: "",
     depth: 1,
     query: "",
     loading: false,
+    pickerPath: DIRECTORY_ROOT,
+    pickerParent: null,
   };
 
   function helper() {
@@ -22,12 +26,19 @@
     helper().setText(helper().qs(selector), value);
   }
 
-  function kindLabel(kind) {
-    return {
-      iso: "ISO",
-      video: "视频文件",
-      file: "文件",
-    }[kind || "file"] || kind || "文件";
+  function normalizePath(value) {
+    return String(value || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  }
+
+  function isPathInside(path, base) {
+    const current = normalizePath(path);
+    const root = normalizePath(base);
+    if (!current || !root) return false;
+    return current === root || current.startsWith(`${root}/`);
+  }
+
+  function rootButton(rootName = state.root) {
+    return helper().qs(`[data-compare-root="${rootName}"]`);
   }
 
   function syncRoots() {
@@ -38,8 +49,40 @@
   }
 
   function activeRootPath(rootName = state.root) {
-    const button = helper().qs(`[data-compare-root="${rootName}"]`);
+    const button = rootButton(rootName);
     return String((button && button.dataset.rootPath) || "");
+  }
+
+  function rootBasePath(rootName = state.root) {
+    const button = rootButton(rootName);
+    return String((button && (button.dataset.rootBase || button.dataset.rootPath)) || "");
+  }
+
+  function inferRootFromPath(path) {
+    const matches = [];
+    helper().qsa("[data-compare-root]").forEach((button) => {
+      const rootName = button.dataset.compareRoot || "";
+      const candidates = [button.dataset.rootBase, button.dataset.rootPath].filter(Boolean);
+      candidates.forEach((base) => {
+        if (isPathInside(path, base)) matches.push({ root: rootName, length: normalizePath(base).length });
+      });
+    });
+    matches.sort((left, right) => right.length - left.length);
+    return matches[0]?.root || "";
+  }
+
+  function updatePathInput() {
+    const input = helper().qs("#compare-path");
+    if (input) input.value = state.path || activeRootPath();
+  }
+
+  function setComparePath(path, shouldScan = true) {
+    state.path = String(path || activeRootPath() || "").trim();
+    const inferred = inferRootFromPath(state.path);
+    if (inferred) state.root = inferred;
+    syncRoots();
+    updatePathInput();
+    if (shouldScan) scan();
   }
 
   function renderStats(summary) {
@@ -83,7 +126,7 @@
     const root = helper().qs("#compare-groups");
     helper().clearNode(root);
     if (!groups || !groups.length) {
-      root.appendChild(node("div", "p-8 text-center text-sm font-bold text-zinc-400", "没有扫描到可用于比对的成品电影文件。"));
+      root.appendChild(node("div", "p-8 text-center text-sm font-bold text-zinc-400", "没有发现同片多版本或多组的成品电影文件。"));
       return;
     }
     groups.forEach((group) => {
@@ -125,6 +168,17 @@
     });
   }
 
+  function summaryText(summary) {
+    const data = summary || {};
+    const groupCount = data.group_count || 0;
+    const candidateCount = data.candidate_count || 0;
+    const scannedCount = data.scanned_candidate_count || candidateCount;
+    const hiddenCount = Math.max(0, scannedCount - candidateCount);
+    const hiddenText = hiddenCount ? ` · 已忽略 ${hiddenCount} 个单片` : "";
+    const truncatedText = data.truncated ? " · 已达到本轮上限" : "";
+    return `${groupCount} 个多版本分组 · ${candidateCount} 个参与比对的成品${hiddenText}${truncatedText}`;
+  }
+
   async function scan() {
     if (state.loading) return;
     state.loading = true;
@@ -141,9 +195,13 @@
     setText("#compare-summary", "扫描中...");
     try {
       const payload = await helper().fetchJson(`/api/compare?${params.toString()}`);
+      if (payload.path) {
+        state.path = payload.path;
+        updatePathInput();
+      }
       renderStats(payload.summary);
       renderGroups(payload.groups || []);
-      setText("#compare-summary", `${payload.summary?.group_count || 0} 个分组 · ${payload.summary?.candidate_count || 0} 个成品文件${payload.summary?.truncated ? " · 已达到本轮上限" : ""}`);
+      setText("#compare-summary", summaryText(payload.summary));
       setText("#compare-current-path", payload.path || state.path || "--");
     } catch (error) {
       helper().notify(error.message || "扫描失败", true);
@@ -159,28 +217,106 @@
     }
   }
 
+  function renderPickerMessage(message) {
+    const list = helper().qs("#compare-directory-list");
+    if (!list) return;
+    list.replaceChildren(Object.assign(document.createElement("div"), {
+      className: "empty-state slim",
+      textContent: message,
+    }));
+  }
+
+  function renderPickerEntries(payload) {
+    state.pickerPath = payload.path || DIRECTORY_ROOT;
+    state.pickerParent = payload.parent || null;
+    setText("#compare-directory-path", payload.display_path || state.pickerPath);
+    setText("#compare-directory-selected", state.pickerPath === DIRECTORY_ROOT ? "未选择" : state.pickerPath);
+    const up = helper().qs("#compare-directory-up");
+    const use = helper().qs("#compare-directory-use");
+    if (up) up.disabled = !state.pickerParent;
+    if (use) use.disabled = state.pickerPath === DIRECTORY_ROOT || state.pickerPath === "/";
+
+    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+    setText("#compare-directory-status", entries.length ? `${entries.length} 个子目录` : "没有子目录");
+    const list = helper().qs("#compare-directory-list");
+    if (!list) return;
+    helper().clearNode(list);
+    if (!entries.length) {
+      renderPickerMessage("没有可进入的子目录。");
+      return;
+    }
+    const wrap = node("div", "grid gap-2");
+    entries.forEach((entry) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "compare-directory-row";
+      row.dataset.dirPath = entry.path || "";
+      row.dataset.selected = entry.path === state.pickerPath ? "true" : "false";
+      row.disabled = entry.readable === false;
+
+      const kind = node("span", "rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-center font-mono text-[10px] font-black text-zinc-500", "DIR");
+      const main = node("span", "compare-directory-main");
+      const name = node("strong", "", entry.name || entry.path || "未命名目录");
+      const path = node("small", "", entry.path || "");
+      const action = node("span", "rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-black text-zinc-500", entry.readable === false ? "不可读" : "进入");
+      main.append(name, path);
+      row.append(kind, main, action);
+      wrap.appendChild(row);
+    });
+    list.appendChild(wrap);
+  }
+
+  async function loadPickerDirectory(path) {
+    renderPickerMessage("正在读取目录。");
+    try {
+      const target = path || DIRECTORY_ROOT;
+      const payload = await helper().fetchJson(`/api/directories?scope=media_compare&path=${encodeURIComponent(target)}`);
+      renderPickerEntries(payload);
+    } catch (error) {
+      renderPickerMessage(error.message || "目录读取失败。");
+      setText("#compare-directory-status", "读取失败");
+    }
+  }
+
+  function openPicker() {
+    const picker = helper().qs("#compare-directory-picker");
+    if (!picker) return;
+    picker.classList.remove("hidden");
+    document.body.classList.add("has-modal");
+    loadPickerDirectory(state.path || activeRootPath() || DIRECTORY_ROOT);
+  }
+
+  function closePicker() {
+    const picker = helper().qs("#compare-directory-picker");
+    if (picker) picker.classList.add("hidden");
+    document.body.classList.remove("has-modal");
+  }
+
+  function usePickerDirectory() {
+    if (!state.pickerPath || state.pickerPath === DIRECTORY_ROOT || state.pickerPath === "/") return;
+    const selected = state.pickerPath;
+    closePicker();
+    setComparePath(selected, true);
+  }
+
   function setupEvents() {
     helper().qsa("[data-compare-root]").forEach((button) => {
       button.addEventListener("click", () => {
         state.root = button.dataset.compareRoot || "cd2";
         state.path = activeRootPath(state.root);
-        const input = helper().qs("#compare-path");
-        if (input) input.value = state.path;
         syncRoots();
+        updatePathInput();
         scan();
       });
     });
     const path = helper().qs("#compare-path");
     if (path) {
       state.path = path.value || activeRootPath();
-      path.addEventListener("change", () => {
-        state.path = path.value.trim() || activeRootPath();
-        scan();
-      });
+      path.addEventListener("change", () => setComparePath(path.value, true));
       path.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
-          state.path = path.value.trim() || activeRootPath();
-          scan();
+          event.preventDefault();
+          setComparePath(path.value, true);
         }
       });
     }
@@ -202,14 +338,25 @@
         }, 260);
       });
     }
-    const scanButton = helper().qs("#compare-scan");
-    if (scanButton) {
-      scanButton.addEventListener("click", () => {
-        const input = helper().qs("#compare-path");
-        state.path = (input && input.value.trim()) || activeRootPath();
-        scan();
-      });
-    }
+    helper().qs("#compare-scan")?.addEventListener("click", () => {
+      const input = helper().qs("#compare-path");
+      setComparePath((input && input.value.trim()) || activeRootPath(), true);
+    });
+    helper().qs("#compare-pick-directory")?.addEventListener("click", openPicker);
+    helper().qs("#compare-directory-list")?.addEventListener("click", (event) => {
+      const row = event.target.closest("[data-dir-path]");
+      if (row && !row.disabled) loadPickerDirectory(row.dataset.dirPath);
+    });
+    helper().qs("#compare-directory-up")?.addEventListener("click", () => {
+      if (state.pickerParent) loadPickerDirectory(state.pickerParent);
+    });
+    helper().qs("#compare-directory-roots")?.addEventListener("click", () => loadPickerDirectory(DIRECTORY_ROOT));
+    helper().qs("#compare-directory-use")?.addEventListener("click", usePickerDirectory);
+    helper().qs("#compare-directory-close")?.addEventListener("click", closePicker);
+    helper().qs("#compare-directory-cancel")?.addEventListener("click", closePicker);
+    helper().qs("#compare-directory-picker")?.addEventListener("click", (event) => {
+      if (event.target.id === "compare-directory-picker") closePicker();
+    });
   }
 
   document.addEventListener("DOMContentLoaded", () => {

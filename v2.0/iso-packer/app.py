@@ -134,6 +134,7 @@ DIRECTORY_PICKER_SCOPES = {
     "watch_dir": ("watch_dir",),
     "output_dir": ("output_dir",),
     "file_destination": ("watch_dir", "output_dir", "cd2_mount_root"),
+    "media_compare": ("output_dir", "cd2_target_dir", "cd2_mount_root"),
     "cd2_mount_root": ("cd2_mount_root",),
     "cd2_target_dir": ("cd2_mount_root", "cd2_target_dir"),
     "cd2_local_pull_dir": ("watch_dir", "cd2_local_pull_dir"),
@@ -822,7 +823,10 @@ def directory_picker_roots(cfg: Dict, scope: str):
     fields = DIRECTORY_PICKER_SCOPES.get(scope, ())
     roots = []
     for field in fields:
-        for raw in (cfg.get(field), DEFAULT_CONFIG.get(field)):
+        raw_values = [cfg.get(field)]
+        if scope != "media_compare" or not raw_values[0]:
+            raw_values.append(DEFAULT_CONFIG.get(field))
+        for raw in raw_values:
             if not raw:
                 continue
             try:
@@ -3787,13 +3791,54 @@ def detect_media_source(name: str) -> str:
     return ""
 
 
+MEDIA_GROUP_STOPWORDS = {
+    "2160p", "1080p", "720p", "uhd", "4k", "bluray", "blu-ray", "bdrip", "bdmv",
+    "remux", "web", "webdl", "web-dl", "webrip", "hdtv", "dvd", "x264", "x265",
+    "h264", "h265", "avc", "hevc", "hdr", "hdr10", "hdr10plus", "dovi", "dv",
+    "dolby", "vision", "atmos", "truehd", "dts", "dtshd", "ma", "aac", "flac",
+    "ac3", "eac3", "ddp", "dd", "mp4", "mkv", "iso",
+}
+
+
+def clean_media_group_token(token: str) -> str:
+    value = str(token or "").strip().strip("[](){}").strip(" ._-")
+    if not value or len(value) > 48:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{1,47}", value):
+        return ""
+    lowered = re.sub(r"[._-]+", "", value).lower()
+    dashed = value.lower()
+    if lowered in MEDIA_GROUP_STOPWORDS or dashed in MEDIA_GROUP_STOPWORDS:
+        return ""
+    if value.isdigit():
+        return ""
+    return value
+
+
 def detect_media_group(name: str) -> str:
     text = str(name or "").strip()
-    match = re.search(r"-([A-Za-z0-9][A-Za-z0-9._-]{1,24})$", text)
-    if match:
-        return match.group(1).strip("._-")
-    match = re.search(r"\[([A-Za-z0-9][A-Za-z0-9._-]{1,24})\]\s*$", text)
-    return match.group(1).strip("._-") if match else ""
+    if not text:
+        return ""
+    patterns = [
+        r"[\[\(]([A-Za-z0-9][A-Za-z0-9._@-]{1,47})[\]\)]\s*$",
+        r"[-–—]\s*([A-Za-z0-9][A-Za-z0-9._@-]{1,47})$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        group = clean_media_group_token(match.group(1)) if match else ""
+        if group:
+            return group
+
+    tail_match = re.search(r"([A-Za-z0-9][A-Za-z0-9._@-]{1,47})$", text)
+    tail = clean_media_group_token(tail_match.group(1)) if tail_match else ""
+    has_media_tokens = re.search(
+        r"\b(19\d{2}|20\d{2}|2160p|1080p|720p|uhd|4k|bluray|blu-ray|remux|web[ ._-]*dl|webrip|x264|x265|hevc|avc|hdr10|dovi)\b",
+        text,
+        flags=re.I,
+    )
+    if tail and ("@" in tail or (has_media_tokens and re.search(r"[a-z][A-Z]|[A-Z][a-z]", tail))):
+        return tail
+    return ""
 
 
 def media_identity_key(title: str, year: str) -> str:
@@ -3872,6 +3917,8 @@ def build_media_compare_groups(candidates: list[Dict]) -> list[Dict]:
     groups = []
     for key, items in grouped.items():
         items.sort(key=lambda item: item.get("mtime") or "", reverse=True)
+        if len(items) < 2:
+            continue
         groups_seen = sorted({str(item.get("group") or "未知组") for item in items})
         resolutions = sorted({str(item.get("resolution") or "未知") for item in items})
         sources = sorted({str(item.get("source") or "未知来源") for item in items})
@@ -3958,8 +4005,10 @@ def scan_media_compare_payload() -> tuple[Dict, int]:
             break
 
     groups = build_media_compare_groups(candidates)
+    compared_candidate_count = sum(int(group.get("count") or 0) for group in groups)
     summary = {
-        "candidate_count": len(candidates),
+        "candidate_count": compared_candidate_count,
+        "scanned_candidate_count": len(candidates),
         "group_count": len(groups),
         "multi_group_count": sum(1 for group in groups if group.get("multi_group")),
         "duplicate_like_count": sum(1 for group in groups if int(group.get("count") or 0) > 1),

@@ -18,7 +18,7 @@
 
     <div class="grid grid-cols-2 gap-3 text-xs lg:grid-cols-5">
         <div class="rounded-xl border border-zinc-200 bg-white p-3 shadow-sm">
-            <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">成品文件</div>
+            <div class="font-mono text-[10px] font-black uppercase tracking-[0.16em] text-zinc-400">参与比对</div>
             <div id="compare-stat-candidates" class="mt-1 font-mono text-xl font-black text-zinc-950">--</div>
         </div>
         <div class="rounded-xl border border-zinc-200 bg-white p-3 shadow-sm">
@@ -45,12 +45,15 @@
                 <div class="flex flex-wrap items-center gap-2 text-[11px]">
                     <span id="compare-control-title" class="font-black uppercase tracking-[0.14em] text-zinc-400">成品位置</span>
                     <div id="compare-root-switcher" class="flex gap-1 rounded-xl border border-zinc-200 bg-zinc-50 p-1 font-bold">
-                        <button type="button" data-compare-root="output" data-root-path="{{ browser_roots.output|e }}" data-active="false" class="rounded-lg px-3 py-1.5 text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">本机输出</button>
-                        <button type="button" data-compare-root="cd2" data-root-path="{{ browser_roots.cd2_finished|e }}" data-active="true" class="rounded-lg px-3 py-1.5 text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">CD2 成品</button>
+                        <button type="button" data-compare-root="output" data-root-path="{{ browser_roots.output|e }}" data-root-base="{{ browser_roots.output|e }}" data-active="false" class="rounded-lg px-3 py-1.5 text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">本机输出</button>
+                        <button type="button" data-compare-root="cd2" data-root-path="{{ browser_roots.cd2_finished|e }}" data-root-base="{{ browser_roots.cd2|e }}" data-active="true" class="rounded-lg px-3 py-1.5 text-zinc-600 data-[active=true]:bg-white data-[active=true]:text-zinc-900 data-[active=true]:shadow-sm">CD2 成品</button>
                     </div>
                 </div>
                 <label class="sr-only" for="compare-path">扫描路径</label>
-                <input id="compare-path" type="text" value="{{ browser_roots.cd2_finished|e }}" class="w-full rounded-lg border border-zinc-200 bg-[#fbfbfa] px-3 py-2 font-mono text-xs font-bold text-zinc-800 shadow-inner focus:border-zinc-400 focus:outline-none">
+                <div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                    <input id="compare-path" type="text" value="{{ browser_roots.cd2_finished|e }}" class="w-full rounded-lg border border-zinc-200 bg-[#fbfbfa] px-3 py-2 font-mono text-xs font-bold text-zinc-800 shadow-inner focus:border-zinc-400 focus:outline-none">
+                    <button type="button" id="compare-pick-directory" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-zinc-200 bg-white px-4 py-2 text-xs font-black text-zinc-700 shadow-sm transition hover:border-zinc-400 hover:text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-2">选择目录</button>
+                </div>
             </div>
             <div class="grid gap-2 sm:grid-cols-[160px_1fr] xl:w-[420px]">
                 <label class="block">
@@ -78,9 +81,47 @@
         </div>
         <div id="compare-groups" class="divide-y divide-zinc-100 text-xs" aria-live="polite"></div>
     </section>
+
+    <div id="compare-directory-picker" class="hidden fixed inset-0 z-40 bg-zinc-950/35 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="compare-directory-title">
+        <div class="mx-auto flex h-full max-h-[820px] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl">
+            <div class="flex items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4">
+                <div class="min-w-0">
+                    <h3 id="compare-directory-title" class="text-sm font-black text-zinc-900">选择成品目录</h3>
+                    <p id="compare-directory-path" class="mt-1 max-w-[60ch] truncate font-mono text-[11px] font-bold text-zinc-500">可选目录</p>
+                </div>
+                <button type="button" id="compare-directory-close" class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[11px] font-bold text-zinc-600 hover:border-zinc-400">关闭</button>
+            </div>
+            <div class="flex items-center gap-2 border-b border-zinc-100 px-5 py-3">
+                <button type="button" id="compare-directory-up" class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[11px] font-bold text-zinc-700 hover:border-zinc-400">上级</button>
+                <button type="button" id="compare-directory-roots" class="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[11px] font-bold text-zinc-700 hover:border-zinc-400">根目录</button>
+                <span id="compare-directory-status" class="ml-auto text-[11px] font-bold text-zinc-500"></span>
+            </div>
+            <div id="compare-directory-list" class="min-h-0 flex-1 overflow-auto p-4"></div>
+            <div class="border-t border-zinc-200 px-5 py-4">
+                <div class="mb-3 flex min-w-0 items-center gap-2 font-mono text-[11px] text-zinc-600">
+                    <span class="font-black text-zinc-400">已选</span>
+                    <span id="compare-directory-selected" class="truncate font-bold text-zinc-900">未选择</span>
+                </div>
+                <div class="flex justify-end gap-2">
+                    <button type="button" id="compare-directory-cancel" class="rounded-lg border border-zinc-200 bg-white px-4 py-2 text-xs font-bold text-zinc-700 hover:border-zinc-400">取消</button>
+                    <button type="button" id="compare-directory-use" class="rounded-lg bg-zinc-900 px-4 py-2 text-xs font-black text-white hover:bg-zinc-700 disabled:opacity-40" disabled>使用此目录</button>
+                </div>
+            </div>
+        </div>
+    </div>
 </section>
 {% endblock %}
 
 {% block script %}
+<style>
+    .compare-directory-row { display: grid; grid-template-columns: 2.25rem minmax(0,1fr) auto; align-items: center; gap: 0.75rem; width: 100%; border: 1px solid #e4e4e7; border-radius: 0.8rem; background: #fff; padding: 0.75rem; text-align: left; }
+    .compare-directory-row:hover { border-color: #a1a1aa; background: #fafafa; }
+    .compare-directory-row[data-selected="true"] { border-color: #a1a1aa; background: #f4f4f5; }
+    .compare-directory-row:disabled { opacity: 0.45; cursor: default; }
+    .compare-directory-main { min-width: 0; }
+    .compare-directory-main strong,
+    .compare-directory-main small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .compare-directory-main small { margin-top: 0.15rem; color: #71717a; }
+</style>
 <script src="{{ url_for('static', filename='js/compare.js') }}"></script>
 {% endblock %}
