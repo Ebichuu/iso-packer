@@ -52,6 +52,7 @@ class RevisionRecoveryTests(unittest.TestCase):
                 "enough_space",
                 "run_iso",
                 "validate_iso",
+                "transfer_iso_to_mount",
             )
         }
         test_data_dir = Path(self.state_dir.name)
@@ -246,6 +247,172 @@ class RevisionRecoveryTests(unittest.TestCase):
             self.assertTrue(new_iso.exists())
             self.assertFalse(old_iso.exists())
             self.assertEqual(app.state["items"][str(source)]["replaced_iso_count"], 1)
+
+    def test_valid_existing_output_iso_is_reused_and_transferred(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            output_dir = base / "output"
+            cd2_dir = base / "cd2"
+            source = base / "Mercy.2026.V2.2160p.BluRay@CHDBits"
+            (source / "BDMV").mkdir(parents=True)
+            output_dir.mkdir()
+            target = output_dir / f"{source.name}.iso"
+            target.write_bytes(b"valid-iso")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "output_dir": str(output_dir),
+                "cd2_transfer_enabled": True,
+                "cd2_wait_upload_complete": False,
+                "cd2_require_mount": False,
+                "cd2_target_dir": str(cd2_dir),
+                "delete_source_after_success": False,
+            })
+            transfer_calls = []
+
+            app.fetch_cd2_uploads = lambda _cfg: ({}, {"connected": False})
+            app.source_readiness_blocker = lambda *_args, **_kwargs: (None, None, None)
+            app.validate_iso = lambda _target: True
+            app.enough_space = lambda *_args: (_ for _ in ()).throw(AssertionError("不应为复用 ISO 检查生成空间"))
+            app.run_iso = lambda *_args: (_ for _ in ()).throw(AssertionError("不应重复封装"))
+
+            def fake_transfer(path, _cfg):
+                transfer_calls.append(path)
+                return cd2_dir / path.name
+
+            app.transfer_iso_to_mount = fake_transfer
+            app.process_item(source, cfg)
+
+            self.assertEqual(transfer_calls, [target.resolve()])
+            self.assertEqual(app.state["items"][str(source)]["status"], "transfer_done")
+            self.assertTrue(app.state["items"][str(source)]["iso_reused"])
+
+    def test_valid_existing_output_iso_without_cd2_is_marked_done(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            output_dir = base / "output"
+            source = base / "Mercy.2026.V2.2160p.BluRay@CHDBits"
+            (source / "BDMV").mkdir(parents=True)
+            output_dir.mkdir()
+            target = output_dir / f"{source.name}.iso"
+            target.write_bytes(b"valid-iso")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "output_dir": str(output_dir),
+                "cd2_transfer_enabled": False,
+                "delete_source_after_success": False,
+            })
+
+            app.fetch_cd2_uploads = lambda _cfg: ({}, {"connected": False})
+            app.source_readiness_blocker = lambda *_args, **_kwargs: (None, None, None)
+            app.validate_iso = lambda _target: True
+            app.enough_space = lambda *_args: (_ for _ in ()).throw(AssertionError("不应为复用 ISO 检查生成空间"))
+            app.run_iso = lambda *_args: (_ for _ in ()).throw(AssertionError("不应重复封装"))
+            app.process_item(source, cfg)
+
+            item = app.state["items"][str(source)]
+            self.assertEqual(item["status"], "done")
+            self.assertEqual(item["target"], str(target.resolve()))
+
+    def test_existing_cd2_target_is_delivered_when_upload_is_known_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            output_dir = base / "output"
+            cd2_dir = base / "cd2"
+            source = base / "Mercy.2026.V2.2160p.BluRay@CHDBits"
+            (source / "BDMV").mkdir(parents=True)
+            output_dir.mkdir()
+            cd2_dir.mkdir()
+            target = output_dir / f"{source.name}.iso"
+            existing_target = cd2_dir / target.name
+            target.write_bytes(b"valid-iso")
+            existing_target.write_bytes(target.read_bytes())
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "output_dir": str(output_dir),
+                "cd2_transfer_enabled": True,
+                "cd2_wait_upload_complete": True,
+                "cd2_require_mount": False,
+                "cd2_target_dir": str(cd2_dir),
+                "delete_source_after_success": False,
+            })
+            upload = {
+                "path": str(existing_target),
+                "status": "completed",
+                "current": len(b"valid-iso"),
+                "total": len(b"valid-iso"),
+                "percent": 100.0,
+            }
+
+            app.fetch_cd2_uploads = lambda _cfg: ({str(existing_target): upload}, {"connected": True})
+            app.source_readiness_blocker = lambda *_args, **_kwargs: (None, None, None)
+            app.validate_iso = lambda _target: True
+            app.run_iso = lambda *_args: (_ for _ in ()).throw(AssertionError("不应重复封装"))
+            app.transfer_iso_to_mount = lambda *_args: (_ for _ in ()).throw(AssertionError("不应重复转存"))
+            app.process_item(source, cfg)
+
+            item = app.state["items"][str(source)]
+            self.assertEqual(item["status"], "transfer_done")
+            self.assertEqual(item["target"], str(existing_target))
+            self.assertFalse(target.exists())
+
+    def test_invalid_existing_cd2_target_keeps_manual_conflict_protection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            output_dir = base / "output"
+            cd2_dir = base / "cd2"
+            source = base / "Mercy.2026.V2.2160p.BluRay@CHDBits"
+            (source / "BDMV").mkdir(parents=True)
+            output_dir.mkdir()
+            cd2_dir.mkdir()
+            target = output_dir / f"{source.name}.iso"
+            existing_target = cd2_dir / target.name
+            target.write_bytes(b"valid-iso")
+            existing_target.write_bytes(b"not-the-same")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "output_dir": str(output_dir),
+                "cd2_transfer_enabled": True,
+                "cd2_require_mount": False,
+                "cd2_target_dir": str(cd2_dir),
+                "delete_source_after_success": False,
+            })
+
+            app.fetch_cd2_uploads = lambda _cfg: ({}, {"connected": False})
+            app.source_readiness_blocker = lambda *_args, **_kwargs: (None, None, None)
+            app.validate_iso = lambda candidate: candidate.name == target.name and candidate.parent == target.parent.resolve()
+            app.run_iso = lambda *_args: (_ for _ in ()).throw(AssertionError("不应重复封装"))
+            app.process_item(source, cfg)
+
+            item = app.state["items"][str(source)]
+            self.assertEqual(item["status"], "transfer_failed")
+            self.assertEqual(item["failure_code"], "target_exists")
+            self.assertTrue(target.exists())
+            self.assertTrue(existing_target.exists())
+
+    def test_transfer_reuses_complete_existing_cd2_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            output_dir = base / "output"
+            cd2_dir = base / "cd2"
+            output_dir.mkdir()
+            cd2_dir.mkdir()
+            target = output_dir / "Mercy.2026.V2.2160p.BluRay@CHDBits.iso"
+            existing_target = cd2_dir / target.name
+            target.write_bytes(b"valid-iso")
+            existing_target.write_bytes(target.read_bytes())
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_transfer_enabled": True,
+                "cd2_require_mount": False,
+                "cd2_target_dir": str(cd2_dir),
+            })
+
+            app.validate_iso = lambda _target: True
+            result = app.transfer_iso_to_mount(target, cfg)
+
+            self.assertEqual(result, existing_target)
+            self.assertFalse(target.exists())
+            self.assertTrue(existing_target.exists())
 
     def test_auto_pull_claim_prevents_duplicate_and_can_be_cleared(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

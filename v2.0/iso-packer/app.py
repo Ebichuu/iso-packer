@@ -117,11 +117,11 @@ FAILURE_LABELS = {
 }
 FAILURE_SUGGESTIONS = {
     "insufficient_space": "清理输出目录或降低最小空间阈值后等待下轮扫描。",
-    "output_exists": "输出目录已经有同名 ISO，且看起来不是中断残留；请手动删除、移动或改名后再重新封装。",
+    "output_exists": "输出目录已经有同名 ISO，但无法确认它是可复用的完整文件；请手动删除、移动或改名后再重新封装。",
     "pack_failed": "查看系统日志里的 genisoimage 错误，确认原盘结构完整且路径可读。",
     "verify_failed": "保留源目录和 ISO，优先检查 xorriso 是否可用以及输出文件是否完整。",
     "transfer_failed": "检查 CD2 挂载目录、目标路径权限和磁盘空间后重新封装。",
-    "target_exists": "上传目录已经有同名 ISO；请手动删除、移动或改名后再重新封装。",
+    "target_exists": "上传目录已经有同名 ISO，但无法确认它是同一份完整文件；请手动删除、移动或改名后再重新封装。",
     "unexpected_error": "查看系统日志里的异常堆栈，确认后可手动重新封装。",
 }
 WARNING_LABELS = {
@@ -3695,7 +3695,22 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
         log(f"待转移ISO不存在: {target}")
         return None
 
+    if path_in_root(target, target_dir):
+        log(f"ISO 已在 CloudDrive2 目标目录，跳过重复转存: {target}")
+        maybe_refresh_cd2_after_transfer(cfg, target)
+        return target
+
     total = target.stat().st_size
+    final_path = target_dir / target.name
+    if final_path.exists() and cd2_transfer_target_is_complete(target, final_path):
+        try:
+            target.unlink()
+            log(f"CloudDrive2 目标目录已有同名且校验通过的 ISO，删除本机重复文件: {target}")
+        except Exception as exc:
+            log(f"CloudDrive2 目标目录已有同名且校验通过的 ISO，本机重复文件删除失败: {target} ({exc})")
+        maybe_refresh_cd2_after_transfer(cfg, final_path)
+        return final_path
+
     prepared = prepare_cd2_transfer_paths(target, target_dir)
     if not prepared:
         return None
@@ -3751,6 +3766,24 @@ def classify_existing_output_iso(target: Path, source_size: int) -> tuple[str, s
     except Exception as exc:
         return "unknown", f"ISO 校验无法完成: {exc}"
     return "incomplete", "ISO 校验未通过"
+
+
+def cd2_transfer_target_is_complete(source: Path, final_path: Path) -> bool:
+    """确认 CD2 同名文件是完整转存的同一份 ISO。"""
+    try:
+        if not source.is_file() or not final_path.is_file():
+            return False
+        source_size = source.stat().st_size
+        final_size = final_path.stat().st_size
+    except OSError:
+        return False
+    if source_size <= 0 or source_size != final_size:
+        return False
+    try:
+        return validate_iso(final_path)
+    except Exception as exc:
+        log(f"CD2 同名目标 ISO 校验失败 {final_path}: {exc}")
+        return False
 
 
 def cleanup_existing_output_iso(target: Path, source_size: int) -> Optional[str]:
@@ -3924,12 +3957,21 @@ def delete_source_if_configured(source: Path, cfg: Dict) -> Optional[str]:
         return str(exc)
 
 
-def finish_process_item_success(source: Path, final_target: Path, source_size: int, cfg: Dict, transfer_started_at, transfer_finished_at, delete_source_error: Optional[str]) -> None:
+def finish_process_item_success(
+    source: Path,
+    final_target: Path,
+    source_size: int,
+    cfg: Dict,
+    transfer_started_at,
+    transfer_finished_at,
+    delete_source_error: Optional[str],
+    cd2_upload_already_done: bool = False,
+) -> None:
     with lock:
         item = state["items"].setdefault(str(source), {})
         if cfg.get("cd2_transfer_enabled"):
             status = "transfer_done"
-            if cfg.get("cd2_wait_upload_complete"):
+            if cfg.get("cd2_wait_upload_complete") and not cd2_upload_already_done:
                 status = "waiting_cd2_upload"
         else:
             status = "done"
@@ -4002,17 +4044,32 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
         remove_non_iso_task(source)
         return
 
-    if not enough_space(output_dir, source_size, float(cfg["min_free_space_gb"])):
+    target = iso_path_for(source, output_dir)
+    reuse_existing_iso = False
+    if target.exists():
+        existing_status, existing_reason = classify_existing_output_iso(target, source_size)
+        if existing_status == "complete":
+            reuse_existing_iso = True
+            log(f"复用输出目录中已校验通过的 ISO，跳过重复封装: {target}")
+        elif existing_status == "incomplete":
+            if not enough_space(output_dir, source_size, float(cfg["min_free_space_gb"])):
+                log(f"空间不足，暂停处理 {source}")
+                record_insufficient_space(source)
+                return
+            output_conflict = cleanup_existing_output_iso(target, source_size)
+            if output_conflict:
+                record_output_conflict(source, target, output_conflict)
+                return
+        else:
+            output_conflict = f"输出目录已存在同名 ISO，{existing_reason}，等待手动处理: {target}"
+            log(output_conflict)
+            record_output_conflict(source, target, output_conflict)
+            return
+    elif not enough_space(output_dir, source_size, float(cfg["min_free_space_gb"])):
         log(f"空间不足，暂停处理 {source}")
         record_insufficient_space(source)
         return
 
-    target = iso_path_for(source, output_dir)
-    if target.exists():
-        output_conflict = cleanup_existing_output_iso(target, source_size)
-        if output_conflict:
-            record_output_conflict(source, target, output_conflict)
-            return
     replacement_candidates = find_replacement_iso_candidates(source, target, cfg)
     partial = target.with_suffix(target.suffix + ".partial")
     task_started_at = now()
@@ -4020,38 +4077,52 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
     if skip_message:
         log(skip_message)
         return
-    log(f"开始生成 ISO: {source} -> {target}")
-    try:
-        if partial.exists():
-            partial.unlink()
-        result = run_iso(source, partial, source_size)
-        if result.returncode != 0:
-            error = result.stderr.strip()[-1000:] or "genisoimage 返回非 0"
-            log(f"生成失败 {source}: {error}")
-            try:
-                partial.unlink()
-            except FileNotFoundError:
-                pass
-            record_pack_failure(source, error)
-            return
-
-        update_active_progress("finalize", target, {
-            "percent": 100.0,
-            "current": target.stat().st_size if target.exists() else partial.stat().st_size if partial.exists() else source_size,
-            "total": source_size,
-            "stage_text": "ISO 写入完成，正在移动到最终输出文件",
-        })
-        partial.replace(target)
+    if reuse_existing_iso:
+        with lock:
+            item = state["items"].setdefault(str(source), {})
+            item["iso_reused"] = True
+            item["iso_reused_at"] = now()
+            save_state_locked()
         update_active_progress("verify", target, {
             "percent": 100.0,
-            "current": target.stat().st_size if target.exists() else source_size,
+            "current": target.stat().st_size if target.exists() else 0,
             "total": source_size,
-            "stage_text": "ISO 已生成，正在进行结构校验",
+            "stage_text": "已有 ISO 校验通过，继续准备转存或完成归档",
         })
-        if not validate_iso(target):
-            log(f"ISO 验证失败，保留源文件: {target}")
-            record_verify_failure(source)
-            return
+    else:
+        log(f"开始生成 ISO: {source} -> {target}")
+    try:
+        if not reuse_existing_iso:
+            if partial.exists():
+                partial.unlink()
+            result = run_iso(source, partial, source_size)
+            if result.returncode != 0:
+                error = result.stderr.strip()[-1000:] or "genisoimage 返回非 0"
+                log(f"生成失败 {source}: {error}")
+                try:
+                    partial.unlink()
+                except FileNotFoundError:
+                    pass
+                record_pack_failure(source, error)
+                return
+
+            update_active_progress("finalize", target, {
+                "percent": 100.0,
+                "current": target.stat().st_size if target.exists() else partial.stat().st_size if partial.exists() else source_size,
+                "total": source_size,
+                "stage_text": "ISO 写入完成，正在移动到最终输出文件",
+            })
+            partial.replace(target)
+            update_active_progress("verify", target, {
+                "percent": 100.0,
+                "current": target.stat().st_size if target.exists() else source_size,
+                "total": source_size,
+                "stage_text": "ISO 已生成，正在进行结构校验",
+            })
+            if not validate_iso(target):
+                log(f"ISO 验证失败，保留源文件: {target}")
+                record_verify_failure(source)
+                return
 
         update_active_progress("finalize", target, {
             "percent": 100.0,
@@ -4061,28 +4132,54 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
         })
         log(f"ISO 完成并验证通过: {target}")
         final_target = target
+        cd2_upload_already_done = False
         if cfg.get("cd2_transfer_enabled"):
             target_dir = resolve_cd2_target_dir(cfg)
             existing_target = target_dir / target.name if target_dir else None
             if existing_target and existing_target.exists():
+                if cd2_transfer_target_is_complete(target, existing_target):
+                    final_target = existing_target
+                    existing_upload = find_upload_for_path(upload_map, existing_target, cfg)
+                    cd2_upload_already_done = bool(existing_upload and cd2_upload_done(existing_upload))
+                    try:
+                        if target.resolve() != existing_target.resolve():
+                            target.unlink()
+                            log(f"CD2 目标目录已有同名且校验通过的 ISO，删除本机重复文件: {target}")
+                    except Exception as exc:
+                        log(f"CD2 目标目录已有同名且校验通过的 ISO，本机重复文件删除失败: {target} ({exc})")
+                    log(f"CD2 目标目录已有同名且校验通过的 ISO，跳过重复转存: {existing_target}")
+                else:
+                    transfer_finished_at = now()
+                    message = f"上传目录已存在同名 ISO，但无法确认其完整性，请手动处理后重试: {existing_target}"
+                    record_transfer_failure(source, target, source_size, transfer_finished_at, "target_exists", message)
+                    log(message)
+                    return
+            if final_target == target:
+                transfer_started_at = mark_transfer_started(source, target, task_started_at)
+                moved_target = transfer_iso_to_mount(target, cfg)
                 transfer_finished_at = now()
-                message = f"上传目录已存在同名 ISO，请手动处理后重新封装: {existing_target}"
-                record_transfer_failure(source, target, source_size, transfer_finished_at, "target_exists", message)
-                log(message)
-                return
-            transfer_started_at = mark_transfer_started(source, target, task_started_at)
-            moved_target = transfer_iso_to_mount(target, cfg)
-            transfer_finished_at = now()
-            if not moved_target:
-                record_transfer_failure(source, target, source_size, transfer_finished_at)
-                return
-            final_target = moved_target
+                if not moved_target:
+                    record_transfer_failure(source, target, source_size, transfer_finished_at)
+                    return
+                final_target = moved_target
+            else:
+                transfer_started_at = now()
+                transfer_finished_at = transfer_started_at
         else:
             transfer_started_at = None
             transfer_finished_at = None
 
         delete_source_error = delete_source_if_configured(source, cfg)
-        finish_process_item_success(source, final_target, source_size, cfg, transfer_started_at, transfer_finished_at, delete_source_error)
+        finish_process_item_success(
+            source,
+            final_target,
+            source_size,
+            cfg,
+            transfer_started_at,
+            transfer_finished_at,
+            delete_source_error,
+            cd2_upload_already_done=cd2_upload_already_done,
+        )
         cleanup_replaced_iso_candidates(source, final_target, replacement_candidates)
     except Exception as exc:
         record_unexpected_process_error(source, partial, exc)
