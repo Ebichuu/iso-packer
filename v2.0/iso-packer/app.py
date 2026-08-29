@@ -104,6 +104,7 @@ CD2_UPLOAD_QUEUE_GRACE_POLLS = 3
 CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS = 30
 CD2_WEBHOOK_EVENT_LIMIT = 50
 CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS = 600
+CD2_AUTO_PULL_CREATING_TIMEOUT_SECONDS = 300
 CD2_UPLOAD_MATCH_MODES = {"alias_then_suffix", "alias_only"}
 FAILURE_LABELS = {
     "insufficient_space": "空间不足",
@@ -125,9 +126,11 @@ FAILURE_SUGGESTIONS = {
 }
 WARNING_LABELS = {
     "delete_source_failed": "源文件删除失败",
+    "replaced_iso_cleanup_failed": "旧版本 ISO 清理失败",
 }
 WARNING_SUGGESTIONS = {
     "delete_source_failed": "ISO 已完成，手动检查源目录占用或权限后再删除。",
+    "replaced_iso_cleanup_failed": "新版本 ISO 已完成；请手动删除输出目录或 CD2 成品目录中的旧版本文件。",
 }
 DIRECTORY_PICKER_ROOT = "@roots"
 DIRECTORY_PICKER_SCOPES = {
@@ -967,6 +970,12 @@ def load_state() -> None:
                 state.update(loaded)
         except Exception:
             pass
+    if not isinstance(state.get("items"), dict):
+        state["items"] = {}
+    if not isinstance(state.get("cd2"), dict):
+        state["cd2"] = {}
+    if not isinstance(state["cd2"].get("auto_pull_claims"), dict):
+        state["cd2"]["auto_pull_claims"] = {}
 
 
 def save_state_locked() -> None:
@@ -1756,7 +1765,15 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
     return payload
 
 
-def record_cd2_pull_result(source_path: str, dest_dir: str, ok: bool, message: str, disc_type: str = "", result_paths=None) -> None:
+def record_cd2_pull_result(
+    source_path: str,
+    dest_dir: str,
+    ok: bool,
+    message: str,
+    disc_type: str = "",
+    result_paths=None,
+    mode: str = "manual",
+) -> None:
     result = {
         "source_path": source_path,
         "dest_dir": dest_dir,
@@ -1764,6 +1781,7 @@ def record_cd2_pull_result(source_path: str, dest_dir: str, ok: bool, message: s
         "ok": bool(ok),
         "message": message,
         "result_paths": list(result_paths or []),
+        "mode": mode,
         "created_at": now(),
     }
     with lock:
@@ -1781,14 +1799,175 @@ def cd2_local_pull_path_for_source(cfg: Dict, source_path: str) -> Path:
     return (local_pull_dir / safe_filename(source_path.rsplit("/", 1)[-1])).resolve()
 
 
+def cd2_auto_pull_claim_key(source_path: str, dest_dir: str) -> str:
+    source = normalize_path_text(source_path).casefold()
+    destination = normalize_path_text(dest_dir).casefold()
+    return f"{source}\n{destination}" if source and destination else ""
+
+
+def cd2_auto_pull_claims_locked() -> Dict:
+    cd2_state = state.setdefault("cd2", {})
+    claims = cd2_state.get("auto_pull_claims")
+    if not isinstance(claims, dict):
+        claims = {}
+        cd2_state["auto_pull_claims"] = claims
+    return claims
+
+
+def cd2_auto_pull_claim_status(cfg: Dict, source_path: str, dest_dir: str) -> Optional[Dict]:
+    source_path = normalize_path_text(source_path)
+    dest_dir = normalize_path_text(dest_dir)
+    claim_key = cd2_auto_pull_claim_key(source_path, dest_dir)
+    if not claim_key:
+        return None
+    stale_creating = False
+    with lock:
+        claims = cd2_auto_pull_claims_locked()
+        claim = claims.get(claim_key)
+        items = list((state.get("items") or {}).items())
+        matching_items = [
+            item for _item_key, item in items
+            if normalize_path_text(item.get("cd2_pull_source")) == source_path
+            and (
+                not normalize_path_text(item.get("cd2_pull_dest"))
+                or normalize_path_text(item.get("cd2_pull_dest")) == dest_dir
+            )
+            and item.get("status") != "removed"
+        ]
+        completed_item = next(
+            (
+                item for item in matching_items
+                if item.get("cd2_pull_finished_at")
+                or item.get("status") in {"done", "transfer_done", "waiting_cd2_upload"}
+            ),
+            None,
+        )
+        if claim:
+            claim = dict(claim)
+            claim_status = claim.get("status") or "submitted"
+            if claim_status == "creating" and seconds_between(claim.get("updated_at") or claim.get("created_at")) > CD2_AUTO_PULL_CREATING_TIMEOUT_SECONDS:
+                claims.pop(claim_key, None)
+                save_state_locked()
+                stale_creating = True
+            elif completed_item and claim_status != "completed":
+                claim.update({"status": "completed", "updated_at": now()})
+                claims[claim_key] = claim
+                save_state_locked()
+            else:
+                return claim
+        if stale_creating:
+            claim = None
+        if not claim:
+            for item in matching_items:
+                item_status = item.get("status") or ""
+                if item.get("cd2_pull_finished_at") or item_status in {"done", "transfer_done", "waiting_cd2_upload"}:
+                    legacy_status = "completed"
+                elif item_status in {"failed", "verify_failed", "transfer_failed", "removed"}:
+                    continue
+                else:
+                    legacy_status = "submitted"
+                claim = {
+                    "source_path": source_path,
+                    "dest_dir": dest_dir,
+                    "status": legacy_status,
+                    "created_at": item.get("cd2_pull_created_at") or now(),
+                    "updated_at": now(),
+                    "legacy": True,
+                }
+                claims[claim_key] = claim
+                save_state_locked()
+                return dict(claim)
+        recent = list((state.get("cd2", {}).get("pull", {}) or {}).get("recent_results") or [])
+        for result in reversed(recent):
+            if not result.get("ok"):
+                continue
+            if normalize_path_text(result.get("source_path")) != source_path:
+                continue
+            if normalize_path_text(result.get("dest_dir")) != dest_dir:
+                continue
+            claim = {
+                "source_path": source_path,
+                "dest_dir": dest_dir,
+                "status": "submitted",
+                "created_at": result.get("created_at") or now(),
+                "updated_at": now(),
+                "legacy": True,
+            }
+            claims[claim_key] = claim
+            save_state_locked()
+            return dict(claim)
+    return None
+
+
+def claim_cd2_auto_pull(cfg: Dict, source_path: str, dest_dir: str) -> tuple[bool, Optional[Dict]]:
+    source_path = normalize_path_text(source_path)
+    dest_dir = normalize_path_text(dest_dir)
+    claim_key = cd2_auto_pull_claim_key(source_path, dest_dir)
+    if not claim_key:
+        return False, {"status": "invalid"}
+    with lock:
+        existing = cd2_auto_pull_claim_status(cfg, source_path, dest_dir)
+        if existing:
+            return False, existing
+        claim = {
+            "source_path": source_path,
+            "dest_dir": dest_dir,
+            "status": "creating",
+            "created_at": now(),
+            "updated_at": now(),
+        }
+        cd2_auto_pull_claims_locked()[claim_key] = claim
+        save_state_locked()
+        return True, dict(claim)
+
+
+def update_cd2_auto_pull_claim(source_path: str, dest_dir: str, status: str, **updates) -> None:
+    claim_key = cd2_auto_pull_claim_key(source_path, dest_dir)
+    if not claim_key:
+        return
+    with lock:
+        claims = cd2_auto_pull_claims_locked()
+        claim = claims.get(claim_key)
+        if not claim:
+            return
+        claim = dict(claim)
+        claim.update(updates)
+        claim["status"] = status
+        claim["updated_at"] = now()
+        claims[claim_key] = claim
+        save_state_locked()
+
+
+def release_cd2_auto_pull_claim(source_path: str, dest_dir: str) -> None:
+    claim_key = cd2_auto_pull_claim_key(source_path, dest_dir)
+    if not claim_key:
+        return
+    with lock:
+        claims = cd2_auto_pull_claims_locked()
+        if claim_key in claims:
+            claims.pop(claim_key, None)
+            save_state_locked()
+
+
 def cd2_remote_candidate_status(cfg: Dict, source_path: str) -> Dict:
     source_path = normalize_path_text(source_path)
+    dest_dir = cd2_pull_dest_dir_from_cfg(cfg)
     local_source = cd2_local_pull_path_for_source(cfg, source_path)
     result = {
         "local_path": str(local_source),
         "pull_state": "new",
         "pull_status_label": "新候选",
     }
+    claim = cd2_auto_pull_claim_status(cfg, source_path, dest_dir)
+    if claim:
+        claim_status = claim.get("status") or "submitted"
+        result.update({
+            "pull_mode": "auto",
+            "pull_created_at": claim.get("created_at") or "",
+            "pull_status_label": "已完成" if claim_status == "completed" else "处理中",
+        })
+        result["pull_state"] = "done" if claim_status == "completed" else "active"
+        return result
     local_key = str(local_source)
     source_match = None
     with lock:
@@ -1902,8 +2081,23 @@ def cd2_remote_candidate_summary(candidates: list[Dict]) -> Dict:
 
 def cd2_auto_pull_active_count() -> int:
     with lock:
+        claims_store = cd2_auto_pull_claims_locked()
+        stale_keys = [
+            key for key, claim in claims_store.items()
+            if (claim or {}).get("status") == "creating"
+            and seconds_between((claim or {}).get("updated_at") or (claim or {}).get("created_at")) > CD2_AUTO_PULL_CREATING_TIMEOUT_SECONDS
+        ]
+        for key in stale_keys:
+            claims_store.pop(key, None)
+        if stale_keys:
+            save_state_locked()
+        claims = dict(claims_store)
         items = list((state.get("items") or {}).values())
-    count = 0
+    active_claim_keys = {
+        key for key, claim in claims.items()
+        if (claim or {}).get("status") in {"creating", "submitted"}
+    }
+    count = len(active_claim_keys)
     for item in items:
         status = item.get("status") or ""
         if item.get("cd2_pull_mode") != "auto":
@@ -1912,12 +2106,24 @@ def cd2_auto_pull_active_count() -> int:
             continue
         if status in TERMINAL_STATUSES:
             continue
+        claim_key = cd2_auto_pull_claim_key(
+            item.get("cd2_pull_source"),
+            item.get("cd2_pull_dest"),
+        )
+        if claim_key in active_claim_keys:
+            continue
         count += 1
     return count
 
 
-def cd2_pull_already_tracked(source_path: str, local_source: Path, include_finished_source: bool = False) -> bool:
+def cd2_pull_already_tracked(
+    source_path: str,
+    local_source: Path,
+    include_finished_source: bool = False,
+    dest_dir: str = "",
+) -> bool:
     source_path = normalize_path_text(source_path)
+    dest_dir = normalize_path_text(dest_dir)
     local_key = str(local_source)
     with lock:
         items = dict(state.get("items", {}))
@@ -1927,9 +2133,14 @@ def cd2_pull_already_tracked(source_path: str, local_source: Path, include_finis
             continue
         if key == local_key and status not in TERMINAL_STATUSES:
             return True
-        if include_finished_source and normalize_path_text(item.get("cd2_pull_source")) == source_path:
+        item_source = normalize_path_text(item.get("cd2_pull_source"))
+        item_dest = normalize_path_text(item.get("cd2_pull_dest"))
+        same_remote_pull = item_source == source_path and (
+            not dest_dir or not item_dest or item_dest == dest_dir
+        )
+        if include_finished_source and same_remote_pull:
             return True
-        if normalize_path_text(item.get("cd2_pull_source")) == source_path and status not in TERMINAL_STATUSES:
+        if same_remote_pull and status not in TERMINAL_STATUSES:
             return True
     return False
 
@@ -1944,6 +2155,7 @@ def clear_cd2_pull_record(cfg: Dict, source_path: str) -> tuple[Dict, int]:
     local_source = cd2_local_pull_path_for_source(cfg, source_path)
     local_key = str(local_source)
     removed_items = []
+    removed_claim_count = 0
     removed_recent_count = 0
     removed_last_result = False
 
@@ -1951,6 +2163,10 @@ def clear_cd2_pull_record(cfg: Dict, source_path: str) -> tuple[Dict, int]:
         active = state.get("active") or {}
         if active and (active.get("source") == local_key or normalize_path_text(active.get("cd2_pull_source")) == source_path):
             return {"ok": False, "message": "候选仍在运行中，不能清除记录"}, 409
+
+        claim = cd2_auto_pull_claim_status(cfg, source_path, cd2_pull_dest_dir_from_cfg(cfg))
+        if claim and claim.get("status") in {"creating", "submitted"}:
+            return {"ok": False, "message": "候选仍在拉取中，不能清除记录"}, 409
 
         items = state.setdefault("items", {})
         for key, item in list(items.items()):
@@ -1963,6 +2179,12 @@ def clear_cd2_pull_record(cfg: Dict, source_path: str) -> tuple[Dict, int]:
             del items[key]
 
         cd2_state = state.setdefault("cd2", {})
+        claims = cd2_auto_pull_claims_locked()
+        for key, claim in list(claims.items()):
+            if normalize_path_text((claim or {}).get("source_path")) != source_path:
+                continue
+            claims.pop(key, None)
+            removed_claim_count += 1
         pull_state = cd2_state.setdefault("pull", {})
         recent = list(pull_state.get("recent_results") or [])
         if recent:
@@ -1978,7 +2200,7 @@ def clear_cd2_pull_record(cfg: Dict, source_path: str) -> tuple[Dict, int]:
             pull_state.pop("last_result", None)
             removed_last_result = True
 
-        changed = bool(removed_items or removed_recent_count or removed_last_result)
+        changed = bool(removed_items or removed_claim_count or removed_recent_count or removed_last_result)
         if changed:
             save_state_locked()
 
@@ -1990,6 +2212,7 @@ def clear_cd2_pull_record(cfg: Dict, source_path: str) -> tuple[Dict, int]:
         "local_path": local_key,
         "removed_items": removed_items,
         "removed_item_count": len(removed_items),
+        "removed_claim_count": removed_claim_count,
         "removed_recent_count": removed_recent_count,
     }, 200
 
@@ -2036,8 +2259,17 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
 
     local_source = cd2_local_pull_path_for_source(cfg, source_path)
     include_finished = mode == "auto"
-    if cd2_pull_already_tracked(source_path, local_source, include_finished_source=include_finished):
+    if cd2_pull_already_tracked(
+        source_path,
+        local_source,
+        include_finished_source=include_finished,
+        dest_dir=dest_dir,
+    ):
         return {"ok": False, "message": "该远程候选已经在拉取或封装流程中"}, 409
+    if mode == "auto":
+        existing_claim = cd2_auto_pull_claim_status(cfg, source_path, dest_dir)
+        if existing_claim:
+            return {"ok": False, "message": "该远程候选已有自动拉取认领记录"}, 409
     failure_cooldown = int_config(cfg, "cd2_auto_pull_failure_cooldown_seconds", CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS, minimum=0)
     if mode == "auto" and cd2_pull_recent_failure(source_path, failure_cooldown):
         return {"ok": False, "message": "该远程候选最近自动拉取失败，暂时跳过"}, 409
@@ -2055,20 +2287,27 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
         disc_type = cd2_disc_type_for_remote_path(client, source_path)
     except Exception as exc:
         message = cd2_error_message(exc)
-        record_cd2_pull_result(source_path, dest_dir, False, message)
+        record_cd2_pull_result(source_path, dest_dir, False, message, mode=mode)
         return {"ok": False, "message": message}, 400
     if not disc_type:
         message = "远程路径不是 BDMV / VIDEO_TS 原盘候选"
-        record_cd2_pull_result(source_path, dest_dir, False, message)
+        record_cd2_pull_result(source_path, dest_dir, False, message, mode=mode)
         return {"ok": False, "message": message}, 400
 
+    claim_created = False
+    if mode == "auto":
+        claim_created, existing_claim = claim_cd2_auto_pull(cfg, source_path, dest_dir)
+        if not claim_created:
+            return {"ok": False, "message": "该远程候选已有自动拉取认领记录"}, 409
     try:
         result = client.copy_file([source_path], dest_dir)
         ok, message, result_paths = cd2_result_success(result)
     except Exception as exc:
         ok, message, result_paths = False, cd2_error_message(exc), []
-    record_cd2_pull_result(source_path, dest_dir, ok, message or "CD2 拉取任务已创建", disc_type, result_paths)
+    record_cd2_pull_result(source_path, dest_dir, ok, message or "CD2 拉取任务已创建", disc_type, result_paths, mode)
     if not ok:
+        if claim_created:
+            release_cd2_auto_pull_claim(source_path, dest_dir)
         return {"ok": False, "message": message}, 400
 
     created_at = now()
@@ -2092,6 +2331,14 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
         item.pop("target", None)
         item.pop("cd2_pull_finished_at", None)
         save_state_locked()
+    if claim_created:
+        update_cd2_auto_pull_claim(
+            source_path,
+            dest_dir,
+            "submitted",
+            local_path=str(local_source),
+            result_paths=result_paths,
+        )
     message = "CD2 自动拉取任务已创建" if mode == "auto" else "CD2 拉取任务已创建"
     return {
         "ok": True,
@@ -2221,6 +2468,8 @@ def cd2_recorded_pull_pending(item: Dict, cd2_status: Optional[Dict], finish_mis
     if not source_path:
         return None
     if item.get("cd2_pull_finished_at"):
+        if item.get("cd2_pull_mode") == "auto":
+            update_cd2_auto_pull_claim(source_path, dest_dir, "completed")
         return None
     if not cd2_status or not cd2_status.get("connected"):
         return {
@@ -2245,6 +2494,8 @@ def cd2_recorded_pull_pending(item: Dict, cd2_status: Optional[Dict], finish_mis
     if not finish_missing:
         return None
     item["cd2_pull_finished_at"] = now()
+    if item.get("cd2_pull_mode") == "auto":
+        update_cd2_auto_pull_claim(source_path, dest_dir, "completed")
     return None
 
 
@@ -3085,6 +3336,167 @@ def iso_path_for(source: Path, output_dir: Path) -> Path:
     return output_dir / f"{base}.iso"
 
 
+RELEASE_VERSION_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])V([0-9]+)(?![A-Za-z0-9])",
+    flags=re.IGNORECASE,
+)
+RELEASE_VERSION_LIKE_RE = re.compile(
+    r"(?<![A-Za-z0-9])V([0-9A-Za-z]+)(?![A-Za-z0-9])",
+    flags=re.IGNORECASE,
+)
+RELEASE_BARE_VERSION_RE = re.compile(
+    r"(?<![A-Za-z0-9])V(?![A-Za-z0-9])",
+    flags=re.IGNORECASE,
+)
+RELEASE_SITE_RE = re.compile(r"@([^@/\\]+?)\s*$")
+
+
+def release_name_stem(value: str) -> str:
+    text = str(value or "").strip().rstrip("/\\")
+    if not text:
+        return ""
+    text = re.split(r"[/\\]", text)[-1]
+    return re.sub(r"\.iso$", "", text, flags=re.IGNORECASE)
+
+
+def normalize_release_site(value: str) -> str:
+    return re.sub(r"[\s/\\]+", "", str(value or "")).strip().casefold()
+
+
+def parse_release_identity(value: str) -> Dict:
+    """Parse the conservative identity used for automatic ISO replacement."""
+    name = release_name_stem(value)
+    title, year = local_media_tmdb_query(name)
+    version_tokens = list(RELEASE_VERSION_LIKE_RE.finditer(name))
+    valid_tokens = list(RELEASE_VERSION_TOKEN_RE.finditer(name))
+    version = None
+    version_status = "unversioned"
+    if version_tokens and len(version_tokens) == 1 and len(valid_tokens) == 1:
+        try:
+            parsed_version = int(valid_tokens[0].group(1))
+        except (TypeError, ValueError, OverflowError):
+            version_status = "ambiguous"
+        else:
+            if parsed_version > 0:
+                version = parsed_version
+                version_status = "versioned"
+            else:
+                version_status = "ambiguous"
+    elif version_tokens or RELEASE_BARE_VERSION_RE.search(name):
+        version_status = "ambiguous"
+
+    site_match = RELEASE_SITE_RE.search(name)
+    site = site_match.group(1).strip() if site_match else ""
+    site_key = normalize_release_site(site)
+    title_key = media_identity_key(title, year)
+    identity_key = f"{title_key}|{site_key}" if title_key and site_key else ""
+    return {
+        "name": name,
+        "title": title,
+        "year": year,
+        "site": site,
+        "site_key": site_key,
+        "version": version,
+        "version_status": version_status,
+        "identity_key": identity_key,
+    }
+
+
+def replacement_search_roots(cfg: Dict, output_dir: Path) -> list[Path]:
+    roots = [output_dir.expanduser()]
+    if cfg.get("cd2_transfer_enabled"):
+        target_dir = str(cfg.get("cd2_target_dir") or DEFAULT_CONFIG["cd2_target_dir"]).strip()
+        if target_dir:
+            roots.append(Path(target_dir).expanduser())
+    result = []
+    seen = set()
+    for root in roots:
+        try:
+            key = str(root.resolve()).casefold()
+        except OSError:
+            key = str(root).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(root)
+    return result
+
+
+def find_replacement_iso_candidates(source: Path, target: Path, cfg: Dict) -> list[Path]:
+    """Find lower, explicitly versioned ISO files from the same site and film."""
+    incoming = parse_release_identity(source.name)
+    if incoming.get("version_status") != "versioned" or not incoming.get("identity_key"):
+        return []
+
+    candidates = []
+    seen = set()
+    output_dir = Path(cfg["output_dir"]).expanduser().resolve()
+    for root in replacement_search_roots(cfg, output_dir):
+        try:
+            entries = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            continue
+        for candidate in entries:
+            if candidate.suffix.lower() != ".iso":
+                continue
+            try:
+                if not candidate.is_file():
+                    continue
+            except OSError:
+                continue
+            try:
+                candidate_key = str(candidate.resolve()).casefold()
+                target_key = str(target.resolve()).casefold()
+            except OSError:
+                candidate_key = str(candidate).casefold()
+                target_key = str(target).casefold()
+            if candidate_key in seen or candidate_key == target_key:
+                continue
+            existing = parse_release_identity(candidate.name)
+            if (
+                existing.get("version_status") == "versioned"
+                and existing.get("identity_key") == incoming.get("identity_key")
+                and int(existing.get("version") or 0) < int(incoming.get("version") or 0)
+            ):
+                seen.add(candidate_key)
+                candidates.append(candidate)
+    return candidates
+
+
+def cleanup_replaced_iso_candidates(source: Path, new_target: Path, candidates: list[Path]) -> None:
+    if not candidates:
+        return
+    removed = []
+    failed = []
+    new_target_key = str(new_target.resolve()).casefold()
+    for candidate in candidates:
+        try:
+            candidate_key = str(candidate.resolve()).casefold()
+        except OSError:
+            candidate_key = str(candidate).casefold()
+        if candidate_key == new_target_key or not candidate.exists():
+            continue
+        try:
+            candidate.unlink()
+            removed.append(str(candidate))
+        except Exception as exc:
+            failed.append(f"{candidate} ({exc})")
+    if removed:
+        log(f"新版本ISO已完成，已清理旧版本: {'; '.join(removed)}")
+    if failed:
+        message = "；".join(failed)
+        log(f"新版本ISO已完成，但旧版本清理失败: {message}")
+    with lock:
+        item = state.setdefault("items", {}).setdefault(str(source), {})
+        if removed:
+            item["replaced_iso_paths"] = removed
+            item["replaced_iso_count"] = len(removed)
+        if failed:
+            set_warning(item, "replaced_iso_cleanup_failed", message)
+        item["last_changed"] = now()
+        save_state_locked()
+
+
 def update_active_progress(phase: str, target: Path, progress: Dict) -> None:
     progress = dict(progress or {})
     progress = {
@@ -3601,6 +4013,7 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
         if output_conflict:
             record_output_conflict(source, target, output_conflict)
             return
+    replacement_candidates = find_replacement_iso_candidates(source, target, cfg)
     partial = target.with_suffix(target.suffix + ".partial")
     task_started_at = now()
     skip_message = start_process_item_task(source, target, source_size, task_started_at)
@@ -3670,6 +4083,7 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
 
         delete_source_error = delete_source_if_configured(source, cfg)
         finish_process_item_success(source, final_target, source_size, cfg, transfer_started_at, transfer_finished_at, delete_source_error)
+        cleanup_replaced_iso_candidates(source, final_target, replacement_candidates)
     except Exception as exc:
         record_unexpected_process_error(source, partial, exc)
 
@@ -3802,7 +4216,15 @@ def scan_once(cfg: Dict) -> None:
 
 
 def visible_iso_items(items: Dict) -> Dict:
-    return {key: with_issue_guidance(item) for key, item in (items or {}).items() if item.get("pack_iso") is True}
+    visible = {}
+    for key, item in (items or {}).items():
+        if item.get("pack_iso") is not True:
+            continue
+        safe_item = with_issue_guidance(item)
+        if safe_item.get("failure_code") or safe_item.get("warning_code"):
+            safe_item["issue_text"] = task_issue_text(safe_item)
+        visible[key] = safe_item
+    return visible
 
 
 def ordered_visible_items(items: Dict, active: Optional[Dict] = None):
@@ -4789,6 +5211,7 @@ def finish_recovered_iso(source: Optional[Path], target: Path, cfg: Dict, active
         log(f"检测到上次中断留下的完整ISO，但缺少源任务记录，保留文件等待人工处理: {target}")
         return False
 
+    replacement_candidates = find_replacement_iso_candidates(source, target, cfg)
     source_size = recovered_source_size(source, target)
     transfer = recover_iso_transfer(source, target, cfg, active, source_size)
     if not transfer.ok:
@@ -4805,6 +5228,7 @@ def finish_recovered_iso(source: Optional[Path], target: Path, cfg: Dict, active
         delete_source_error,
     )
     cleanup_recovered_output_copy(active, source, target, transfer.target, cfg)
+    cleanup_replaced_iso_candidates(source, transfer.target, replacement_candidates)
     log(f"检测到上次中断时ISO已生成，已从中断点恢复: {transfer.target}")
     return True
 

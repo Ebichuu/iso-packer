@@ -124,16 +124,16 @@
 
         <aside class="space-y-4">
             {% if last_failed_job %}
-            <section class="rounded-2xl border border-red-200 bg-red-50/60 p-4 text-red-800 shadow-sm" aria-labelledby="failure-title">
-                <div class="flex items-start justify-between gap-3">
-                    <div class="space-y-1">
+            <section class="min-w-0 rounded-2xl border border-red-200 bg-red-50/60 p-4 text-red-800 shadow-sm" aria-labelledby="failure-title">
+                <div class="flex min-w-0 items-start justify-between gap-3">
+                    <div class="min-w-0 flex-1 space-y-1">
                         <p class="font-mono text-[10px] font-black uppercase tracking-[0.18em] text-red-500">异常恢复</p>
-                        <h3 id="failure-title" class="text-sm font-black">最近异常：{{ last_failed_job.name }}</h3>
+                        <h3 id="failure-title" class="min-w-0 break-words text-sm font-black [overflow-wrap:anywhere]">最近异常：{{ last_failed_job.name }}</h3>
                     </div>
-                    <span class="rounded-full border border-red-200 bg-white px-2 py-1 font-mono text-[10px] font-bold text-red-600">{{ last_failed_job.stage }}</span>
+                    <span class="min-w-0 max-w-[42%] shrink truncate rounded-full border border-red-200 bg-white px-2 py-1 font-mono text-[10px] font-bold text-red-600" title="{{ last_failed_job.stage }}">{{ last_failed_job.stage }}</span>
                 </div>
-                <p class="mt-3 break-words font-mono text-[11px] leading-5 text-red-700/90">{{ last_failed_job.error_msg }}</p>
-                <div class="mt-3 rounded-xl border border-red-200 bg-white/70 p-3 text-xs font-medium leading-5 text-red-700">
+                <p class="mt-3 min-w-0 break-words font-mono text-[11px] leading-5 text-red-700/90 [overflow-wrap:anywhere]">{{ last_failed_job.error_msg }}</p>
+                <div class="mt-3 min-w-0 break-words rounded-xl border border-red-200 bg-white/70 p-3 text-xs font-medium leading-5 text-red-700 [overflow-wrap:anywhere]">
                     运维建议：{{ last_failed_job.advice }}
                 </div>
                 <button type="button" data-rerun-source="{{ last_failed_job.path|e }}" class="mt-3 inline-flex w-full min-h-10 items-center justify-center rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-black text-red-700 shadow-sm transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">

@@ -350,7 +350,7 @@
       return { label: "收尾中", badge: "border-amber-200 bg-amber-50 text-amber-700", hint: "正在重命名、刷新 CD2 目录或完成归档。" };
     }
     if (phase === "done" || phase === "transfer_done") {
-      return { label: "已交付", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", hint: "ISO 已完成，可按输出路径查看。" };
+      return { label: item.issue_text ? "已交付（有提示）" : "已交付", badge: item.issue_text ? "border-amber-200 bg-amber-50 text-amber-700" : "border-emerald-200 bg-emerald-50 text-emerald-700", hint: item.issue_text || "ISO 已完成，可按输出路径查看。" };
     }
     if (phase === "failed" || phase === "verify_failed" || phase === "transfer_failed" || phase === "output_exists") {
       return { label: "需处理", badge: "border-red-200 bg-red-50 text-red-700", hint: item.error || item.issue_text || "任务失败或输出路径需要手动处理。" };
