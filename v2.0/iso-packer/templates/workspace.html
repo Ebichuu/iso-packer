@@ -136,9 +136,22 @@
                 <div class="mt-3 min-w-0 break-words rounded-xl border border-red-200 bg-white/70 p-3 text-xs font-medium leading-5 text-red-700 [overflow-wrap:anywhere]">
                     运维建议：{{ last_failed_job.advice }}
                 </div>
+                {% if last_failed_job.can_recheck %}
+                <div class="mt-3 flex flex-wrap gap-2">
+                    <button type="button" data-task-recovery-action="recheck" data-task-source="{{ last_failed_job.path|e }}" class="inline-flex min-h-10 flex-1 items-center justify-center rounded-lg border border-amber-200 bg-white px-3 py-2 text-xs font-black text-amber-700 shadow-sm transition hover:bg-amber-50 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2">
+                        重新检测
+                    </button>
+                    {% if last_failed_job.can_confirm_upload %}
+                    <button type="button" data-task-recovery-action="confirm_upload" data-task-source="{{ last_failed_job.path|e }}" class="inline-flex min-h-10 flex-1 items-center justify-center rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-black text-emerald-700 shadow-sm transition hover:bg-emerald-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">
+                        确认已上传
+                    </button>
+                    {% endif %}
+                </div>
+                {% elif last_failed_job.can_rerun %}
                 <button type="button" data-rerun-source="{{ last_failed_job.path|e }}" class="mt-3 inline-flex w-full min-h-10 items-center justify-center rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-black text-red-700 shadow-sm transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">
                     清理残留并重试
                 </button>
+                {% endif %}
             </section>
             {% else %}
             <section class="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-4 text-emerald-900 shadow-sm" aria-labelledby="recovery-clear-title">

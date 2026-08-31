@@ -77,6 +77,18 @@ cd2_lock = threading.RLock()
 worker_lock = threading.Lock()
 file_operation_lock = threading.RLock()
 file_operation_tasks = {}
+cd2_candidate_scan_lock = threading.RLock()
+cd2_candidate_scan_state = {
+    "thread": None,
+    "event": None,
+    "client": None,
+    "config_key": None,
+    "started_at": None,
+    "started_monotonic": 0.0,
+    "timed_out": False,
+    "payload": None,
+    "last_success": None,
+}
 cd2_client_cache = {
     "key": None,
     "client": None,
@@ -102,6 +114,9 @@ BDMV_REQUIRED_DIRS = ("PLAYLIST", "STREAM", "CLIPINF")
 COPY_TASK_DONE_STATUSES = {"3", "completed", "complete", "done", "finish", "finished", "success", "succeeded", "已完成"}
 CD2_UPLOAD_QUEUE_GRACE_POLLS = 3
 CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS = 30
+CD2_UPLOAD_STALL_SECONDS = 30 * 60
+CD2_CANDIDATE_SCAN_TIMEOUT_SECONDS = 15
+CD2_CANDIDATE_SCAN_CACHE_SECONDS = 30
 CD2_WEBHOOK_EVENT_LIMIT = 50
 CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS = 600
 CD2_AUTO_PULL_CREATING_TIMEOUT_SECONDS = 300
@@ -113,6 +128,8 @@ FAILURE_LABELS = {
     "verify_failed": "校验失败",
     "transfer_failed": "CD2 转移失败",
     "target_exists": "上传目录已有同名ISO",
+    "cd2_upload_stalled": "CD2 上传停滞",
+    "cd2_upload_missing": "CD2 上传任务未出现",
     "unexpected_error": "任务异常",
 }
 FAILURE_SUGGESTIONS = {
@@ -122,6 +139,8 @@ FAILURE_SUGGESTIONS = {
     "verify_failed": "保留源目录和 ISO，优先检查 xorriso 是否可用以及输出文件是否完整。",
     "transfer_failed": "检查 CD2 挂载目录、目标路径权限和磁盘空间后重新封装。",
     "target_exists": "上传目录已经有同名 ISO，但无法确认它是同一份完整文件；请手动删除、移动或改名后再重新封装。",
+    "cd2_upload_stalled": "点击“重新检测”继续观察；若已在云端确认完整，可使用“确认已上传”。",
+    "cd2_upload_missing": "点击“重新检测”重新读取队列；若已在云端确认完整，可使用“确认已上传”。",
     "unexpected_error": "查看系统日志里的异常堆栈，确认后可手动重新封装。",
 }
 WARNING_LABELS = {
@@ -1680,7 +1699,7 @@ def cd2_disc_type_for_remote_path(client, path: str) -> str:
     return ""
 
 
-def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
+def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False, client=None) -> Dict:
     pull_configured = bool(cfg.get("cd2_manual_pull_enabled") or cfg.get("cd2_auto_pull_enabled"))
     pull_guard_enabled = cd2_pull_disabled()
     pull_enabled = pull_configured and not pull_guard_enabled
@@ -1709,7 +1728,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False) -> Dict:
         payload["ok"] = False
         payload["message"] = "CD2 API 未启用"
         return payload
-    client = get_cd2_client(cfg)
+    client = client or get_cd2_client(cfg)
     if client is None:
         payload["ok"] = False
         payload["message"] = cd2_client_cache.get("last_error") or "CD2 API 未连接"
@@ -2391,7 +2410,7 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
             save_state_locked()
         return result
 
-    payload = scan_cd2_remote_candidates(cfg, force_refresh=False)
+    payload = controlled_cd2_remote_candidates(cfg, force_refresh=False)
     result = {
         "ok": bool(payload.get("ok")),
         "checked_at": now(),
@@ -3131,11 +3150,65 @@ def cd2_upload_queue_grace_seconds(cfg: Dict) -> int:
     return max(CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS, poll_seconds * CD2_UPLOAD_QUEUE_GRACE_POLLS)
 
 
+def cd2_upload_observation_gap_seconds(cfg: Dict) -> int:
+    poll_seconds = max(1, int(cfg.get("cd2_queue_poll_seconds", 10) or 10))
+    return max(60, poll_seconds * 3)
+
+
 def cd2_status_is_fresh_for_wait(cd2_status: Optional[Dict], wait_started_at: str) -> bool:
     checked_at = (cd2_status or {}).get("checked_at")
     checked_dt = parse_time(checked_at)
     started_dt = parse_time(wait_started_at)
-    return bool(checked_dt and started_dt and checked_dt > started_dt)
+    return bool(checked_dt and started_dt and checked_dt >= started_dt)
+
+
+CD2_UPLOAD_MONITOR_FIELDS = (
+    "cd2_upload_last_observed_at",
+    "cd2_upload_progress_at",
+    "cd2_upload_progress_current",
+    "cd2_upload_progress_total",
+    "cd2_upload_progress_percent",
+    "cd2_upload_missing_since",
+    "cd2_upload_monitor_paused",
+)
+
+
+def clear_cd2_upload_monitor(item: Dict) -> None:
+    for field in CD2_UPLOAD_MONITOR_FIELDS:
+        item.pop(field, None)
+
+
+def initialize_cd2_upload_progress(item: Dict, upload: Dict, observed_at: str) -> None:
+    item["cd2_upload_progress_at"] = observed_at
+    item["cd2_upload_progress_current"] = int(upload.get("current") or upload.get("uploaded") or 0)
+    item["cd2_upload_progress_total"] = int(upload.get("total") or 0)
+    item["cd2_upload_progress_percent"] = float(upload.get("percent") or 0)
+    item.pop("cd2_upload_missing_since", None)
+
+
+def finish_cd2_upload_item(item: Dict, upload: Optional[Dict], finished_at: str) -> None:
+    item["status"] = "transfer_done"
+    item["finished_at"] = finished_at
+    item["done_at"] = finished_at
+    item["last_changed"] = finished_at
+    item["cd2_upload"] = upload or item.get("cd2_upload") or {}
+    item["cd2_upload_done_at"] = finished_at
+    item.pop("error", None)
+    clear_failure(item)
+    clear_cd2_upload_monitor(item)
+    log_message = "CD2 上传完成" if upload else "CD2 上传队列已清理"
+    state.setdefault("events", []).append(f"[{finished_at}] {log_message}: {item.get('target') or '-'}")
+    state["events"] = state["events"][-200:]
+
+
+def fail_cd2_upload_item(item: Dict, code: str, message: str, failed_at: str) -> None:
+    item["status"] = "transfer_failed"
+    item["finished_at"] = failed_at
+    item["last_changed"] = failed_at
+    item.pop("done_at", None)
+    set_failure(item, code, message)
+    state.setdefault("events", []).append(f"[{failed_at}] {FAILURE_LABELS.get(code, code)}: {item.get('target') or '-'}")
+    state["events"] = state["events"][-200:]
 
 
 def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[Dict]) -> None:
@@ -3145,6 +3218,9 @@ def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[
     connected = bool((cd2_status or {}).get("connected"))
     wait_error = (cd2_status or {}).get("human") or (cd2_status or {}).get("last_error") or "等待 CD2 API 连接"
     grace_seconds = cd2_upload_queue_grace_seconds(cfg)
+    observation_gap_seconds = cd2_upload_observation_gap_seconds(cfg)
+    checked_at = str((cd2_status or {}).get("checked_at") or "")
+    log_messages = []
     with lock:
         items = state.get("items", {})
         for key, item in items.items():
@@ -3154,36 +3230,224 @@ def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[
             item["cd2_upload_wait_started_at"] = wait_started_at
             if not connected:
                 item["error"] = f"监控 CloudDrive 上传队列：{wait_error}"
+                item["cd2_upload_monitor_paused"] = True
                 continue
             if not cd2_status_is_fresh_for_wait(cd2_status, wait_started_at):
                 item["error"] = "监控 CloudDrive 上传队列：等待队列刷新"
+                item["cd2_upload_monitor_paused"] = True
+                continue
+            last_observed_at = item.get("cd2_upload_last_observed_at")
+            if checked_at and checked_at == last_observed_at:
                 continue
             upload = find_upload_for_path(upload_map, item.get("target") or "", cfg)
+            if upload and cd2_upload_done(upload):
+                finish_cd2_upload_item(item, upload, now_value)
+                log_messages.append(f"CD2 上传完成: {item.get('target') or key}")
+                continue
+            if not upload and item.get("cd2_upload_seen_at"):
+                finish_cd2_upload_item(item, None, now_value)
+                log_messages.append(f"CD2 上传队列已清理: {item.get('target') or key}")
+                continue
+
+            observation_interrupted = bool(item.pop("cd2_upload_monitor_paused", False))
+            if last_observed_at and checked_at:
+                observation_interrupted = observation_interrupted or seconds_between(last_observed_at, checked_at) > observation_gap_seconds
+            item["cd2_upload_last_observed_at"] = checked_at or now_value
+
             if upload:
                 item["cd2_upload"] = upload
                 item["cd2_upload_seen_at"] = item.get("cd2_upload_seen_at") or now_value
-                if not cd2_upload_done(upload):
-                    item["error"] = f"监控 CloudDrive 上传队列：{upload.get('human') or upload.get('summary') or upload.get('status') or '上传中'}"
-                    continue
-            elif not item.get("cd2_upload_seen_at") and seconds_between(wait_started_at) < grace_seconds:
+                current = int(upload.get("current") or upload.get("uploaded") or 0)
+                total = int(upload.get("total") or 0)
+                percent = float(upload.get("percent") or 0)
+                previous_current = item.get("cd2_upload_progress_current")
+                previous_total = item.get("cd2_upload_progress_total")
+                previous_percent = item.get("cd2_upload_progress_percent")
+                if observation_interrupted or previous_current is None or not item.get("cd2_upload_progress_at"):
+                    initialize_cd2_upload_progress(item, upload, checked_at or now_value)
+                else:
+                    advanced = current > int(previous_current or 0) or percent > float(previous_percent or 0)
+                    restarted = current < int(previous_current or 0) or (int(previous_total or 0) > 0 and total != int(previous_total or 0))
+                    if advanced or restarted:
+                        initialize_cd2_upload_progress(item, upload, checked_at or now_value)
+                    elif seconds_between(item.get("cd2_upload_progress_at"), checked_at or now_value) >= CD2_UPLOAD_STALL_SECONDS:
+                        message = (
+                            f"CD2 上传连续 {CD2_UPLOAD_STALL_SECONDS // 60} 分钟没有进展："
+                            f"{upload.get('human') or upload.get('summary') or upload.get('status') or '上传中'}"
+                        )
+                        fail_cd2_upload_item(item, "cd2_upload_stalled", message, now_value)
+                        log_messages.append(f"CD2 上传停滞: {item.get('target') or key}")
+                        continue
+                item["error"] = f"监控 CloudDrive 上传队列：{upload.get('human') or upload.get('summary') or upload.get('status') or '上传中'}"
+                continue
+
+            if observation_interrupted or not item.get("cd2_upload_missing_since"):
+                item["cd2_upload_missing_since"] = checked_at or now_value
+            missing_seconds = seconds_between(item.get("cd2_upload_missing_since"), checked_at or now_value)
+            if missing_seconds >= CD2_UPLOAD_STALL_SECONDS:
+                message = f"连续 {CD2_UPLOAD_STALL_SECONDS // 60} 分钟未在 CD2 上传队列找到对应任务"
+                fail_cd2_upload_item(item, "cd2_upload_missing", message, now_value)
+                log_messages.append(f"CD2 上传任务未出现: {item.get('target') or key}")
+                continue
+            if seconds_between(wait_started_at) < grace_seconds:
                 item["error"] = f"监控 CloudDrive 上传队列：等待队列出现 {seconds_between(wait_started_at)}s / {grace_seconds}s"
-                continue
-            elif not item.get("cd2_upload_seen_at"):
-                item["error"] = "未在 CD2 上传队列找到对应任务，请稍后刷新或检查 CloudDrive 上传状态"
-                continue
-            item["status"] = "transfer_done"
-            item["finished_at"] = now_value
-            item["done_at"] = now_value
-            item["cd2_upload"] = upload or item.get("cd2_upload") or {}
-            item["cd2_upload_done_at"] = now_value
-            item.pop("error", None)
-            if upload:
-                log_message = f"CD2 上传完成: {item.get('target') or key}"
             else:
-                log_message = f"CD2 上传队列已清理: {item.get('target') or key}"
-            state.setdefault("events", []).append(f"[{now_value}] {log_message}")
-            state["events"] = state["events"][-200:]
+                item["error"] = (
+                    f"未在 CD2 上传队列找到对应任务，已观察 {missing_seconds}s / "
+                    f"{CD2_UPLOAD_STALL_SECONDS}s"
+                )
         save_state_locked()
+    for message in log_messages:
+        log(message)
+
+
+def invalidate_cd2_upload_cache() -> None:
+    with cd2_lock:
+        cd2_client_cache["upload_map"] = {}
+        cd2_client_cache["upload_status"] = None
+
+
+def recheck_waiting_cd2_uploads(cfg: Dict) -> Dict:
+    invalidate_cd2_upload_cache()
+    upload_map, cd2_status = fetch_cd2_uploads(cfg)
+    check_waiting_cd2_uploads(cfg, upload_map, cd2_status)
+    return cd2_status
+
+
+def state_item_key(source_text: str) -> Optional[str]:
+    source_text = str(source_text or "").strip()
+    if not source_text:
+        return None
+    with lock:
+        items = state.get("items") or {}
+        if source_text in items:
+            return source_text
+        normalized = normalize_path_text(source_text)
+        for key in items:
+            if normalize_path_text(key) == normalized:
+                return key
+        try:
+            resolved = str(Path(source_text).expanduser().resolve())
+        except Exception:
+            resolved = ""
+        if resolved:
+            for key in items:
+                try:
+                    if str(Path(key).expanduser().resolve()) == resolved:
+                        return key
+                except Exception:
+                    continue
+    return None
+
+
+CD2_UPLOAD_RECHECK_FAILURES = {"cd2_upload_stalled", "cd2_upload_missing"}
+SOURCE_RECHECK_STATUSES = {
+    "receiving",
+    "waiting_partial",
+    "waiting_stable",
+    "waiting_cd2_pull",
+    "waiting_cd2_confirm",
+}
+
+
+def reset_task_for_recheck(source_text: str, cfg: Dict):
+    key = state_item_key(source_text)
+    if not key:
+        return {"ok": False, "message": "任务不存在或已被清理"}, 404, ""
+    with lock:
+        item = state.get("items", {}).get(key)
+        if not item:
+            return {"ok": False, "message": "任务不存在或已被清理"}, 404, ""
+        status = item.get("status")
+        failure_code = item.get("failure_code")
+        if status in SOURCE_RECHECK_STATUSES:
+            item["status"] = "waiting_cd2_pull" if status == "waiting_cd2_pull" else "watching"
+            item["last_changed"] = now()
+            item["error"] = "已请求重新检测"
+            item.pop("failure_code", None)
+            item.pop("failure_label", None)
+            item.pop("failure_suggestion", None)
+            save_state_locked()
+            return {"ok": True, "message": "已重新加入源目录检测", "source": key}, 200, "source"
+        if status != "waiting_cd2_upload" and failure_code not in CD2_UPLOAD_RECHECK_FAILURES:
+            return {"ok": False, "message": "当前任务没有可重新检测的 CD2 上传状态"}, 409, ""
+        item["status"] = "waiting_cd2_upload"
+        item["cd2_upload_wait_started_at"] = now()
+        item["last_changed"] = item["cd2_upload_wait_started_at"]
+        item["error"] = "已请求重新读取 CD2 上传队列"
+        item.pop("finished_at", None)
+        item.pop("done_at", None)
+        item.pop("cd2_upload", None)
+        item.pop("cd2_upload_seen_at", None)
+        item.pop("cd2_upload_done_at", None)
+        clear_failure(item)
+        clear_cd2_upload_monitor(item)
+        save_state_locked()
+    return {"ok": True, "message": "已重新检测 CD2 上传队列", "source": key}, 200, "upload"
+
+
+def confirm_cd2_upload_task(source_text: str, cfg: Dict):
+    key = state_item_key(source_text)
+    if not key:
+        return {"ok": False, "message": "任务不存在或已被清理"}, 404
+    with lock:
+        item = state.get("items", {}).get(key)
+        snapshot = dict(item or {})
+    status = snapshot.get("status")
+    failure_code = snapshot.get("failure_code")
+    if status == "transfer_done":
+        return {"ok": True, "message": "该任务已经标记为已上传", "source": key}, 200
+    if status != "waiting_cd2_upload" and failure_code not in CD2_UPLOAD_RECHECK_FAILURES:
+        return {"ok": False, "message": "当前任务不是待确认的 CD2 上传任务"}, 409
+
+    try:
+        source = Path(key).expanduser().resolve()
+        watch_dir = Path(cfg["watch_dir"]).expanduser().resolve()
+        target = Path(str(snapshot.get("target") or "")).expanduser().resolve()
+        target_dir_text = str(cfg.get("cd2_target_dir") or "").strip()
+        target_dir = Path(target_dir_text).expanduser().resolve() if target_dir_text else None
+    except Exception as exc:
+        return {"ok": False, "message": f"任务路径无效: {exc}"}, 400
+    if source == watch_dir or not path_in_root(source, watch_dir):
+        return {"ok": False, "message": "源路径不在允许的监控目录内"}, 403
+    if target.suffix.lower() != ".iso" or target_dir is None or not path_in_root(target, target_dir):
+        return {"ok": False, "message": "目标文件不在允许的 CD2 成品目录内"}, 403
+    if not target.is_file() or target.stat().st_size <= 0:
+        return {"ok": False, "message": "CD2 目标 ISO 不存在或为空文件"}, 409
+    expected_size = snapshot.get("target_size")
+    if expected_size in (None, ""):
+        expected_size = (snapshot.get("cd2_upload") or {}).get("total")
+    try:
+        expected_size = int(expected_size or 0)
+    except (TypeError, ValueError):
+        expected_size = 0
+    actual_size = target.stat().st_size
+    if expected_size > 0 and actual_size != expected_size:
+        return {"ok": False, "message": f"CD2 目标 ISO 大小不一致: {actual_size} != {expected_size}"}, 409
+    try:
+        valid = bool(validate_iso(target))
+    except Exception as exc:
+        log(f"人工确认 CD2 ISO 校验异常 {target}: {exc}")
+        valid = False
+    if not valid:
+        return {"ok": False, "message": "CD2 目标 ISO 结构校验失败，不能确认已上传"}, 409
+
+    with lock:
+        current = state.get("items", {}).get(key)
+        if not current:
+            return {"ok": False, "message": "任务不存在或已被清理"}, 404
+        if current.get("status") == "transfer_done":
+            return {"ok": True, "message": "该任务已经标记为已上传", "source": key}, 200
+        if current.get("target") != snapshot.get("target"):
+            return {"ok": False, "message": "任务目标已变化，请重新检测后再确认"}, 409
+        finished_at = now()
+        finish_cd2_upload_item(current, None, finished_at)
+        current["target_size"] = actual_size
+        current["cd2_upload_manual_confirmed"] = True
+        current["cd2_upload_manual_confirmed_at"] = finished_at
+        save_state_locked()
+    log(f"人工确认 CD2 上传完成: {target}")
+    return {"ok": True, "message": "已确认 CD2 上传完成", "source": key, "target": str(target)}, 200
 
 
 def size_of(path: Path) -> int:
@@ -3979,6 +4243,7 @@ def finish_process_item_success(
         update = {
             "status": status,
             "target": str(final_target),
+            "target_size": final_target.stat().st_size if final_target.exists() else 0,
             "pack_finished_at": item.get("pack_finished_at") or finished_at,
             "transfer_started_at": transfer_started_at,
             "transfer_finished_at": transfer_finished_at,
@@ -4318,6 +4583,16 @@ def visible_iso_items(items: Dict) -> Dict:
         if item.get("pack_iso") is not True:
             continue
         safe_item = with_issue_guidance(item)
+        status = safe_item.get("status")
+        failure_code = safe_item.get("failure_code")
+        safe_item["can_recheck"] = (
+            status in SOURCE_RECHECK_STATUSES
+            or failure_code in CD2_UPLOAD_RECHECK_FAILURES
+        )
+        safe_item["can_confirm_upload"] = (
+            status == "waiting_cd2_upload"
+            or failure_code in CD2_UPLOAD_RECHECK_FAILURES
+        )
         if safe_item.get("failure_code") or safe_item.get("warning_code"):
             safe_item["issue_text"] = task_issue_text(safe_item)
         visible[key] = safe_item
@@ -4436,8 +4711,10 @@ def dashboard_stats(history_items) -> Dict:
         "this_month_tb": 0,
         "failed": 0,
         "active": 0,
+        "waiting": 0,
         "last_done_at": "",
     }
+    active_statuses = {"running", "transferring", "refreshing_cd2_dir"}
     last_done_at = None
     for _, item in history_items or []:
         status = (item or {}).get("status")
@@ -4461,8 +4738,10 @@ def dashboard_stats(history_items) -> Dict:
                 last_done_at = item_time
         if status in failed_statuses:
             stats["failed"] += 1
-        if status and status not in TERMINAL_STATUSES and status != "removed":
+        if status in active_statuses:
             stats["active"] += 1
+        elif status and status not in TERMINAL_STATUSES and status != "removed":
+            stats["waiting"] += 1
     # 格式化为整数
     stats["yesterday_gb"] = int(stats["yesterday_gb"])
     stats["this_week_gb"] = int(stats["this_week_gb"])
@@ -5097,6 +5376,188 @@ def release_calendar_payload() -> Dict:
     return payload
 
 
+def create_isolated_cd2_client(cfg: Dict):
+    """Create a short-lived CD2 client without replacing the shared queue client."""
+    if not CloudDriveClient:
+        return None, "缺少 clouddrive2-client 依赖"
+    if not cfg.get("cd2_api_enabled"):
+        return None, "CD2 API 未启用"
+    addr = normalize_cd2_api_addr(cfg.get("cd2_api_addr"))
+    auth_mode = cd2_auth_mode_from_cfg(cfg)
+    username = str(cfg.get("cd2_api_username") or "").strip()
+    secret = str(cfg.get("cd2_api_password") or "")
+    if not addr or not secret:
+        return None, "CD2 认证信息不完整"
+    if auth_mode == "password" and not username:
+        return None, "CD2 缺少用户名"
+    client = None
+    try:
+        client = CloudDriveClient(addr, options=CD2_GRPC_CHANNEL_OPTIONS)
+        if auth_mode == "api_token":
+            client.jwt_token = secret
+        elif not client.authenticate(username, secret):
+            raise RuntimeError("CD2 认证失败：请检查用户名密码")
+        return client, ""
+    except Exception as exc:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        return None, cd2_error_message(exc)
+
+
+def cd2_candidate_scan_config_key(cfg: Dict):
+    return (
+        cd2_client_key_from_cfg(cfg),
+        tuple(parse_cd2_remote_source_dirs(cfg.get("cd2_remote_source_dirs"))),
+        tuple(cd2_remote_source_roots(cfg)),
+        int_config(cfg, "cd2_remote_scan_depth", DEFAULT_CONFIG["cd2_remote_scan_depth"], minimum=1),
+        bool(cfg.get("cd2_manual_pull_enabled")),
+        bool(cfg.get("cd2_auto_pull_enabled")),
+        normalize_path_text(cd2_pull_dest_dir_from_cfg(cfg)),
+    )
+
+
+def reset_cd2_candidate_scan_controller() -> None:
+    with cd2_candidate_scan_lock:
+        client = cd2_candidate_scan_state.get("client")
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        cd2_candidate_scan_state.update({
+            "thread": None,
+            "event": None,
+            "client": None,
+            "config_key": None,
+            "started_at": None,
+            "started_monotonic": 0.0,
+            "timed_out": False,
+            "payload": None,
+            "last_success": None,
+        })
+
+
+def candidate_scan_timeout_payload(cfg: Dict, config_key, message: str = "CD2 远程候选扫描超时，请稍后重试") -> Dict:
+    with cd2_candidate_scan_lock:
+        last_success = cd2_candidate_scan_state.get("last_success")
+        stale_payload = None
+        if last_success and last_success.get("config_key") == config_key:
+            stale_payload = dict(last_success.get("payload") or {})
+            stale_payload["candidates"] = list(stale_payload.get("candidates") or [])
+    payload = stale_payload or {
+        "ok": False,
+        "candidates": [],
+        "candidate_count": 0,
+        "errors": [],
+    }
+    payload.update({
+        "ok": False,
+        "scan_timeout": True,
+        "stale": bool(stale_payload),
+        "message": message,
+    })
+    return payload
+
+
+def controlled_cd2_remote_candidates(
+    cfg: Dict,
+    force_refresh: bool = False,
+    timeout_seconds: float = CD2_CANDIDATE_SCAN_TIMEOUT_SECONDS,
+) -> Dict:
+    config_key = cd2_candidate_scan_config_key(cfg)
+    with cd2_candidate_scan_lock:
+        thread = cd2_candidate_scan_state.get("thread")
+        if thread is not None and thread.is_alive():
+            return candidate_scan_timeout_payload(cfg, config_key)
+        last_success = cd2_candidate_scan_state.get("last_success")
+        if (
+            not force_refresh
+            and last_success
+            and last_success.get("config_key") == config_key
+            and time.monotonic() - float(last_success.get("completed_monotonic") or 0) < CD2_CANDIDATE_SCAN_CACHE_SECONDS
+        ):
+            payload = dict(last_success.get("payload") or {})
+            payload["candidates"] = list(payload.get("candidates") or [])
+            payload["cache_hit"] = True
+            return payload
+        event = threading.Event()
+        cd2_candidate_scan_state.update({
+            "thread": None,
+            "event": event,
+            "client": None,
+            "config_key": config_key,
+            "started_at": now(),
+            "started_monotonic": time.monotonic(),
+            "timed_out": False,
+            "payload": None,
+        })
+
+        def worker():
+            payload = None
+            client = None
+            try:
+                client, error = create_isolated_cd2_client(cfg)
+                if client is None:
+                    payload = {
+                        "ok": False,
+                        "scan_timeout": False,
+                        "candidates": [],
+                        "candidate_count": 0,
+                        "message": error,
+                    }
+                    return
+                with cd2_candidate_scan_lock:
+                    if cd2_candidate_scan_state.get("config_key") == config_key:
+                        cd2_candidate_scan_state["client"] = client
+                payload = scan_cd2_remote_candidates(cfg, force_refresh=force_refresh, client=client)
+            except Exception as exc:
+                payload = {
+                    "ok": False,
+                    "scan_timeout": False,
+                    "candidates": [],
+                    "candidate_count": 0,
+                    "message": f"CD2 远程目录扫描失败：{cd2_error_message(exc)}",
+                }
+            finally:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                with cd2_candidate_scan_lock:
+                    if cd2_candidate_scan_state.get("config_key") == config_key:
+                        cd2_candidate_scan_state["payload"] = payload
+                        cd2_candidate_scan_state["client"] = None
+                        if payload and payload.get("ok"):
+                            cd2_candidate_scan_state["last_success"] = {
+                                "config_key": config_key,
+                                "payload": dict(payload),
+                                "completed_monotonic": time.monotonic(),
+                            }
+                        cd2_candidate_scan_state["thread"] = None
+                        event.set()
+
+        thread = threading.Thread(target=worker, name="cd2-candidate-scan", daemon=True)
+        cd2_candidate_scan_state["thread"] = thread
+        thread.start()
+    if event.wait(max(0.0, float(timeout_seconds))):
+        with cd2_candidate_scan_lock:
+            payload = dict(cd2_candidate_scan_state.get("payload") or {})
+            payload["candidates"] = list(payload.get("candidates") or [])
+            return payload
+    with cd2_candidate_scan_lock:
+        cd2_candidate_scan_state["timed_out"] = True
+        client = cd2_candidate_scan_state.get("client")
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return candidate_scan_timeout_payload(cfg, config_key)
+
+
 def release_calendar_items() -> list[Dict]:
     return release_calendar_payload()["items"]
 
@@ -5200,12 +5661,17 @@ def api_tmdb_test():
 def first_failed_job(history_items) -> Optional[Dict]:
     for source, item in history_items or []:
         if (item or {}).get("status") in {"failed", "verify_failed", "transfer_failed"}:
+            failure_code = (item or {}).get("failure_code")
             return {
                 "name": item_display_name(source),
                 "path": source,
                 "stage": (item or {}).get("failure_label") or status_label((item or {}).get("status")),
                 "error_msg": (item or {}).get("error") or (item or {}).get("last_error") or "-",
                 "advice": task_issue_text(item),
+                "failure_code": failure_code or "",
+                "can_rerun": failure_code not in CD2_UPLOAD_RECHECK_FAILURES,
+                "can_recheck": failure_code in CD2_UPLOAD_RECHECK_FAILURES,
+                "can_confirm_upload": failure_code in CD2_UPLOAD_RECHECK_FAILURES,
             }
     return None
 
@@ -5706,6 +6172,7 @@ def settings():
     save_config(cfg)
     if old_cd2_key != cd2_client_key_from_cfg(cfg):
         close_cd2_client()
+        reset_cd2_candidate_scan_controller()
     Path(cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg.get("cd2_local_pull_dir") or cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
@@ -5806,7 +6273,7 @@ def api_cd2_webhook():
 def api_cd2_remote_candidates():
     cfg = load_config()
     force_refresh = (request.args.get("force") or "").strip().lower() in {"1", "true", "yes", "on"}
-    return jsonify(scan_cd2_remote_candidates(cfg, force_refresh=force_refresh))
+    return jsonify(controlled_cd2_remote_candidates(cfg, force_refresh=force_refresh))
 
 
 @app.route("/api/cd2/pull", methods=["POST"])
@@ -5833,6 +6300,28 @@ def api_cd2_pull_record():
     if result.get("ok") and (result.get("removed_item_count") or result.get("removed_recent_count")):
         log(f"CD2 候选记录已清除: {source_path}")
     return jsonify(result), status_code
+
+
+@app.route("/api/tasks/action", methods=["POST"])
+def api_task_action():
+    cfg = load_config()
+    payload = request.get_json(silent=True) if request.is_json else request.form
+    source_text = str((payload or {}).get("source") or "").strip()
+    action = str((payload or {}).get("action") or "").strip().lower()
+    if not source_text:
+        return jsonify({"ok": False, "message": "缺少源路径"}), 400
+    if action == "recheck":
+        result, status_code, mode = reset_task_for_recheck(source_text, cfg)
+        if result.get("ok"):
+            if mode == "upload":
+                threading.Thread(target=recheck_waiting_cd2_uploads, args=(cfg,), daemon=True).start()
+            else:
+                threading.Thread(target=scan_once, args=(cfg,), daemon=True).start()
+        return jsonify(result), status_code
+    if action == "confirm_upload":
+        result, status_code = confirm_cd2_upload_task(source_text, cfg)
+        return jsonify(result), status_code
+    return jsonify({"ok": False, "message": "不支持的任务操作"}), 400
 
 
 

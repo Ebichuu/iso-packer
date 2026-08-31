@@ -3,7 +3,10 @@ from __future__ import annotations
 import copy
 import os
 import tempfile
+import threading
+import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -413,6 +416,226 @@ class RevisionRecoveryTests(unittest.TestCase):
             self.assertEqual(result, existing_target)
             self.assertFalse(target.exists())
             self.assertTrue(existing_target.exists())
+
+    def test_cd2_upload_progress_resets_stall_timer(self) -> None:
+        source = "/watch/Grace 2025"
+        target = "/CloudNAS/CloudDrive/finished/Grace 2025.iso"
+        old_progress_at = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
+        recent_observation = (datetime.now() - timedelta(seconds=10)).strftime("%Y-%m-%d %H:%M:%S")
+        app.state["items"][source] = {
+            "status": "waiting_cd2_upload",
+            "target": target,
+            "pack_iso": True,
+            "cd2_upload_wait_started_at": old_progress_at,
+            "cd2_upload_seen_at": old_progress_at,
+            "cd2_upload_progress_at": old_progress_at,
+            "cd2_upload_progress_current": 100,
+            "cd2_upload_progress_percent": 10.0,
+            "cd2_upload_last_observed_at": recent_observation,
+        }
+        upload = {"path": target, "status": "uploading", "current": 101, "total": 1000, "percent": 10.1}
+        checked_at = app.now()
+
+        app.check_waiting_cd2_uploads(
+            dict(app.DEFAULT_CONFIG),
+            {app.normalize_upload_path(target): upload},
+            {"connected": True, "checked_at": checked_at, "human": "connected"},
+        )
+
+        item = app.state["items"][source]
+        self.assertEqual(item["status"], "waiting_cd2_upload")
+        self.assertEqual(item["cd2_upload_progress_current"], 101)
+        self.assertEqual(item["cd2_upload_progress_at"], checked_at)
+
+    def test_cd2_upload_stalls_after_thirty_minutes_without_progress(self) -> None:
+        source = "/watch/Grace 2025"
+        target = "/CloudNAS/CloudDrive/finished/Grace 2025.iso"
+        old_progress_at = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
+        recent_observation = (datetime.now() - timedelta(seconds=10)).strftime("%Y-%m-%d %H:%M:%S")
+        app.state["items"][source] = {
+            "status": "waiting_cd2_upload",
+            "target": target,
+            "pack_iso": True,
+            "cd2_upload_wait_started_at": old_progress_at,
+            "cd2_upload_seen_at": old_progress_at,
+            "cd2_upload_progress_at": old_progress_at,
+            "cd2_upload_progress_current": 100,
+            "cd2_upload_progress_percent": 10.0,
+            "cd2_upload_last_observed_at": recent_observation,
+        }
+        upload = {"path": target, "status": "uploading", "current": 100, "total": 1000, "percent": 10.0}
+
+        app.check_waiting_cd2_uploads(
+            dict(app.DEFAULT_CONFIG),
+            {app.normalize_upload_path(target): upload},
+            {"connected": True, "checked_at": app.now(), "human": "connected"},
+        )
+
+        item = app.state["items"][source]
+        self.assertEqual(item["status"], "transfer_failed")
+        self.assertEqual(item["failure_code"], "cd2_upload_stalled")
+        self.assertEqual(item["target"], target)
+
+    def test_cd2_upload_missing_after_thirty_minutes(self) -> None:
+        source = "/watch/Mona Lisa 1986"
+        target = "/CloudNAS/CloudDrive/finished/Mona Lisa 1986.iso"
+        missing_since = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
+        recent_observation = (datetime.now() - timedelta(seconds=10)).strftime("%Y-%m-%d %H:%M:%S")
+        app.state["items"][source] = {
+            "status": "waiting_cd2_upload",
+            "target": target,
+            "pack_iso": True,
+            "cd2_upload_wait_started_at": missing_since,
+            "cd2_upload_missing_since": missing_since,
+            "cd2_upload_last_observed_at": recent_observation,
+        }
+
+        app.check_waiting_cd2_uploads(
+            dict(app.DEFAULT_CONFIG),
+            {},
+            {"connected": True, "checked_at": app.now(), "human": "connected"},
+        )
+
+        item = app.state["items"][source]
+        self.assertEqual(item["status"], "transfer_failed")
+        self.assertEqual(item["failure_code"], "cd2_upload_missing")
+
+    def test_cd2_disconnect_pauses_stall_detection(self) -> None:
+        source = "/watch/Grace 2025"
+        target = "/CloudNAS/CloudDrive/finished/Grace 2025.iso"
+        old_progress_at = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
+        app.state["items"][source] = {
+            "status": "waiting_cd2_upload",
+            "target": target,
+            "pack_iso": True,
+            "cd2_upload_wait_started_at": old_progress_at,
+            "cd2_upload_seen_at": old_progress_at,
+            "cd2_upload_progress_at": old_progress_at,
+            "cd2_upload_progress_current": 100,
+            "cd2_upload_progress_percent": 10.0,
+            "cd2_upload_last_observed_at": old_progress_at,
+        }
+
+        app.check_waiting_cd2_uploads(
+            dict(app.DEFAULT_CONFIG),
+            {},
+            {"connected": False, "checked_at": app.now(), "human": "disconnected"},
+        )
+
+        item = app.state["items"][source]
+        self.assertEqual(item["status"], "waiting_cd2_upload")
+        self.assertTrue(item["cd2_upload_monitor_paused"])
+
+    def test_upload_recheck_resets_monitor_failure(self) -> None:
+        source = "/watch/Grace 2025"
+        target = "/CloudNAS/CloudDrive/finished/Grace 2025.iso"
+        app.state["items"][source] = {
+            "status": "transfer_failed",
+            "target": target,
+            "pack_iso": True,
+            "failure_code": "cd2_upload_stalled",
+            "failure_label": "CD2 上传停滞",
+            "error": "上传长时间没有进展",
+            "cd2_upload_progress_at": "2026-08-30 00:00:00",
+        }
+
+        result, status_code, mode = app.reset_task_for_recheck(source, dict(app.DEFAULT_CONFIG))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(status_code, 200)
+        self.assertEqual(mode, "upload")
+        item = app.state["items"][source]
+        self.assertEqual(item["status"], "waiting_cd2_upload")
+        self.assertNotIn("failure_code", item)
+        self.assertNotIn("cd2_upload_progress_at", item)
+
+    def test_manual_upload_confirmation_requires_valid_cd2_iso(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            watch_dir = base / "watch"
+            cd2_dir = base / "cd2"
+            watch_dir.mkdir()
+            cd2_dir.mkdir()
+            source = watch_dir / "Grace 2025"
+            target = cd2_dir / "Grace 2025.iso"
+            target.write_bytes(b"valid-iso")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "watch_dir": str(watch_dir),
+                "cd2_target_dir": str(cd2_dir),
+                "cd2_require_mount": False,
+            })
+            app.state["items"][str(source)] = {
+                "status": "transfer_failed",
+                "target": str(target),
+                "target_size": target.stat().st_size,
+                "pack_iso": True,
+                "failure_code": "cd2_upload_stalled",
+            }
+            app.validate_iso = lambda candidate: candidate == target.resolve()
+
+            result, status_code = app.confirm_cd2_upload_task(str(source), cfg)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(status_code, 200)
+            item = app.state["items"][str(source)]
+            self.assertEqual(item["status"], "transfer_done")
+            self.assertTrue(item["cd2_upload_manual_confirmed"])
+            self.assertTrue(target.exists())
+
+    def test_dashboard_separates_running_and_waiting_tasks(self) -> None:
+        stats = app.dashboard_stats([
+            ("/watch/running", {"status": "running", "first_seen": app.now()}),
+            ("/watch/upload", {"status": "waiting_cd2_upload", "first_seen": app.now()}),
+            ("/watch/partial", {"status": "waiting_partial", "first_seen": app.now()}),
+        ])
+
+        self.assertEqual(stats["active"], 1)
+        self.assertEqual(stats["waiting"], 2)
+
+    def test_candidate_scan_timeout_is_single_flight(self) -> None:
+        release = threading.Event()
+        factory_calls = []
+
+        class BlockingClient:
+            def close(self):
+                return None
+
+        original_factory = app.create_isolated_cd2_client
+        original_scan = app.scan_cd2_remote_candidates
+        try:
+            app.reset_cd2_candidate_scan_controller()
+
+            def fake_factory(_cfg):
+                factory_calls.append(True)
+                return BlockingClient(), ""
+
+            def fake_scan(_cfg, force_refresh=False, client=None):
+                release.wait(1)
+                return {"ok": True, "candidates": [], "candidate_count": 0, "message": "done"}
+
+            app.create_isolated_cd2_client = fake_factory
+            app.scan_cd2_remote_candidates = fake_scan
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({"cd2_api_enabled": True, "cd2_remote_source_dirs": ["/remote"]})
+
+            first = app.controlled_cd2_remote_candidates(cfg, force_refresh=True, timeout_seconds=0.01)
+            second = app.controlled_cd2_remote_candidates(cfg, force_refresh=True, timeout_seconds=0.01)
+
+            self.assertFalse(first["ok"])
+            self.assertTrue(first["scan_timeout"])
+            self.assertFalse(second["ok"])
+            self.assertEqual(len(factory_calls), 1)
+        finally:
+            release.set()
+            for _ in range(50):
+                thread = app.cd2_candidate_scan_state.get("thread")
+                if not thread or not thread.is_alive():
+                    break
+                time.sleep(0.01)
+            app.create_isolated_cd2_client = original_factory
+            app.scan_cd2_remote_candidates = original_scan
+            app.reset_cd2_candidate_scan_controller()
 
     def test_auto_pull_claim_prevents_duplicate_and_can_be_cleared(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

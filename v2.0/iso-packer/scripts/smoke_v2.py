@@ -341,7 +341,7 @@ def verify_static_contracts() -> None:
     for name in script_files:
         text = read_text(static_js / name)
         require("alert(" not in text, f"{name} still uses alert()")
-        require("confirm(" not in text, f"{name} still uses confirm()")
+        require("confirm(" not in text.replace("window.confirm(", ""), f"{name} still uses bare confirm()")
 
     workspace_js = read_text(static_js / "workspace.js")
     require("pull_guard_enabled" in workspace_js, "workspace.js should read pull guard status")
@@ -352,6 +352,9 @@ def verify_static_contracts() -> None:
     require("等待 CD2 拉取完成" in workspace_js, "workspace.js missing cd2 waiting status copy")
     require("正在 CD2 上传云端" in workspace_js, "workspace.js missing cd2 upload status copy")
     require("CD2 上传中" in workspace_js, "workspace.js missing cd2 upload output row copy")
+    require("data-task-action" in workspace_js, "workspace.js missing stalled task action hook")
+    require("确认已上传" in workspace_js, "workspace.js missing manual upload confirmation action")
+    require("AbortSignal.timeout(20000)" in workspace_js, "workspace.js missing candidate scan timeout")
     require("file_rename" in workspace_js, "workspace.js missing rename operation status")
     require("item.progress_label ||" in workspace_js, "workspace.js should prefer explicit completion progress labels")
     require("pipeline-primary-status" in workspace_js, "workspace.js should update the primary status title")
@@ -577,6 +580,7 @@ def verify_local_media_poster_contract(appmod) -> None:
 def patch_cd2(appmod) -> None:
     FakeCd2Client.copy_calls = []
     appmod.get_cd2_client = lambda cfg: FakeCd2Client()
+    appmod.create_isolated_cd2_client = lambda cfg: (FakeCd2Client(), "")
     appmod.fetch_cd2_uploads = lambda cfg: (
         {},
         {"connected": True, "human": "CD2 mock ok", "uploads": [], "last_error": ""},
@@ -703,6 +707,7 @@ def verify_status_payload(client) -> None:
     require("active_count" in file_operations, "file operation summary missing active_count")
     require(isinstance(file_operations.get("items"), list), "file operation summary items is not list")
     require("active" in payload["stats"], "status stats missing active count")
+    require("waiting" in payload["stats"], "status stats missing waiting count")
     require(response.content_length is None or response.content_length < 65536, "status payload is too large")
 
 
@@ -752,7 +757,8 @@ def verify_cd2_upload_wait_status(appmod, client, data_dir: Path) -> None:
         require(item.get("status") == "waiting_cd2_upload", f"upload wait item status mismatch: {item}")
         attached = item.get("cd2_upload") or {}
         require(attached.get("percent") == 25.0, f"upload progress was not attached: {attached}")
-        require((payload.get("stats") or {}).get("active", 0) >= 1, "upload wait should count as active")
+        require((payload.get("stats") or {}).get("active", 0) == 0, "upload wait should not count as active")
+        require((payload.get("stats") or {}).get("waiting", 0) >= 1, "upload wait should count as waiting")
     finally:
         appmod.fetch_cd2_uploads = original_fetch
         with appmod.lock:

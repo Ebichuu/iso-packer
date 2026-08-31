@@ -343,6 +343,15 @@
     if (phase === "waiting_cd2_upload") {
       return { label: "CD2 上传中", badge: "border-emerald-200 bg-emerald-50 text-emerald-700", hint: item.stage_text || "ISO 已写入 CD2 挂载目录，正在由 CloudDrive2 上传云端。" };
     }
+    if (phase === "waiting_cd2_pull") {
+      return { label: "等待 CD2 拉取", badge: "border-amber-200 bg-amber-50 text-amber-700", hint: item.stage_text || "远程原盘正在拉取到本地监控目录。" };
+    }
+    if (phase === "waiting_cd2_confirm") {
+      return { label: "等待 CD2 确认", badge: "border-amber-200 bg-amber-50 text-amber-700", hint: item.stage_text || "等待 CD2 源目录确认完成。" };
+    }
+    if (phase === "receiving" || phase === "waiting_partial" || phase === "waiting_stable") {
+      return { label: phase === "waiting_partial" ? "等待下载完成" : "等待源目录稳定", badge: "border-amber-200 bg-amber-50 text-amber-700", hint: item.stage_text || item.error || "源目录仍在写入，暂不开始封装。" };
+    }
     if (phase === "verify" || phase === "verifying" || phase === "validating" || phase === "checking") {
       return { label: "ISO 校验", badge: "border-amber-200 bg-amber-50 text-amber-700", hint: "ISO 已写完，正在确认结构完整。" };
     }
@@ -433,6 +442,8 @@
         current: current.current,
         total: current.total,
         stage_text: current.stage_text,
+        can_recheck: current.can_recheck === true,
+        can_confirm_upload: current.can_confirm_upload === true,
         sort_source: sortSource,
         sort_time: parseSortTime(sortSource),
         time_label: formatSortTime(sortSource),
@@ -445,7 +456,7 @@
     Object.entries(items).forEach(([source, item]) => {
       if (!item || seen.has(source)) return;
       const phase = String(item.status || "").toLowerCase();
-      const hasOutput = item.target || item.output_target || item.original_target || phase === "done" || phase === "transfer_done" || phase === "waiting_cd2_upload" || phase.includes("transfer") || phase.includes("verify");
+      const hasOutput = item.target || item.output_target || item.original_target || phase === "done" || phase === "transfer_done" || ["receiving", "waiting_partial", "waiting_stable", "waiting_cd2_pull", "waiting_cd2_confirm", "waiting_cd2_upload"].includes(phase) || phase.includes("transfer") || phase.includes("verify");
       if (!hasOutput) return;
       const delivered = phase === "done" || phase === "transfer_done";
       const upload = delivered ? {} : (item.cd2_upload || {});
@@ -471,6 +482,9 @@
         stage_text: delivered ? (item.status_label || "已交付") : (upload.human || upload.summary || item.status_label || item.error || ""),
         error: item.error || item.last_error || "",
         issue_text: item.issue_text || "",
+        failure_code: item.failure_code || "",
+        can_recheck: item.can_recheck === true,
+        can_confirm_upload: item.can_confirm_upload === true,
         finished_at: item.finished_at || item.done_at || item.updated_at || item.first_seen || "",
         sort_source: sortSource,
         sort_time: parseSortTime(sortSource),
@@ -553,8 +567,14 @@
       const byteText = item.current || item.total ? formatByteProgress(item) : "--";
       const currentMark = item.is_current ? '<span class="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[9px] font-black tracking-[0.08em] text-blue-700">当前</span>' : "";
       const metric = item.is_file_operation ? `${Number(item.current || 0)} / ${Number(item.total || 0)} 项` : byteText;
+      const taskActions = !item.is_file_operation && item.source && (item.can_recheck || item.can_confirm_upload)
+        ? `<div class="mt-2 flex flex-wrap justify-start gap-2">
+            ${item.can_recheck ? `<button type="button" data-task-action="recheck" data-task-source="${escapeHtml(item.source)}" class="min-h-8 rounded-lg border border-amber-200 bg-white px-2.5 py-1 text-[10px] font-black text-amber-700 transition hover:bg-amber-50 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2">重新检测</button>` : ""}
+            ${item.can_confirm_upload ? `<button type="button" data-task-action="confirm_upload" data-task-source="${escapeHtml(item.source)}" class="min-h-8 rounded-lg border border-emerald-200 bg-white px-2.5 py-1 text-[10px] font-black text-emerald-700 transition hover:bg-emerald-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">确认已上传</button>` : ""}
+          </div>`
+        : "";
       return `
-        <div class="grid gap-3 p-3.5 transition hover:bg-zinc-50 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_150px] lg:items-center">
+        <div class="grid gap-3 p-3.5 transition hover:bg-zinc-50 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_150px] lg:items-center">
           <div class="min-w-0 space-y-1">
             <div class="flex items-center gap-2">
               <span class="rounded-full border px-2 py-0.5 text-[9px] font-black tracking-[0.08em] ${view.badge}">${escapeHtml(view.label)}</span>
@@ -562,6 +582,7 @@
             </div>
             <div class="truncate text-sm font-black leading-5 text-zinc-900" title="${escapeHtml(item.name)}">${escapeHtml(item.name || "--")}</div>
             <div class="truncate text-[11px] font-medium text-zinc-500" title="${escapeHtml(view.hint)}">${escapeHtml(view.hint)}</div>
+            ${taskActions}
           </div>
           <div class="min-w-0 space-y-1 font-mono text-[10px] text-zinc-500">
             <div class="truncate" title="${escapeHtml(item.output_iso)}">目标: ${escapeHtml(item.output_iso || "--")}</div>
@@ -770,12 +791,18 @@
     }
 
     try {
-      const payload = await helper().fetchJson(`/api/cd2/remote-candidates?force=${force ? "1" : "0"}&_=${Date.now()}`);
+      const payload = await helper().fetchJson(`/api/cd2/remote-candidates?force=${force ? "1" : "0"}&_=${Date.now()}`, {
+        signal: AbortSignal.timeout(20000)
+      });
       renderCandidates(payload);
     } catch (error) {
       setText("workspace-candidate-total", "--");
-      setText("candidate-summary-text", "CD2 候选同步失败，请检查 CD2 登录信息和目录配置。");
-      container.innerHTML = renderStateCard("error", "同步失败", error.message || "远程候选同步失败，请检查 CD2 API 与挂载配置。");
+      const timedOut = error && (error.name === "TimeoutError" || error.name === "AbortError");
+      const message = timedOut
+        ? "CD2 候选扫描超时，可以稍后重新点击刷新。"
+        : (error.message || "远程候选同步失败，请检查 CD2 API 与挂载配置。");
+      setText("candidate-summary-text", message);
+      container.innerHTML = renderStateCard("error", timedOut ? "扫描超时" : "同步失败", message);
       updateSelectedCount();
     } finally {
       if (refreshButton) {
@@ -919,6 +946,29 @@
     }
   }
 
+  async function taskAction(sourcePath, action, button) {
+    if (!sourcePath || !action) return;
+    if (action === "confirm_upload" && !window.confirm("确认 CD2 目标 ISO 已完整上传？系统会重新校验文件，不会删除文件。")) return;
+    const originalText = button ? button.textContent : "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "处理中...";
+    }
+    try {
+      const form = new FormData();
+      form.set("source", sourcePath);
+      form.set("action", action);
+      const payload = await helper().fetchJson("/api/tasks/action", { method: "POST", body: form });
+      showFeedback(payload.message || "操作已提交");
+    } catch (error) {
+      showFeedback(error.message || "任务操作失败", true);
+      if (button) {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    }
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     renderPipeline({});
     renderOutputQueueV2({});
@@ -960,6 +1010,23 @@
         clearSingleRecord(button.dataset.clearCandidateRecord || "", button);
       });
     }
+
+    const outputContainer = document.getElementById("workspace-output-queue");
+    if (outputContainer) {
+      outputContainer.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-task-action]");
+        if (!button) return;
+        taskAction(button.dataset.taskSource || "", button.dataset.taskAction || "", button);
+      });
+    }
+
+    document.querySelectorAll("[data-task-recovery-action]").forEach((button) => {
+      button.addEventListener("click", () => taskAction(
+        button.dataset.taskSource || "",
+        button.dataset.taskRecoveryAction || "",
+        button
+      ));
+    });
 
     const rerunButton = document.querySelector("[data-rerun-source]");
     if (rerunButton) {

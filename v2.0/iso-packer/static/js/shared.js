@@ -71,7 +71,10 @@ const IsoPacker = (() => {
         phase: status,
         stage_text: uploadText || item.error || item.status_label || status,
         current: task.current || task.current_bytes || item.last_size || 0,
-        total: task.total || task.total_bytes || item.size || 0
+        total: task.total || task.total_bytes || item.size || 0,
+        failure_code: item.failure_code || "",
+        can_recheck: item.can_recheck === true,
+        can_confirm_upload: item.can_confirm_upload === true
       };
     }
     return null;
