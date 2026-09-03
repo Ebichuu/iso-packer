@@ -2617,6 +2617,12 @@ def normalize_upload_path(path: str) -> str:
     return normalize_path_text(str(Path(str(path or "")).expanduser()))
 
 
+def is_strict_iso_path(path) -> bool:
+    normalized = normalize_upload_path(str(path or ""))
+    name = normalized.rsplit("/", 1)[-1]
+    return bool(name) and Path(name).suffix.lower() == ".iso"
+
+
 def upload_lookup_keys(path: str, cfg: Optional[Dict] = None):
     cfg = cfg or {}
     aliases = cd2_path_aliases_from_cfg(cfg)
@@ -2663,9 +2669,13 @@ def cd2_upload_match_mode_from_cfg(cfg: Optional[Dict] = None) -> str:
 
 
 def find_upload_for_path(upload_map: Dict, path: str, cfg: Optional[Dict] = None):
-    if not upload_map:
+    if not upload_map or not is_strict_iso_path(path):
         return None
-    direct = {normalize_upload_path(key): value for key, value in upload_map.items()}
+    direct = {
+        normalize_upload_path(key): value
+        for key, value in upload_map.items()
+        if is_strict_iso_path(((value or {}).get("path") or key) if isinstance(value, dict) else key)
+    }
     for key in upload_lookup_keys(path, cfg):
         upload = direct.get(key)
         if upload:
@@ -3078,6 +3088,8 @@ def attach_cd2_upload_entries(status: Dict, result) -> Dict:
     upload_map = {}
     for upload in getattr(result, "uploadFiles", []) or []:
         info = build_cd2_upload_info(upload)
+        if not is_strict_iso_path(info["path"]):
+            continue
         upload_map[normalize_upload_path(info["path"])] = info
         status["uploads"].append(info)
     return upload_map
@@ -3163,6 +3175,7 @@ def fetch_cd2_uploads(cfg: Dict):
         "copy_tasks": copy_tasks,
     })
     upload_map = attach_cd2_upload_entries(status, result)
+    status["upload_count"] = len(status["uploads"])
     summarize_cd2_queue_status(status, queue_errors)
     status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
     cache_cd2_upload_status(upload_map, status)
@@ -3925,59 +3938,80 @@ def resolve_cd2_target_dir(cfg: Dict) -> Optional[Path]:
     return target_dir
 
 
-def prepare_cd2_transfer_paths(target: Path, target_dir: Path) -> Optional[tuple[Path, Path]]:
+def prepare_cd2_transfer_path(target: Path, target_dir: Path) -> Optional[Path]:
     final_path = target_dir / target.name
+    if not is_strict_iso_path(final_path):
+        log(f"拒绝向 CloudDrive2 挂载目录写入非 ISO 文件: {final_path}")
+        return None
     if final_path.exists():
         log(f"上传目录已存在同名ISO，停止转移，等待手动处理: {final_path}")
         return None
-    tmp_path = final_path.with_name(final_path.name + ".partial")
-    if tmp_path.exists():
-        try:
-            tmp_path.unlink()
-        except Exception as exc:
-            log(f"删除旧转移临时文件失败 {tmp_path}: {exc}")
-            return None
-    return final_path, tmp_path
+    return final_path
 
 
-def copy_iso_to_partial(source: Path, tmp_path: Path, final_path: Path, total: int) -> bool:
+def remove_failed_cd2_transfer_target(final_path: Path) -> None:
+    try:
+        if final_path.exists():
+            final_path.unlink()
+    except Exception as exc:
+        log(f"清理 CloudDrive2 未完成目标失败 {final_path}: {exc}")
+
+
+def copy_iso_to_mount(source: Path, final_path: Path, total: int) -> bool:
     copied = 0
     last_update = 0.0
-    with source.open("rb") as src, tmp_path.open("wb") as dst:
-        while True:
-            chunk = src.read(16 * 1024 * 1024)
-            if not chunk:
-                break
-            dst.write(chunk)
-            copied += len(chunk)
-            current_time = time.time()
-            if current_time - last_update >= 2:
-                percent = 100.0 if total <= 0 else copied * 100 / total
-                update_active_progress("transfer", final_path, {
-                    "percent": min(percent, 99.9),
-                    "current": copied,
-                    "total": total,
-                    "stage_text": "正在复制 ISO 到 CD2 挂载目录",
-                })
-                last_update = current_time
-        dst.flush()
-        os.fsync(dst.fileno())
+    created = False
+    try:
+        with source.open("rb") as src, final_path.open("xb") as dst:
+            created = True
+            while True:
+                chunk = src.read(16 * 1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+                copied += len(chunk)
+                current_time = time.time()
+                if current_time - last_update >= 2:
+                    percent = 100.0 if total <= 0 else copied * 100 / total
+                    update_active_progress("transfer", final_path, {
+                        "percent": min(percent, 99.9),
+                        "current": copied,
+                        "total": total,
+                        "stage_text": "正在复制 ISO 到 CD2 挂载目录",
+                    })
+                    last_update = current_time
+            dst.flush()
+            os.fsync(dst.fileno())
+    except Exception:
+        if created:
+            remove_failed_cd2_transfer_target(final_path)
+        raise
     update_active_progress("transfer_verify", final_path, {
         "percent": 100.0,
         "current": copied,
         "total": total,
-        "stage_text": "转存写入完成，正在校验目标文件大小",
+        "stage_text": "转存写入完成，正在校验目标 ISO",
     })
-    if tmp_path.stat().st_size != total:
-        log(f"CloudDrive2转移大小校验失败: {tmp_path.stat().st_size} != {total}")
-        return False
+    try:
+        final_size = final_path.stat().st_size
+        if final_size != total:
+            log(f"CloudDrive2转移大小校验失败: {final_size} != {total}")
+            remove_failed_cd2_transfer_target(final_path)
+            return False
+        if not validate_iso(final_path):
+            log(f"CloudDrive2目标 ISO 结构校验失败: {final_path}")
+            remove_failed_cd2_transfer_target(final_path)
+            return False
+    except Exception:
+        remove_failed_cd2_transfer_target(final_path)
+        raise
     return True
 
 
-def finalize_cd2_transfer(target: Path, tmp_path: Path, final_path: Path, total: int) -> bool:
-    tmp_path.replace(final_path)
+def finalize_cd2_transfer(target: Path, final_path: Path, total: int) -> bool:
     if final_path.stat().st_size != total:
         log(f"CloudDrive2最终文件大小校验失败: {final_path.stat().st_size} != {total}")
+        remove_failed_cd2_transfer_target(final_path)
         return False
     update_active_progress("transfer_verify", final_path, {
         "percent": 100.0,
@@ -4005,11 +4039,22 @@ def maybe_refresh_cd2_after_transfer(cfg: Dict, final_path: Path) -> None:
 def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
     if not cfg.get("cd2_transfer_enabled"):
         return target
+    if not target.is_file() or target.is_symlink():
+        log(f"待转移 ISO 不存在或不是普通文件: {target}")
+        return None
+    if not is_strict_iso_path(target):
+        log(f"拒绝向 CloudDrive2 转存非 ISO 文件: {target}")
+        return None
+    try:
+        source_valid = validate_iso(target)
+    except Exception as exc:
+        log(f"待转移 ISO 结构校验异常 {target}: {exc}")
+        return None
+    if not source_valid:
+        log(f"拒绝向 CloudDrive2 转存结构校验失败的 ISO: {target}")
+        return None
     target_dir = resolve_cd2_target_dir(cfg)
     if not target_dir:
-        return None
-    if not target.exists():
-        log(f"待转移ISO不存在: {target}")
         return None
 
     if path_in_root(target, target_dir):
@@ -4028,26 +4073,20 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
         maybe_refresh_cd2_after_transfer(cfg, final_path)
         return final_path
 
-    prepared = prepare_cd2_transfer_paths(target, target_dir)
-    if not prepared:
+    final_path = prepare_cd2_transfer_path(target, target_dir)
+    if not final_path:
         return None
-    final_path, tmp_path = prepared
 
     log(f"开始转移到CloudDrive2挂载目录: {target} -> {final_path}")
     try:
-        if not copy_iso_to_partial(target, tmp_path, final_path, total):
+        if not copy_iso_to_mount(target, final_path, total):
             return None
-        if not finalize_cd2_transfer(target, tmp_path, final_path, total):
+        if not finalize_cd2_transfer(target, final_path, total):
             return None
         maybe_refresh_cd2_after_transfer(cfg, final_path)
         return final_path
     except Exception as exc:
         log(f"CloudDrive2转移失败: {exc}")
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except Exception:
-            pass
         return None
 
 

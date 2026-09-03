@@ -57,7 +57,8 @@
 - `Wrong Turn 2003`、`Wrong Turn 3 2009` 曾同时进入 CD2 上传队列。
 - 这类状态表示 ISO Packer 已写入 CD2 挂载目录，CloudDrive2 正在上传云端。
 - 容器 `unhealthy` 的关键原因是大文件转存时 Python 进程卡在 CloudDrive2/FUSE I/O，Web 服务也被堵住。
-- `.partial` 文件持续增长时不要强停；强停会清理 partial 并重传。
+- `/output` 中的 `.iso.partial` 是本机封装临时文件，持续增长时不要强停。
+- CD2 挂载目录只写入并监控严格以 `.iso` 结尾的文件，不再创建或认领 `.iso.partial`、`.iso..partial`。
 - 后续必须把封装/转存 worker 与 Web 服务隔离，避免正式版仍出现页面无响应。
 
 ## 正式版前检查清单

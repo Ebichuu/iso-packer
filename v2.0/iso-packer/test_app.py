@@ -417,6 +417,138 @@ class RevisionRecoveryTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertTrue(existing_target.exists())
 
+    def test_transfer_writes_only_final_iso_name_to_cd2_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            cd2_dir = base / "cd2"
+            cd2_dir.mkdir()
+            target = base / "Movie.2026.iso"
+            target.write_bytes(b"valid-iso")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_transfer_enabled": True,
+                "cd2_require_mount": False,
+                "cd2_target_dir": str(cd2_dir),
+            })
+
+            app.validate_iso = lambda _target: True
+            result = app.transfer_iso_to_mount(target, cfg)
+
+            self.assertEqual(result, cd2_dir / target.name)
+            self.assertEqual([path.name for path in cd2_dir.iterdir()], [target.name])
+            self.assertFalse(target.exists())
+
+    def test_transfer_rejects_non_iso_source_without_touching_mount(self) -> None:
+        for filename in ("Movie.2026.iso.partial", "Movie.2026.iso..partial", "Movie.2026.mkv"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temp_dir:
+                base = Path(temp_dir)
+                cd2_dir = base / "cd2"
+                cd2_dir.mkdir()
+                target = base / filename
+                target.write_bytes(b"not-an-iso")
+                cfg = dict(app.DEFAULT_CONFIG)
+                cfg.update({
+                    "cd2_transfer_enabled": True,
+                    "cd2_require_mount": False,
+                    "cd2_target_dir": str(cd2_dir),
+                })
+
+                app.validate_iso = lambda _target: True
+                result = app.transfer_iso_to_mount(target, cfg)
+
+                self.assertIsNone(result)
+                self.assertTrue(target.exists())
+                self.assertEqual(list(cd2_dir.iterdir()), [])
+
+    def test_transfer_accepts_uppercase_iso_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            cd2_dir = base / "cd2"
+            cd2_dir.mkdir()
+            target = base / "Movie.2026.ISO"
+            target.write_bytes(b"valid-iso")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_transfer_enabled": True,
+                "cd2_require_mount": False,
+                "cd2_target_dir": str(cd2_dir),
+            })
+
+            app.validate_iso = lambda _target: True
+            result = app.transfer_iso_to_mount(target, cfg)
+
+            self.assertEqual(result, cd2_dir / target.name)
+            self.assertTrue(result.exists())
+
+    def test_transfer_rejects_iso_when_source_validation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            cd2_dir = base / "cd2"
+            cd2_dir.mkdir()
+            target = base / "Movie.2026.iso"
+            target.write_bytes(b"not-an-iso")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_transfer_enabled": True,
+                "cd2_require_mount": False,
+                "cd2_target_dir": str(cd2_dir),
+            })
+
+            app.validate_iso = lambda _target: False
+            result = app.transfer_iso_to_mount(target, cfg)
+
+            self.assertIsNone(result)
+            self.assertTrue(target.exists())
+            self.assertEqual(list(cd2_dir.iterdir()), [])
+
+    def test_transfer_removes_target_when_destination_iso_validation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            cd2_dir = base / "cd2"
+            cd2_dir.mkdir()
+            target = base / "Movie.2026.iso"
+            target.write_bytes(b"valid-iso")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_transfer_enabled": True,
+                "cd2_require_mount": False,
+                "cd2_target_dir": str(cd2_dir),
+            })
+
+            app.validate_iso = lambda candidate: candidate == target
+            result = app.transfer_iso_to_mount(target, cfg)
+
+            self.assertIsNone(result)
+            self.assertTrue(target.exists())
+            self.assertFalse((cd2_dir / target.name).exists())
+
+    def test_cd2_upload_queue_ignores_non_iso_paths(self) -> None:
+        status = {"uploads": []}
+        result = SimpleNamespace(uploadFiles=[
+            SimpleNamespace(
+                key="valid",
+                destPath="/115/00-mkiso/Movie.2026.iso",
+                status="uploading",
+                transferedBytes=50,
+                size=100,
+                errorMessage="",
+            ),
+            SimpleNamespace(
+                key="partial",
+                destPath="/115/00-mkiso/Movie.2026.iso..partial",
+                status="uploading",
+                transferedBytes=20,
+                size=100,
+                errorMessage="",
+            ),
+        ])
+
+        upload_map = app.attach_cd2_upload_entries(status, result)
+
+        self.assertEqual(list(upload_map), ["/115/00-mkiso/Movie.2026.iso"])
+        self.assertEqual([item["path"] for item in status["uploads"]], ["/115/00-mkiso/Movie.2026.iso"])
+        self.assertIsNone(app.find_upload_for_path(upload_map, "/115/00-mkiso/Movie.2026.iso..partial"))
+
     def test_cd2_upload_progress_resets_stall_timer(self) -> None:
         source = "/watch/Grace 2025"
         target = "/CloudNAS/CloudDrive/finished/Grace 2025.iso"
