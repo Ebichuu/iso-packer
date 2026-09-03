@@ -593,6 +593,121 @@ class RevisionRecoveryTests(unittest.TestCase):
         self.assertEqual(stats["active"], 1)
         self.assertEqual(stats["waiting"], 2)
 
+    def test_bdmv_root_scan_returns_all_candidates_without_child_requests(self) -> None:
+        root = "/remote/01-BDMV"
+        movie_count = 149
+
+        class LargeDirectoryClient:
+            def __init__(self) -> None:
+                self.requested_paths = []
+
+            def get_sub_files(self, path: str, force_refresh: bool = False):
+                self.requested_paths.append(path)
+                if path != root:
+                    raise AssertionError(f"unexpected child request: {path}")
+                return [SimpleNamespace(
+                    name="[Search]BDMV",
+                    fullPathName=f"{root}/[Search]BDMV",
+                    isDirectory=True,
+                    isSearchResult=True,
+                    writeTime="2026-09-01 10:00:00",
+                )] + [
+                    SimpleNamespace(
+                        name=f"Movie {index:03d}",
+                        fullPathName=f"{root}/Movie {index:03d}",
+                        isDirectory=True,
+                        isSearchResult=False,
+                        size=0,
+                        writeTime=f"2026-08-{(index % 28) + 1:02d} 10:00:00",
+                    )
+                    for index in range(movie_count)
+                ]
+
+        client = LargeDirectoryClient()
+        cfg = dict(app.DEFAULT_CONFIG)
+        cfg.update({
+            "cd2_api_enabled": True,
+            "cd2_manual_pull_enabled": True,
+            "cd2_remote_source_dirs": [root],
+            "cd2_path_aliases": [],
+            "cd2_remote_scan_depth": 1,
+        })
+
+        payload = app.scan_cd2_remote_candidates(cfg, client=client)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["candidate_count"], movie_count)
+        self.assertEqual(client.requested_paths, [root])
+        self.assertEqual(payload["candidates"][0]["modified"], "2026-08-28 10:00:00")
+        self.assertTrue(all(item["disc_type"] == "BDMV" for item in payload["candidates"]))
+
+    def test_inferred_root_type_is_revalidated_before_copy(self) -> None:
+        root = "/remote/01-BDMV"
+
+        class InvalidDiscClient:
+            def __init__(self) -> None:
+                self.copy_calls = []
+
+            def get_sub_files(self, path: str, force_refresh: bool = False):
+                return []
+
+            def copy_file(self, source_paths, dest_dir):
+                self.copy_calls.append((source_paths, dest_dir))
+
+        client = InvalidDiscClient()
+        app.get_cd2_client = lambda _cfg: client
+        cfg = dict(app.DEFAULT_CONFIG)
+        cfg.update({
+            "cd2_api_enabled": True,
+            "cd2_auto_pull_enabled": True,
+            "cd2_remote_source_dirs": [root],
+            "cd2_path_aliases": [],
+            "cd2_remote_pull_dest_dir": "/remote/pulled",
+            "cd2_local_pull_dir": "/watch",
+            "watch_dir": "/watch",
+        })
+
+        payload, status_code = app.create_cd2_pull_task(
+            cfg,
+            f"{root}/Movie Without Disc Structure",
+            mode="auto",
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(status_code, 400)
+        self.assertIn("不是 BDMV / VIDEO_TS", payload["message"])
+        self.assertEqual(client.copy_calls, [])
+
+    def test_generic_root_scan_reports_partial_child_failure(self) -> None:
+        root = "/remote/inbox"
+
+        class PartialFailureClient:
+            def get_sub_files(self, path: str, force_refresh: bool = False):
+                if path == root:
+                    return [
+                        SimpleNamespace(name="Movie A", fullPathName=f"{root}/Movie A", isDirectory=True),
+                        SimpleNamespace(name="Movie B", fullPathName=f"{root}/Movie B", isDirectory=True),
+                    ]
+                if path == f"{root}/Movie A":
+                    return [SimpleNamespace(name="BDMV", fullPathName=f"{path}/BDMV", isDirectory=True)]
+                raise RuntimeError("CD2 connection closed")
+
+        cfg = dict(app.DEFAULT_CONFIG)
+        cfg.update({
+            "cd2_api_enabled": True,
+            "cd2_manual_pull_enabled": True,
+            "cd2_remote_source_dirs": [root],
+            "cd2_path_aliases": [],
+            "cd2_remote_scan_depth": 1,
+        })
+
+        payload = app.scan_cd2_remote_candidates(cfg, client=PartialFailureClient())
+
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["partial"])
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertEqual(len(payload["errors"]), 1)
+
     def test_candidate_scan_timeout_is_single_flight(self) -> None:
         release = threading.Event()
         factory_calls = []

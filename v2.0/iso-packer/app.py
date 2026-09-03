@@ -1671,7 +1671,36 @@ def cd2_file_size(file_obj) -> int:
 
 def cd2_file_mtime(file_obj) -> str:
     value = getattr(file_obj, "writeTime", None) or getattr(file_obj, "modifyTime", None) or ""
+    if hasattr(value, "ToJsonString"):
+        try:
+            return str(value.ToJsonString() or "")
+        except Exception:
+            pass
     return str(value or "")
+
+
+def cd2_time_sort_value(value) -> float:
+    if hasattr(value, "seconds"):
+        try:
+            return float(value.seconds) + float(getattr(value, "nanos", 0) or 0) / 1_000_000_000
+        except (TypeError, ValueError):
+            pass
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def cd2_remote_root_disc_type(path: str) -> str:
+    name = (normalize_path_text(path).rsplit("/", 1)[-1] or "").casefold()
+    if re.search(r"(?:^|[^a-z0-9])bdmv(?:$|[^a-z0-9])", name):
+        return "BDMV"
+    if re.search(r"(?:^|[^a-z0-9])video[^a-z0-9]*ts(?:$|[^a-z0-9])", name):
+        return "VIDEO_TS"
+    return ""
 
 
 def list_cd2_sub_files(client, path: str, force_refresh: bool = False):
@@ -1720,6 +1749,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False, client=No
         "pull_dest_dir": cd2_pull_dest_dir_from_cfg(cfg),
         "candidates": [],
         "errors": [],
+        "partial": False,
     }
     if not roots:
         payload["message"] = "未配置网盘监控目录"
@@ -1738,6 +1768,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False, client=No
         payload["message"] = "当前 clouddrive2-client 不支持远程目录扫描"
         return payload
     for root, remote_root in zip(roots, remote_roots):
+        root_disc_type = cd2_remote_root_disc_type(remote_root)
         stack = [(remote_root, 0, bool(force_refresh))]
         while stack:
             current_root, current_depth, current_force_refresh = stack.pop()
@@ -1746,18 +1777,27 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False, client=No
             except Exception as exc:
                 payload["errors"].append({"root": current_root, "message": cd2_error_message(exc)})
                 continue
+            children.sort(
+                key=lambda item: (
+                    cd2_time_sort_value(getattr(item, "writeTime", None) or getattr(item, "modifyTime", None)),
+                    cd2_file_name(item).casefold(),
+                ),
+                reverse=True,
+            )
             for child in children:
-                if not cd2_file_is_dir(child):
+                if not cd2_file_is_dir(child) or bool(getattr(child, "isSearchResult", False)):
                     continue
                 child_path = cd2_file_path(child, current_root)
                 child_depth = current_depth + 1
-                try:
-                    sub_files = list_cd2_sub_files(client, child_path, force_refresh=False)
-                except Exception as exc:
-                    payload["errors"].append({"root": child_path, "message": cd2_error_message(exc)})
-                    continue
-                names = {cd2_file_name(item).lower() for item in sub_files if cd2_file_is_dir(item)}
-                disc_type = "BDMV" if "bdmv" in names else ("VIDEO_TS" if "video_ts" in names else "")
+                disc_type = root_disc_type if current_depth == 0 else ""
+                if not disc_type:
+                    try:
+                        sub_files = list_cd2_sub_files(client, child_path, force_refresh=False)
+                    except Exception as exc:
+                        payload["errors"].append({"root": child_path, "message": cd2_error_message(exc)})
+                        continue
+                    names = {cd2_file_name(item).lower() for item in sub_files if cd2_file_is_dir(item)}
+                    disc_type = "BDMV" if "bdmv" in names else ("VIDEO_TS" if "video_ts" in names else "")
                 if disc_type:
                     pull_status = cd2_remote_candidate_status(cfg, child_path)
                     candidate = {
@@ -1775,12 +1815,25 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False, client=No
                     continue
                 if child_depth < scan_depth:
                     stack.append((child_path, child_depth, False))
+    payload["candidates"].sort(
+        key=lambda item: (
+            cd2_time_sort_value(item.get("modified")),
+            str(item.get("name") or item.get("path") or "").casefold(),
+        ),
+        reverse=True,
+    )
     payload["candidate_count"] = len(payload["candidates"])
     payload["summary"] = cd2_remote_candidate_summary(payload["candidates"])
     payload["message"] = f"发现 {payload['candidate_count']} 个远程原盘候选"
-    if payload["errors"] and not payload["candidates"]:
+    if payload["errors"]:
         payload["ok"] = False
-        payload["message"] = "CD2 远程目录扫描失败"
+        payload["partial"] = bool(payload["candidates"])
+        payload["message"] = (
+            f"CD2 远程目录扫描不完整：发现 {payload['candidate_count']} 个候选，"
+            f"另有 {len(payload['errors'])} 个目录读取失败"
+            if payload["partial"]
+            else "CD2 远程目录扫描失败"
+        )
     return payload
 
 
