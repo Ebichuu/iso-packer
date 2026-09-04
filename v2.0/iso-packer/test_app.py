@@ -43,6 +43,7 @@ class RevisionRecoveryTests(unittest.TestCase):
             name: getattr(app, name)
             for name in ("APP_DIR", "CONFIG_PATH", "STATE_PATH", "LOG_PATH")
         }
+        self.original_cd2_cache = app.cd2_client_cache
         self.original_functions = {
             name: getattr(app, name)
             for name in (
@@ -64,6 +65,16 @@ class RevisionRecoveryTests(unittest.TestCase):
         app.STATE_PATH = test_data_dir / "state.json"
         app.LOG_PATH = test_data_dir / "iso-packer.log"
         app.state = {"items": {}, "last_scan": None, "active": None, "events": [], "cd2": {}}
+        app.cd2_client_cache = {
+            "key": None,
+            "client": None,
+            "auth_mode": "api_token",
+            "last_error": None,
+            "checked_at": None,
+            "last_success_at": None,
+            "upload_map": {},
+            "upload_status": None,
+        }
         app.save_state_locked = lambda: None
         os.environ.pop("ISO_PACKER_DISABLE_CD2_PULL", None)
 
@@ -73,6 +84,7 @@ class RevisionRecoveryTests(unittest.TestCase):
             setattr(app, name, function)
         for name, path in self.original_paths.items():
             setattr(app, name, path)
+        app.cd2_client_cache = self.original_cd2_cache
         self.state_dir.cleanup()
 
     def test_release_identity_requires_explicit_version_and_site(self) -> None:
@@ -549,6 +561,215 @@ class RevisionRecoveryTests(unittest.TestCase):
         self.assertEqual([item["path"] for item in status["uploads"]], ["/115/00-mkiso/Movie.2026.iso"])
         self.assertIsNone(app.find_upload_for_path(upload_map, "/115/00-mkiso/Movie.2026.iso..partial"))
 
+    def test_cd2_upload_queue_uses_documented_pagination(self) -> None:
+        class PagedUploadClient:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def get_upload_file_list(self, get_all=True, items_per_page=0, page_number=0):
+                self.calls.append((get_all, items_per_page, page_number))
+                pages = {
+                    0: SimpleNamespace(
+                        totalCount=3,
+                        globalBytesPerSecond=12.5,
+                        totalBytes=300,
+                        finishedBytes=50,
+                        uploadFiles=[
+                            SimpleNamespace(
+                                key="one",
+                                destPath="/115/00-mkiso/One.iso",
+                                status="uploading",
+                                transferedBytes=50,
+                                size=100,
+                                errorMessage="",
+                            ),
+                            SimpleNamespace(
+                                key="partial",
+                                destPath="/115/00-mkiso/Partial.iso..partial",
+                                status="uploading",
+                                transferedBytes=20,
+                                size=100,
+                                errorMessage="",
+                            ),
+                        ],
+                    ),
+                    1: SimpleNamespace(
+                        totalCount=3,
+                        globalBytesPerSecond=12.5,
+                        totalBytes=300,
+                        finishedBytes=50,
+                        uploadFiles=[
+                            SimpleNamespace(
+                                key="two",
+                                destPath="/115/00-mkiso/Two.iso",
+                                status="completed",
+                                transferedBytes=200,
+                                size=200,
+                                errorMessage="",
+                            ),
+                        ],
+                    ),
+                }
+                return pages[page_number]
+
+            def get_download_file_list(self):
+                return SimpleNamespace(downloadFiles=[])
+
+            def get_copy_tasks(self):
+                return SimpleNamespace(copyTasks=[])
+
+        client = PagedUploadClient()
+        app.get_cd2_client = lambda _cfg: client
+        cfg = dict(app.DEFAULT_CONFIG)
+        cfg.update({
+            "cd2_api_enabled": True,
+            "cd2_api_password": "token",
+            "cd2_queue_poll_seconds": 1,
+        })
+
+        upload_map, status = app.fetch_cd2_uploads(cfg)
+
+        self.assertEqual(client.calls, [(False, 100, 0), (False, 100, 1)])
+        self.assertTrue(status["connected"])
+        self.assertTrue(status["upload_queue_complete"])
+        self.assertEqual(status["upload_count"], 2)
+        self.assertEqual(list(upload_map), ["/115/00-mkiso/One.iso", "/115/00-mkiso/Two.iso"])
+
+    def test_completed_cd2_pull_claim_requires_remote_and_local_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watch_dir = Path(temp_dir) / "watch"
+            watch_dir.mkdir()
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_api_enabled": True,
+                "cd2_api_password": "token",
+                "cd2_remote_pull_dest_dir": "/remote-destination",
+                "cd2_local_pull_dir": str(watch_dir),
+                "watch_dir": str(watch_dir),
+                "cd2_pull_result_grace_seconds": 0,
+            })
+            source_path = "/remote/Mercy.2026.V2.2160p.BluRay@CHDBits"
+            target_path = "/remote-destination/Mercy.2026.V2.2160p.BluRay@CHDBits"
+            local_path = watch_dir / Path(source_path).name
+            local_path.mkdir()
+            claim_key = app.cd2_auto_pull_claim_key(source_path, cfg["cd2_remote_pull_dest_dir"])
+            app.state["cd2"]["auto_pull_claims"] = {
+                claim_key: {
+                    "source_path": source_path,
+                    "dest_dir": cfg["cd2_remote_pull_dest_dir"],
+                    "status": "submitted",
+                    "local_path": str(local_path),
+                    "result_paths": [target_path],
+                    "created_at": app.now(),
+                    "updated_at": app.now(),
+                }
+            }
+
+            class RemoteResultClient:
+                def find_file_by_path(self, path):
+                    self.path = path
+                    return SimpleNamespace(fullPathName=target_path, name=Path(target_path).name, isDirectory=True)
+
+            app.get_cd2_client = lambda _cfg: RemoteResultClient()
+            app.reconcile_cd2_auto_pull_claims(cfg, {"connected": True, "copy_tasks": []})
+
+            self.assertEqual(app.state["cd2"]["auto_pull_claims"][claim_key]["status"], "completed")
+
+    def test_missing_cd2_pull_result_releases_claim_for_one_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watch_dir = Path(temp_dir) / "watch"
+            watch_dir.mkdir()
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_api_enabled": True,
+                "cd2_api_password": "token",
+                "cd2_remote_pull_dest_dir": "/remote-destination",
+                "cd2_local_pull_dir": str(watch_dir),
+                "watch_dir": str(watch_dir),
+                "cd2_pull_result_grace_seconds": 0,
+            })
+            source_path = "/remote/Americana.2025.BluRay@OurBits"
+            target_path = "/remote-destination/Americana.2025.BluRay@OurBits"
+            claim_key = app.cd2_auto_pull_claim_key(source_path, cfg["cd2_remote_pull_dest_dir"])
+            app.state["cd2"]["auto_pull_claims"] = {
+                claim_key: {
+                    "source_path": source_path,
+                    "dest_dir": cfg["cd2_remote_pull_dest_dir"],
+                    "status": "submitted",
+                    "local_path": str(watch_dir / Path(source_path).name),
+                    "result_paths": [target_path],
+                    "created_at": app.now(),
+                    "updated_at": app.now(),
+                }
+            }
+
+            class MissingResultClient:
+                def find_file_by_path(self, _path):
+                    return SimpleNamespace()
+
+                def get_sub_files(self, _path, force_refresh=False):
+                    return []
+
+            app.get_cd2_client = lambda _cfg: MissingResultClient()
+            app.reconcile_cd2_auto_pull_claims(cfg, {"connected": True, "copy_tasks": []})
+
+            self.assertNotIn(claim_key, app.state["cd2"]["auto_pull_claims"])
+            recent = app.state["cd2"]["pull"]["recent_results"][-1]
+            self.assertEqual(recent["failure_code"], "cd2_pull_missing_result")
+            self.assertTrue(recent["retryable"])
+            self.assertFalse(app.cd2_pull_recent_failure(source_path))
+
+    def test_missing_cd2_pull_result_after_retry_becomes_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watch_dir = Path(temp_dir) / "watch"
+            watch_dir.mkdir()
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_api_enabled": True,
+                "cd2_api_password": "token",
+                "cd2_remote_pull_dest_dir": "/remote-destination",
+                "cd2_local_pull_dir": str(watch_dir),
+                "watch_dir": str(watch_dir),
+                "cd2_pull_result_grace_seconds": 0,
+            })
+            source_path = "/remote/Anaconda.V2.2025.BluRay@CHDBits"
+            target_path = "/remote-destination/Anaconda.V2.2025.BluRay@CHDBits"
+            claim_key = app.cd2_auto_pull_claim_key(source_path, cfg["cd2_remote_pull_dest_dir"])
+            app.state["cd2"].setdefault("pull", {})["recent_results"] = [{
+                "source_path": source_path,
+                "dest_dir": cfg["cd2_remote_pull_dest_dir"],
+                "ok": False,
+                "failure_code": "cd2_pull_missing_result",
+                "retryable": True,
+                "created_at": app.now(),
+            }]
+            app.state["cd2"]["auto_pull_claims"] = {
+                claim_key: {
+                    "source_path": source_path,
+                    "dest_dir": cfg["cd2_remote_pull_dest_dir"],
+                    "status": "submitted",
+                    "local_path": str(watch_dir / Path(source_path).name),
+                    "result_paths": [target_path],
+                    "created_at": app.now(),
+                    "updated_at": app.now(),
+                }
+            }
+
+            class MissingResultClient:
+                def find_file_by_path(self, _path):
+                    return SimpleNamespace()
+
+                def get_sub_files(self, _path, force_refresh=False):
+                    return []
+
+            app.get_cd2_client = lambda _cfg: MissingResultClient()
+            app.reconcile_cd2_auto_pull_claims(cfg, {"connected": True, "copy_tasks": []})
+
+            self.assertNotIn(claim_key, app.state["cd2"]["auto_pull_claims"])
+            item = app.state["items"][str(watch_dir / Path(source_path).name)]
+            self.assertEqual(item["status"], "transfer_failed")
+            self.assertEqual(item["failure_code"], "cd2_pull_missing_result")
+
     def test_cd2_upload_progress_resets_stall_timer(self) -> None:
         source = "/watch/Grace 2025"
         target = "/CloudNAS/CloudDrive/finished/Grace 2025.iso"
@@ -657,6 +878,29 @@ class RevisionRecoveryTests(unittest.TestCase):
         item = app.state["items"][source]
         self.assertEqual(item["status"], "waiting_cd2_upload")
         self.assertTrue(item["cd2_upload_monitor_paused"])
+
+    def test_incomplete_upload_pagination_pauses_missing_detection(self) -> None:
+        source = "/watch/Incomplete queue 2025"
+        target = "/CloudNAS/CloudDrive/finished/Incomplete queue 2025.iso"
+        missing_since = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
+        app.state["items"][source] = {
+            "status": "waiting_cd2_upload",
+            "target": target,
+            "pack_iso": True,
+            "cd2_upload_wait_started_at": missing_since,
+            "cd2_upload_missing_since": missing_since,
+        }
+
+        app.check_waiting_cd2_uploads(
+            dict(app.DEFAULT_CONFIG),
+            {},
+            {"connected": True, "checked_at": app.now(), "upload_queue_complete": False, "human": "partial"},
+        )
+
+        item = app.state["items"][source]
+        self.assertEqual(item["status"], "waiting_cd2_upload")
+        self.assertTrue(item["cd2_upload_monitor_paused"])
+        self.assertEqual(item["cd2_upload_missing_since"], missing_since)
 
     def test_upload_recheck_resets_monitor_failure(self) -> None:
         source = "/watch/Grace 2025"

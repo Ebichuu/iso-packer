@@ -114,12 +114,15 @@ BDMV_REQUIRED_DIRS = ("PLAYLIST", "STREAM", "CLIPINF")
 COPY_TASK_DONE_STATUSES = {"3", "completed", "complete", "done", "finish", "finished", "success", "succeeded", "已完成"}
 CD2_UPLOAD_QUEUE_GRACE_POLLS = 3
 CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS = 30
+CD2_UPLOAD_PAGE_SIZE = 100
 CD2_UPLOAD_STALL_SECONDS = 30 * 60
 CD2_CANDIDATE_SCAN_TIMEOUT_SECONDS = 15
 CD2_CANDIDATE_SCAN_CACHE_SECONDS = 30
 CD2_WEBHOOK_EVENT_LIMIT = 50
 CD2_AUTO_PULL_FAILURE_COOLDOWN_SECONDS = 600
 CD2_AUTO_PULL_CREATING_TIMEOUT_SECONDS = 300
+CD2_PULL_RESULT_GRACE_SECONDS = 30
+CD2_PULL_RESULT_RETRY_LIMIT = 1
 CD2_UPLOAD_MATCH_MODES = {"alias_then_suffix", "alias_only"}
 FAILURE_LABELS = {
     "insufficient_space": "空间不足",
@@ -130,6 +133,8 @@ FAILURE_LABELS = {
     "target_exists": "上传目录已有同名ISO",
     "cd2_upload_stalled": "CD2 上传停滞",
     "cd2_upload_missing": "CD2 上传任务未出现",
+    "cd2_pull_missing_result": "CD2 拉取结果缺失",
+    "cd2_pull_local_missing": "CD2 本地挂载结果缺失",
     "unexpected_error": "任务异常",
 }
 FAILURE_SUGGESTIONS = {
@@ -141,6 +146,8 @@ FAILURE_SUGGESTIONS = {
     "target_exists": "上传目录已经有同名 ISO，但无法确认它是同一份完整文件；请手动删除、移动或改名后再重新封装。",
     "cd2_upload_stalled": "点击“重新检测”继续观察；若已在云端确认完整，可使用“确认已上传”。",
     "cd2_upload_missing": "点击“重新检测”重新读取队列；若已在云端确认完整，可使用“确认已上传”。",
+    "cd2_pull_missing_result": "CD2 复制任务已结束但目标不存在，系统会自动重试一次；仍失败时请检查 CD2 目标目录和复制权限。",
+    "cd2_pull_local_missing": "CD2 远端结果已存在但本地挂载目录不可见，请检查容器的 /CloudNAS 挂载和 CloudDrive2 挂载状态。",
     "unexpected_error": "查看系统日志里的异常堆栈，确认后可手动重新封装。",
 }
 WARNING_LABELS = {
@@ -995,6 +1002,8 @@ def load_state() -> None:
         state["cd2"] = {}
     if not isinstance(state["cd2"].get("auto_pull_claims"), dict):
         state["cd2"]["auto_pull_claims"] = {}
+    if not isinstance(state["cd2"].get("pull"), dict):
+        state["cd2"]["pull"] = {}
 
 
 def save_state_locked() -> None:
@@ -1845,6 +1854,8 @@ def record_cd2_pull_result(
     disc_type: str = "",
     result_paths=None,
     mode: str = "manual",
+    failure_code: Optional[str] = None,
+    retryable: Optional[bool] = None,
 ) -> None:
     result = {
         "source_path": source_path,
@@ -1856,6 +1867,10 @@ def record_cd2_pull_result(
         "mode": mode,
         "created_at": now(),
     }
+    if failure_code:
+        result["failure_code"] = failure_code
+    if retryable is not None:
+        result["retryable"] = bool(retryable)
     with lock:
         cd2_state = state.setdefault("cd2", {})
         pull_state = cd2_state.setdefault("pull", {})
@@ -2021,6 +2036,221 @@ def release_cd2_auto_pull_claim(source_path: str, dest_dir: str) -> None:
             save_state_locked()
 
 
+def cd2_pull_result_grace_seconds(cfg: Dict) -> int:
+    return int_config(cfg, "cd2_pull_result_grace_seconds", CD2_PULL_RESULT_GRACE_SECONDS, minimum=0)
+
+
+def cd2_pull_result_paths(claim: Dict) -> list[str]:
+    source_path = normalize_path_text((claim or {}).get("source_path"))
+    dest_dir = normalize_path_text((claim or {}).get("dest_dir"))
+    paths = [normalize_path_text(path) for path in ((claim or {}).get("result_paths") or [])]
+    if source_path and dest_dir:
+        source_name = source_path.rsplit("/", 1)[-1]
+        if source_name:
+            paths.append(normalize_path_text(f"{dest_dir.rstrip('/')}/{source_name}"))
+    result = []
+    seen = set()
+    for path in paths:
+        key = path.casefold()
+        if path and key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def cd2_remote_result_state(client, target_path: str) -> str:
+    """Return present, missing, or error without treating API errors as absence."""
+    target_path = normalize_path_text(target_path)
+    if not target_path:
+        return "missing"
+    had_error = False
+    parent_path = cd2_directory_parent(target_path) or "/"
+
+    if hasattr(client, "find_file_by_path"):
+        try:
+            found = client.find_file_by_path(target_path)
+            if found:
+                reported_path = cd2_file_path(found, parent_path)
+                if reported_path.casefold() == target_path.casefold():
+                    return "present"
+        except Exception:
+            had_error = True
+
+    if hasattr(client, "get_sub_files"):
+        for list_path in (parent_path, target_path):
+            try:
+                children = list_cd2_sub_files(client, list_path, force_refresh=True)
+            except Exception:
+                had_error = True
+                continue
+            for child in children:
+                child_path = cd2_file_path(child, list_path)
+                if child_path.casefold() == target_path.casefold():
+                    return "present"
+                if list_path.casefold() == target_path.casefold() and child_path.casefold().startswith(target_path.casefold() + "/"):
+                    return "present"
+    return "error" if had_error else "missing"
+
+
+def cd2_remote_pull_result_state(client, claim: Dict) -> str:
+    states = [cd2_remote_result_state(client, path) for path in cd2_pull_result_paths(claim)]
+    if "present" in states:
+        return "present"
+    if "error" in states:
+        return "error"
+    return "missing"
+
+
+def cd2_remote_pull_result_exists(client, claim: Dict) -> bool:
+    return cd2_remote_pull_result_state(client, claim) == "present"
+
+
+def cd2_pull_missing_result_attempts(source_path: str, dest_dir: str) -> int:
+    source_path = normalize_path_text(source_path)
+    dest_dir = normalize_path_text(dest_dir)
+    with lock:
+        recent = list((state.get("cd2", {}).get("pull", {}) or {}).get("recent_results") or [])
+    return sum(
+        1
+        for result in recent
+        if result.get("failure_code") == "cd2_pull_missing_result"
+        and normalize_path_text(result.get("source_path")) == source_path
+        and normalize_path_text(result.get("dest_dir")) == dest_dir
+    )
+
+
+def cd2_pull_item_path(cfg: Dict, claim: Dict) -> Path:
+    local_path = (claim or {}).get("local_path")
+    return Path(local_path).expanduser() if local_path else cd2_local_pull_path_for_source(cfg, claim.get("source_path") or "")
+
+
+def update_cd2_pull_item_result(
+    cfg: Dict,
+    claim: Dict,
+    status: str,
+    message: str,
+    failure_code: Optional[str] = None,
+    reset_pull_fields: bool = False,
+) -> None:
+    local_path = cd2_pull_item_path(cfg, claim)
+    key = str(local_path)
+    with lock:
+        item = state.setdefault("items", {}).setdefault(key, {})
+        item["status"] = status
+        item["last_changed"] = now()
+        item["error"] = message
+        if failure_code:
+            set_failure(item, failure_code, message)
+        if status in TERMINAL_STATUSES:
+            item["finished_at"] = item.get("finished_at") or now()
+        if status == "waiting_cd2_pull":
+            item.pop("finished_at", None)
+        if reset_pull_fields:
+            for field in (
+                "cd2_pull_source",
+                "cd2_pull_dest",
+                "cd2_pull_disc_type",
+                "cd2_pull_created_at",
+                "cd2_pull_mode",
+                "cd2_pull_result_paths",
+                "cd2_pull_finished_at",
+                "cd2_pull_seen_task",
+            ):
+                item.pop(field, None)
+        save_state_locked()
+
+
+def reconcile_cd2_auto_pull_claims(cfg: Dict, cd2_status: Optional[Dict]) -> Dict:
+    """Reconcile submitted copies against both the CD2 path and local mount."""
+    summary = {"checked": 0, "waiting": 0, "completed": 0, "retried": 0, "failed": 0}
+    if not cd2_status or not cd2_status.get("connected") or cd2_status.get("copy_tasks_complete") is False:
+        return summary
+    with lock:
+        claims = [dict(claim) for claim in cd2_auto_pull_claims_locked().values() if (claim or {}).get("status") == "submitted"]
+    if not claims:
+        return summary
+    client = get_cd2_client(cfg)
+    if client is None:
+        return summary
+    for claim in claims:
+        summary["checked"] += 1
+        source_path = normalize_path_text(claim.get("source_path"))
+        dest_dir = normalize_path_text(claim.get("dest_dir"))
+        task = next(
+            (
+                task for task in cd2_status.get("copy_tasks", []) or []
+                if cd2_task_source_matches_path(normalize_path_text(task.get("source") or ""), source_path)
+                and not task.get("done")
+            ),
+            None,
+        )
+        if task:
+            update_cd2_auto_pull_claim(source_path, dest_dir, "submitted", seen_task=True, last_task=task)
+            summary["waiting"] += 1
+            continue
+        if seconds_between(claim.get("created_at")) < cd2_pull_result_grace_seconds(cfg):
+            summary["waiting"] += 1
+            continue
+        remote_state = cd2_remote_pull_result_state(client, claim)
+        if remote_state == "error":
+            update_cd2_auto_pull_claim(source_path, dest_dir, "submitted", last_check_error="CD2 远端结果确认失败")
+            summary["waiting"] += 1
+            continue
+        local_path = cd2_pull_item_path(cfg, claim)
+        local_exists = local_path.exists()
+        if remote_state == "present" and local_exists:
+            checked_at = now()
+            update_cd2_auto_pull_claim(
+                source_path,
+                dest_dir,
+                "completed",
+                remote_confirmed_at=checked_at,
+                local_confirmed_at=checked_at,
+            )
+            update_cd2_pull_item_result(cfg, claim, "waiting_cd2_pull", "CD2 拉取结果已确认，等待封装扫描")
+            with lock:
+                item = state.setdefault("items", {}).setdefault(str(local_path), {})
+                item["cd2_pull_finished_at"] = checked_at
+                item["cd2_pull_remote_confirmed_at"] = checked_at
+                item["cd2_pull_local_confirmed_at"] = checked_at
+                item.pop("error", None)
+                save_state_locked()
+            summary["completed"] += 1
+            continue
+        if remote_state == "present":
+            message = f"CD2 远端结果已存在，但本地挂载不可见: {local_path}"
+            update_cd2_auto_pull_claim(source_path, dest_dir, "failed", failure_code="cd2_pull_local_missing", error=message)
+            record_cd2_pull_result(source_path, dest_dir, False, message, mode="auto", failure_code="cd2_pull_local_missing", retryable=False)
+            update_cd2_pull_item_result(cfg, claim, "transfer_failed", message, "cd2_pull_local_missing")
+            summary["failed"] += 1
+            log(message)
+            continue
+        attempt = cd2_pull_missing_result_attempts(source_path, dest_dir)
+        retryable = attempt < CD2_PULL_RESULT_RETRY_LIMIT
+        message = "CD2 复制任务已结束，但远端目标和本地挂载结果都不存在"
+        record_cd2_pull_result(
+            source_path,
+            dest_dir,
+            False,
+            message,
+            mode="auto",
+            failure_code="cd2_pull_missing_result",
+            retryable=retryable,
+        )
+        release_cd2_auto_pull_claim(source_path, dest_dir)
+        update_cd2_pull_item_result(
+            cfg,
+            claim,
+            "transfer_failed",
+            f"{message}，" + ("下一轮自动重试一次" if retryable else "已超过自动重试次数，请检查 CD2 任务和挂载"),
+            "cd2_pull_missing_result",
+            reset_pull_fields=retryable,
+        )
+        summary["retried" if retryable else "failed"] += 1
+        log(f"{message}: {source_path}")
+    return summary
+
+
 def cd2_remote_candidate_status(cfg: Dict, source_path: str) -> Dict:
     source_path = normalize_path_text(source_path)
     dest_dir = cd2_pull_dest_dir_from_cfg(cfg)
@@ -2033,12 +2263,23 @@ def cd2_remote_candidate_status(cfg: Dict, source_path: str) -> Dict:
     claim = cd2_auto_pull_claim_status(cfg, source_path, dest_dir)
     if claim:
         claim_status = claim.get("status") or "submitted"
+        if claim_status == "completed":
+            pull_status_label = "已完成"
+            pull_state = "done"
+        elif claim_status == "failed":
+            pull_status_label = FAILURE_LABELS.get(claim.get("failure_code"), "拉取失败")
+            pull_state = "failed"
+        else:
+            pull_status_label = "处理中"
+            pull_state = "active"
         result.update({
             "pull_mode": "auto",
             "pull_created_at": claim.get("created_at") or "",
-            "pull_status_label": "已完成" if claim_status == "completed" else "处理中",
+            "pull_status_label": pull_status_label,
         })
-        result["pull_state"] = "done" if claim_status == "completed" else "active"
+        result["pull_state"] = pull_state
+        if claim.get("failure_code"):
+            result["pull_error"] = claim.get("error") or claim.get("last_check_error") or ""
         return result
     local_key = str(local_source)
     source_match = None
@@ -2085,6 +2326,8 @@ def cd2_pull_recent_failure(source_path: str, cooldown_seconds: int = CD2_AUTO_P
         if normalize_path_text(result.get("source_path")) != source_path:
             continue
         if result.get("ok"):
+            return False
+        if result.get("retryable"):
             return False
         if seconds_between(result.get("created_at")) < cooldown_seconds:
             return True
@@ -2403,6 +2646,8 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
             "cd2_pull_mode": mode,
             "cd2_pull_result_paths": result_paths,
         })
+        clear_failure(item)
+        clear_warning(item)
         item.pop("done_at", None)
         item.pop("target", None)
         item.pop("cd2_pull_finished_at", None)
@@ -2446,6 +2691,8 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
             }
             save_state_locked()
         return None
+
+    reconcile_cd2_auto_pull_claims(cfg, cd2_status)
 
     max_active_tasks = int_config(cfg, "cd2_auto_pull_max_active_tasks", DEFAULT_CONFIG["cd2_auto_pull_max_active_tasks"], minimum=1)
     active_pull_count = cd2_auto_pull_active_count()
@@ -2547,6 +2794,16 @@ def cd2_recorded_pull_pending(item: Dict, cd2_status: Optional[Dict], finish_mis
         if item.get("cd2_pull_mode") == "auto":
             update_cd2_auto_pull_claim(source_path, dest_dir, "completed")
         return None
+    if item.get("cd2_pull_mode") == "auto":
+        claim = cd2_auto_pull_claim_status({}, source_path, dest_dir)
+        if claim and claim.get("status") == "failed":
+            return {
+                "kind": "copy",
+                "source": source_path,
+                "target": dest_dir,
+                "human": claim.get("error") or "CD2 拉取结果确认失败",
+                "done": False,
+            }
     if not cd2_status or not cd2_status.get("connected"):
         return {
             "kind": "copy",
@@ -2564,6 +2821,16 @@ def cd2_recorded_pull_pending(item: Dict, cd2_status: Optional[Dict], finish_mis
             return task
     if not finish_missing:
         return None
+    if item.get("cd2_pull_mode") == "auto":
+        claim = cd2_auto_pull_claim_status({}, source_path, dest_dir)
+        if claim and claim.get("status") != "completed":
+            return {
+                "kind": "copy",
+                "source": source_path,
+                "target": dest_dir,
+                "human": "CD2 复制任务已结束，等待远端结果确认",
+                "done": False,
+            }
     item["cd2_pull_finished_at"] = now()
     if item.get("cd2_pull_mode") == "auto":
         update_cd2_auto_pull_claim(source_path, dest_dir, "completed")
@@ -3110,6 +3377,48 @@ def attach_cd2_upload_entries(status: Dict, result) -> Dict:
     return upload_map
 
 
+def fetch_cd2_upload_pages(client) -> tuple[list, bool, Optional[str]]:
+    pages = []
+    total_count = None
+    collected = 0
+    seen_page_signatures = set()
+    page_number = 0
+    while True:
+        try:
+            result = client.get_upload_file_list(
+                get_all=False,
+                items_per_page=CD2_UPLOAD_PAGE_SIZE,
+                page_number=page_number,
+            )
+        except Exception as exc:
+            return pages, False, f"第 {page_number + 1} 页上传队列读取失败：{cd2_error_message(exc)}"
+        pages.append(result)
+        files = list(getattr(result, "uploadFiles", []) or [])
+        collected += len(files)
+        current_total = int(getattr(result, "totalCount", 0) or 0)
+        if total_count is None:
+            total_count = current_total
+        signature = tuple(
+            normalize_upload_path(getattr(item, "destPath", "") or getattr(item, "key", ""))
+            for item in files
+        )
+        if signature in seen_page_signatures:
+            return pages, False, "上传队列分页返回了重复页面，无法确认队列是否完整"
+        seen_page_signatures.add(signature)
+        if not files or (total_count and collected >= total_count) or (not total_count and len(files) < CD2_UPLOAD_PAGE_SIZE):
+            return pages, True, None
+        page_number += 1
+        if page_number >= 10000:
+            return pages, False, "上传队列分页超过安全页数上限，无法确认队列是否完整"
+
+
+def attach_cd2_upload_pages(status: Dict, pages: list) -> Dict:
+    upload_map = {}
+    for result in pages:
+        upload_map.update(attach_cd2_upload_entries(status, result))
+    return upload_map
+
+
 def summarize_cd2_queue_status(status: Dict, queue_errors: list[str]) -> None:
     parts = []
     if status["upload_count"]:
@@ -3156,21 +3465,24 @@ def fetch_cd2_uploads(cfg: Dict):
             cd2_client_cache.get("last_error") or "CD2 API 未连接",
         )
     queue_errors = []
-    try:
-        result = client.get_upload_file_list(get_all=True)
-    except Exception as exc:
-        message = cd2_error_message(exc)
+    upload_pages, upload_queue_complete, upload_error = fetch_cd2_upload_pages(client)
+    if not upload_pages:
+        message = upload_error or "CD2 上传队列为空"
         record_cd2_upload_queue_failure(message)
         return cd2_disconnected_status(cfg, status, message)
+    if upload_error:
+        queue_errors.append(upload_error)
     try:
         downloads = fetch_cd2_downloads(client)
     except Exception as exc:
         downloads = []
         queue_errors.append(f"下载任务读取失败：{cd2_error_message(exc)}")
+    copy_tasks_complete = True
     try:
         copy_tasks = fetch_cd2_copy_tasks(client)
     except Exception as exc:
         copy_tasks = []
+        copy_tasks_complete = False
         queue_errors.append(f"复制任务读取失败：{cd2_error_message(exc)}")
 
     checked_at = now()
@@ -3180,16 +3492,18 @@ def fetch_cd2_uploads(cfg: Dict):
         "checked_at": checked_at,
         "last_success_at": checked_at,
         "last_error": "；".join(queue_errors) if queue_errors else None,
-        "upload_count": int(getattr(result, "totalCount", 0) or 0),
-        "global_bytes_per_second": float(getattr(result, "globalBytesPerSecond", 0) or 0),
-        "total_bytes": int(getattr(result, "totalBytes", 0) or 0),
-        "finished_bytes": int(getattr(result, "finishedBytes", 0) or 0),
+        "upload_count": int(getattr(upload_pages[0], "totalCount", 0) or 0),
+        "global_bytes_per_second": float(getattr(upload_pages[0], "globalBytesPerSecond", 0) or 0),
+        "total_bytes": int(getattr(upload_pages[0], "totalBytes", 0) or 0),
+        "finished_bytes": int(getattr(upload_pages[0], "finishedBytes", 0) or 0),
         "download_count": len(downloads),
         "copy_task_count": len(copy_tasks),
         "downloads": downloads,
         "copy_tasks": copy_tasks,
+        "upload_queue_complete": bool(upload_queue_complete),
+        "copy_tasks_complete": copy_tasks_complete,
     })
-    upload_map = attach_cd2_upload_entries(status, result)
+    upload_map = attach_cd2_upload_pages(status, upload_pages)
     status["upload_count"] = len(status["uploads"])
     summarize_cd2_queue_status(status, queue_errors)
     status.update(cd2_cache_status_fields(cfg, status.get("checked_at"), cache_hit=False))
@@ -3315,6 +3629,10 @@ def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[
                 continue
             if not cd2_status_is_fresh_for_wait(cd2_status, wait_started_at):
                 item["error"] = "监控 CloudDrive 上传队列：等待队列刷新"
+                item["cd2_upload_monitor_paused"] = True
+                continue
+            if cd2_status.get("upload_queue_complete") is False:
+                item["error"] = "监控 CloudDrive 上传队列：分页读取不完整，暂停超时判定"
                 item["cd2_upload_monitor_paused"] = True
                 continue
             last_observed_at = item.get("cd2_upload_last_observed_at")
