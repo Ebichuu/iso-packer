@@ -840,6 +840,60 @@ class RevisionRecoveryTests(unittest.TestCase):
         self.assertEqual(payload["candidate_count"], 1)
         self.assertEqual(len(payload["errors"]), 1)
 
+    def test_cd2_pull_matching_uses_source_path_with_shared_target(self) -> None:
+        source_root = "/remote/115/00-未整理"
+        shared_target = "/mnt/115Download"
+        source_a = f"{source_root}/Movie A"
+        source_b = f"{source_root}/Movie B"
+        source_c = f"{source_root}/Movie C"
+        status = {
+            "connected": True,
+            "copy_tasks": [
+                {"done": False, "source": f"{source_a}/BDMV", "target": shared_target},
+                {"done": False, "source": source_b, "target": shared_target},
+                {"done": False, "source": "", "target": shared_target},
+            ],
+            "downloads": [],
+        }
+
+        self.assertTrue(app.cd2_remote_task_matches_pull(source_a, shared_target, status))
+        self.assertTrue(app.cd2_remote_task_matches_pull(source_b, shared_target, status))
+        self.assertFalse(app.cd2_remote_task_matches_pull(source_c, shared_target, status))
+
+        pending_a = app.cd2_recorded_pull_pending(
+            {"cd2_pull_source": source_a, "cd2_pull_dest": shared_target},
+            status,
+            finish_missing=False,
+        )
+        pending_c = app.cd2_recorded_pull_pending(
+            {"cd2_pull_source": source_c, "cd2_pull_dest": shared_target},
+            status,
+            finish_missing=False,
+        )
+        self.assertIsNotNone(pending_a)
+        self.assertEqual(pending_a["source"], f"{source_a}/BDMV")
+        self.assertIsNone(pending_c)
+
+    def test_cd2_pending_source_task_uses_aliases_without_name_fallback(self) -> None:
+        status = {
+            "connected": True,
+            "copy_tasks": [
+                {
+                    "done": False,
+                    "source": "/remote/Site A/Movie",
+                    "target": "/mnt/115Download",
+                },
+            ],
+            "downloads": [],
+        }
+        cfg = {"cd2_path_aliases": [{"local": "/watch", "remote": "/remote"}]}
+
+        matched = app.cd2_pending_source_task(Path("/watch/Site A/Movie"), status, cfg)
+        different_site = app.cd2_pending_source_task(Path("/watch/Site B/Movie"), status, cfg)
+
+        self.assertIsNotNone(matched)
+        self.assertIsNone(different_site)
+
     def test_candidate_scan_timeout_is_single_flight(self) -> None:
         release = threading.Event()
         factory_calls = []

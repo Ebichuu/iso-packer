@@ -2293,26 +2293,30 @@ def cd2_remote_task_matches_pull(source_path: str, dest_dir: str, cd2_status: Op
     if not cd2_status or not cd2_status.get("connected"):
         return False
     source_path = normalize_path_text(source_path)
-    dest_dir = normalize_path_text(dest_dir)
-    name = source_path.rsplit("/", 1)[-1]
     for task in cd2_status.get("copy_tasks", []) or []:
         if task.get("done"):
             continue
         task_source = normalize_path_text(task.get("source") or "")
-        task_target = normalize_path_text(task.get("target") or "")
-        if task_source and task_source == source_path:
-            return True
-        if name and dest_dir and task_target == normalize_path_text(dest_dir + "/" + name):
-            return True
-        if name and task_target.endswith("/" + name):
+        if cd2_task_source_matches_path(task_source, source_path):
             return True
     for task in cd2_status.get("downloads", []) or []:
         if task.get("done"):
             continue
         task_path = normalize_path_text(task.get("path") or task.get("key") or "")
-        if task_path and (task_path == source_path or (name and task_path.endswith("/" + name))):
+        if cd2_task_source_matches_path(task_path, source_path):
             return True
     return False
+
+
+def cd2_task_source_matches_path(task_source: str, source_path: str) -> bool:
+    """Match a CD2 task only when its reported source is this path or a child path."""
+    task_source = normalize_path_text(task_source)
+    source_path = normalize_path_text(source_path)
+    return bool(
+        task_source
+        and source_path
+        and (task_source == source_path or task_source.startswith(source_path + "/"))
+    )
 
 
 def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_status: Optional[Dict] = None) -> tuple[Dict, int]:
@@ -2555,12 +2559,7 @@ def cd2_recorded_pull_pending(item: Dict, cd2_status: Optional[Dict], finish_mis
         if task.get("done"):
             continue
         task_source = normalize_path_text(task.get("source") or "")
-        task_target = normalize_path_text(task.get("target") or "")
-        if (
-            (task_source and task_source == source_path)
-            or (dest_dir and (task_target == dest_dir or task_target.startswith(dest_dir + "/")))
-            or (task_target and source_path.rsplit("/", 1)[-1] and task_target.endswith("/" + source_path.rsplit("/", 1)[-1]))
-        ):
+        if cd2_task_source_matches_path(task_source, source_path):
             item["cd2_pull_seen_task"] = True
             return task
     if not finish_missing:
@@ -2882,20 +2881,36 @@ def cd2_path_matches_candidate(path: str, candidate: Path, cfg: Optional[Dict] =
     )
 
 
+def cd2_task_source_matches_candidate(path: str, candidate: Path, cfg: Optional[Dict] = None) -> bool:
+    """Match a task source through configured aliases without basename fallback."""
+    if not path or not candidate:
+        return False
+    aliases = cd2_path_aliases_from_cfg(cfg or {})
+    candidate_variants = alias_variants_for_path(str(candidate), aliases)
+    value_variants = alias_variants_for_path(path, aliases)
+    for candidate_value in candidate_variants:
+        candidate_path = normalize_match_path(candidate_value)
+        if not candidate_path:
+            continue
+        for value in value_variants:
+            value_path = normalize_match_path(value)
+            if value_path == candidate_path or value_path.startswith(candidate_path + "/"):
+                return True
+    return False
+
+
 def cd2_pending_source_task(candidate: Path, cd2_status: Optional[Dict], cfg: Optional[Dict] = None) -> Optional[Dict]:
     if not cd2_status or not cd2_status.get("connected"):
         return None
     for task in cd2_status.get("copy_tasks", []) or []:
         if task.get("done"):
             continue
-        fields = (task.get("source"), task.get("target"), task.get("key"))
-        if any(cd2_path_matches_candidate(value, candidate, cfg) for value in fields):
+        if cd2_task_source_matches_candidate(task.get("source"), candidate, cfg):
             return task
     for task in cd2_status.get("downloads", []) or []:
         if task.get("done"):
             continue
-        fields = (task.get("path"), task.get("key"))
-        if any(cd2_path_matches_candidate(value, candidate, cfg) for value in fields):
+        if cd2_task_source_matches_candidate(task.get("path"), candidate, cfg):
             return task
     return None
 
