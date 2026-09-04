@@ -444,6 +444,8 @@
         stage_text: current.stage_text,
         can_recheck: current.can_recheck === true,
         can_confirm_upload: current.can_confirm_upload === true,
+        cd2_control_kind: current.cd2_control_kind || "",
+        cd2_control_paused: current.cd2_control_paused === true,
         sort_source: sortSource,
         sort_time: parseSortTime(sortSource),
         time_label: formatSortTime(sortSource),
@@ -485,6 +487,8 @@
         failure_code: item.failure_code || "",
         can_recheck: item.can_recheck === true,
         can_confirm_upload: item.can_confirm_upload === true,
+        cd2_control_kind: item.cd2_control_kind || "",
+        cd2_control_paused: item.cd2_control_paused === true,
         finished_at: item.finished_at || item.done_at || item.updated_at || item.first_seen || "",
         sort_source: sortSource,
         sort_time: parseSortTime(sortSource),
@@ -567,6 +571,16 @@
       const byteText = item.current || item.total ? formatByteProgress(item) : "--";
       const currentMark = item.is_current ? '<span class="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[9px] font-black tracking-[0.08em] text-blue-700">当前</span>' : "";
       const metric = item.is_file_operation ? `${Number(item.current || 0)} / ${Number(item.total || 0)} 项` : byteText;
+      const controlActions = !item.is_file_operation && item.source && item.cd2_control_kind && item.phase !== "transfer_done" && item.phase !== "done"
+        ? `<div class="mt-2 flex flex-wrap justify-start gap-2">
+            ${item.cd2_control_kind === "copy" && item.cd2_control_paused ? `<button type="button" data-task-action="resume_copy" data-task-source="${escapeHtml(item.source)}" class="min-h-8 rounded-lg border border-blue-200 bg-white px-2.5 py-1 text-[10px] font-black text-blue-700 transition hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">继续复制</button>` : ""}
+            ${item.cd2_control_kind === "copy" && !item.cd2_control_paused ? `<button type="button" data-task-action="pause_copy" data-task-source="${escapeHtml(item.source)}" class="min-h-8 rounded-lg border border-amber-200 bg-white px-2.5 py-1 text-[10px] font-black text-amber-700 transition hover:bg-amber-50 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2">暂停复制</button>` : ""}
+            ${item.cd2_control_kind === "upload" && item.cd2_control_paused ? `<button type="button" data-task-action="resume_upload" data-task-source="${escapeHtml(item.source)}" class="min-h-8 rounded-lg border border-blue-200 bg-white px-2.5 py-1 text-[10px] font-black text-blue-700 transition hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">继续上传</button>` : ""}
+            ${item.cd2_control_kind === "upload" && !item.cd2_control_paused ? `<button type="button" data-task-action="pause_upload" data-task-source="${escapeHtml(item.source)}" class="min-h-8 rounded-lg border border-amber-200 bg-white px-2.5 py-1 text-[10px] font-black text-amber-700 transition hover:bg-amber-50 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2">暂停上传</button>` : ""}
+            ${item.cd2_control_kind === "copy" ? `<button type="button" data-task-action="restart_copy" data-task-source="${escapeHtml(item.source)}" class="min-h-8 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[10px] font-black text-zinc-700 transition hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-2">重启复制</button>` : ""}
+            ${item.cd2_control_kind === "copy" || item.cd2_control_kind === "upload" ? `<button type="button" data-task-action="cancel_${item.cd2_control_kind}" data-task-source="${escapeHtml(item.source)}" class="min-h-8 rounded-lg border border-red-200 bg-white px-2.5 py-1 text-[10px] font-black text-red-700 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">取消${item.cd2_control_kind === "copy" ? "复制" : "上传"}</button>` : ""}
+          </div>`
+        : "";
       const taskActions = !item.is_file_operation && item.source && (item.can_recheck || item.can_confirm_upload)
         ? `<div class="mt-2 flex flex-wrap justify-start gap-2">
             ${item.can_recheck ? `<button type="button" data-task-action="recheck" data-task-source="${escapeHtml(item.source)}" class="min-h-8 rounded-lg border border-amber-200 bg-white px-2.5 py-1 text-[10px] font-black text-amber-700 transition hover:bg-amber-50 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2">重新检测</button>` : ""}
@@ -582,7 +596,7 @@
             </div>
             <div class="truncate text-sm font-black leading-5 text-zinc-900" title="${escapeHtml(item.name)}">${escapeHtml(item.name || "--")}</div>
             <div class="truncate text-[11px] font-medium text-zinc-500" title="${escapeHtml(view.hint)}">${escapeHtml(view.hint)}</div>
-            ${taskActions}
+            ${controlActions}${taskActions}
           </div>
           <div class="min-w-0 space-y-1 font-mono text-[10px] text-zinc-500">
             <div class="truncate" title="${escapeHtml(item.output_iso)}">目标: ${escapeHtml(item.output_iso || "--")}</div>
@@ -949,6 +963,7 @@
   async function taskAction(sourcePath, action, button) {
     if (!sourcePath || !action) return;
     if (action === "confirm_upload" && !window.confirm("确认 CD2 目标 ISO 已完整上传？系统会重新校验文件，不会删除文件。")) return;
+    if (action.startsWith("cancel_") && !window.confirm("确认取消当前 CD2 任务？取消后需要重新提交。")) return;
     const originalText = button ? button.textContent : "";
     if (button) {
       button.disabled = true;
@@ -966,6 +981,34 @@
         button.disabled = false;
         button.textContent = originalText;
       }
+    }
+  }
+
+  async function loadCd2Diagnostics() {
+    const output = document.querySelector("[data-cd2-diagnostics-output]");
+    const button = document.querySelector("[data-cd2-diagnostics-refresh]");
+    if (!output) return;
+    if (button) button.disabled = true;
+    output.textContent = "读取 CD2 诊断信息...";
+    try {
+      const payload = await helper().fetchJson("/api/cd2/diagnostics");
+      const runtime = payload.runtime || {};
+      const running = payload.running || {};
+      const counts = payload.task_counts || {};
+      const errors = Object.entries(payload.errors || {}).map(([key, value]) => `${key}: ${value}`);
+      const lines = [
+        `连接: ${payload.connected ? "正常" : "不可用"}`,
+        `版本: ${runtime.product_version || "--"} / API ${runtime.cloud_api_version || "--"}`,
+        `任务: 上传 ${counts.upload ?? "--"} · 复制 ${counts.copy ?? "--"} · 下载 ${counts.download ?? "--"}`,
+        `资源: CPU ${running.cpu_usage ?? "--"}% · 内存 ${running.memory_usage_kb ?? "--"} KB · 句柄 ${running.file_handle_count ?? "--"}`,
+        `句柄匹配: ${(payload.open_file_handles || []).length}`
+      ];
+      if (errors.length) lines.push(`不可用项: ${errors.join("；")}`);
+      output.textContent = lines.join("\n");
+    } catch (error) {
+      output.textContent = error.message || "CD2 诊断读取失败";
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 
@@ -1019,6 +1062,10 @@
         taskAction(button.dataset.taskSource || "", button.dataset.taskAction || "", button);
       });
     }
+
+    const diagnosticsButton = document.querySelector("[data-cd2-diagnostics-refresh]");
+    if (diagnosticsButton) diagnosticsButton.addEventListener("click", loadCd2Diagnostics);
+    if (document.querySelector("[data-cd2-diagnostics-output]")) loadCd2Diagnostics();
 
     document.querySelectorAll("[data-task-recovery-action]").forEach((button) => {
       button.addEventListener("click", () => taskAction(

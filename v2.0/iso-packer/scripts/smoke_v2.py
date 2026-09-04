@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class FakeCd2Client:
     copy_calls = []
 
-    def copy_file(self, source_paths, dest_dir):
+    def copy_file_safe(self, source_paths, dest_dir, **_kwargs):
         call = {
             "sources": list(source_paths or []),
             "dest_dir": dest_dir,
@@ -354,6 +354,9 @@ def verify_static_contracts() -> None:
     require("CD2 上传中" in workspace_js, "workspace.js missing cd2 upload output row copy")
     require("data-task-action" in workspace_js, "workspace.js missing stalled task action hook")
     require("确认已上传" in workspace_js, "workspace.js missing manual upload confirmation action")
+    require("pause_copy" in workspace_js and "restart_copy" in workspace_js, "workspace.js missing copy task controls")
+    require("pause_upload" in workspace_js and "resume_upload" in workspace_js, "workspace.js missing upload task controls")
+    require("/api/cd2/diagnostics" in workspace_js, "workspace.js missing CD2 diagnostics endpoint")
     require("AbortSignal.timeout(20000)" in workspace_js, "workspace.js missing candidate scan timeout")
     require("file_rename" in workspace_js, "workspace.js missing rename operation status")
     require("item.progress_label ||" in workspace_js, "workspace.js should prefer explicit completion progress labels")

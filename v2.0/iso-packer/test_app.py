@@ -26,7 +26,7 @@ class FakePullClient:
             )
         ]
 
-    def copy_file(self, source_paths, dest_dir):
+    def copy_file_safe(self, source_paths, dest_dir, **_kwargs):
         self.copy_calls.append((list(source_paths or []), dest_dir))
         return SimpleNamespace(
             success=True,
@@ -561,6 +561,240 @@ class RevisionRecoveryTests(unittest.TestCase):
         self.assertEqual([item["path"] for item in status["uploads"]], ["/115/00-mkiso/Movie.2026.iso"])
         self.assertIsNone(app.find_upload_for_path(upload_map, "/115/00-mkiso/Movie.2026.iso..partial"))
 
+    def test_cd2_upload_done_requires_finish_status(self) -> None:
+        uploading = {
+            "status": "3",
+            "status_enum": "3",
+            "current": 100,
+            "total": 100,
+            "percent": 100.0,
+        }
+        finished = {
+            "status": "5",
+            "status_enum": "5",
+            "current": 100,
+            "total": 100,
+            "percent": 100.0,
+        }
+        status_missing = {
+            "status": "unknown",
+            "current": 100,
+            "total": 100,
+            "percent": 100.0,
+        }
+
+        self.assertFalse(app.cd2_upload_done(uploading))
+        self.assertTrue(app.cd2_upload_done(finished))
+        self.assertFalse(app.cd2_upload_done(status_missing))
+        for terminal_failure in ("2", "6", "8", "9", "10", "Cancelled", "Skipped", "Ignored", "Error", "FatalError"):
+            with self.subTest(status=terminal_failure):
+                self.assertFalse(app.cd2_upload_done({"status": terminal_failure, "status_enum": terminal_failure}))
+
+    def test_cd2_upload_info_preserves_numeric_status_enum(self) -> None:
+        info = app.build_cd2_upload_info(SimpleNamespace(
+            key="upload-key",
+            destPath="/115/00-mkiso/Movie.2026.iso",
+            status="Transfer",
+            statusEnum=3,
+            transferedBytes=100,
+            size=100,
+            errorMessage="",
+        ))
+
+        self.assertEqual(info["status"], "Transfer")
+        self.assertEqual(info["status_enum"], "3")
+        self.assertFalse(app.cd2_upload_done(info))
+
+    def test_cd2_copy_uses_rename_policy_and_recursive_conflict_handling(self) -> None:
+        requests = []
+
+        class Stub:
+            def CopyFile(self, request, metadata=None):
+                requests.append((request, metadata))
+                return SimpleNamespace(success=True, errorMessage="", resultFilePaths=["/remote/target/Movie (1)"])
+
+        class StubClient:
+            stub = Stub()
+
+            def _create_authorized_metadata(self):
+                return [("authorization", "Bearer test")]
+
+        result = app.cd2_copy_file(StubClient(), ["/remote/source/Movie"], "/remote/target")
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(requests), 1)
+        request, metadata = requests[0]
+        self.assertEqual(request.conflictPolicy, 1)
+        self.assertTrue(request.handleConflictRecursively)
+        self.assertEqual(list(request.theFilePaths), ["/remote/source/Movie"])
+        self.assertEqual(metadata, [("authorization", "Bearer test")])
+        self.assertEqual(app.cd2_result_success(result)[2], ["/remote/target/Movie (1)"])
+
+    def test_cd2_local_pull_path_disambiguates_same_basename_sources(self) -> None:
+        cfg = dict(app.DEFAULT_CONFIG)
+        cfg.update({"cd2_local_pull_dir": "/watch", "watch_dir": "/watch"})
+        source_a = "/remote/Site A/Movie"
+        source_b = "/remote/Site B/Movie"
+        first = app.cd2_local_pull_path_for_source(cfg, source_a)
+        app.state["items"][str(first)] = {
+            "status": "waiting_cd2_pull",
+            "cd2_pull_source": source_a,
+        }
+        second = app.cd2_local_pull_path_for_source(cfg, source_b)
+
+        self.assertEqual(first.name, "Movie")
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.name.startswith("Movie__CD2-"))
+
+    def test_cd2_copy_task_control_matches_source_and_destination(self) -> None:
+        requests = []
+
+        class Stub:
+            def PauseCopyTask(self, request, metadata=None):
+                requests.append(("pause", request, metadata))
+                return SimpleNamespace()
+
+        class Client:
+            stub = Stub()
+
+            def _create_authorized_metadata(self):
+                return [("authorization", "Bearer test")]
+
+        source = "/watch/Site A/Movie"
+        app.state["items"][source] = {
+            "status": "waiting_cd2_pull",
+            "pack_iso": True,
+            "cd2_pull_source": "/remote/Site A/Movie",
+            "cd2_pull_dest": "/watch-pull",
+        }
+        app.get_cd2_client = lambda _cfg: Client()
+        app.fetch_cd2_uploads = lambda _cfg: ({}, {
+            "connected": True,
+            "copy_tasks_complete": True,
+            "upload_queue_complete": True,
+            "copy_tasks": [{
+                "kind": "copy",
+                "source": "/remote/Site A/Movie",
+                "target": "/watch-pull",
+                "done": False,
+                "paused": False,
+            }],
+            "downloads": [],
+        })
+
+        result, status_code = app.control_cd2_task(source, "pause_copy", dict(app.DEFAULT_CONFIG))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(status_code, 200)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0][0], "pause")
+        self.assertEqual(requests[0][1].sourcePath, "/remote/Site A/Movie")
+        self.assertEqual(requests[0][1].destPath, "/watch-pull")
+        self.assertTrue(requests[0][1].pause)
+
+        app.fetch_cd2_uploads = lambda _cfg: ({}, {
+            "connected": True,
+            "copy_tasks_complete": True,
+            "upload_queue_complete": True,
+            "copy_tasks": [{
+                "kind": "copy",
+                "source": "/remote/Site B/Movie",
+                "target": "/watch-pull",
+                "done": False,
+            }],
+            "downloads": [],
+        })
+        rejected, rejected_code = app.control_cd2_task(source, "restart_copy", dict(app.DEFAULT_CONFIG))
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected_code, 409)
+        self.assertEqual(len(requests), 1)
+
+    def test_cd2_upload_task_control_uses_exact_upload_key(self) -> None:
+        requests = []
+
+        class Stub:
+            def PauseUploadFiles(self, request, metadata=None):
+                requests.append((request, metadata))
+                return SimpleNamespace()
+
+        class Client:
+            stub = Stub()
+
+            def _create_authorized_metadata(self):
+                return []
+
+        source = "/watch/Movie"
+        target = "/CloudNAS/CloudDrive/finished/Movie.iso"
+        app.state["items"][source] = {
+            "status": "waiting_cd2_upload",
+            "pack_iso": True,
+            "target": target,
+        }
+        upload = {
+            "key": "upload-key-1",
+            "path": "/115/finished/Movie.iso",
+            "status": "Transfer",
+            "status_enum": "3",
+            "current": 10,
+            "total": 100,
+            "percent": 10,
+        }
+        app.get_cd2_client = lambda _cfg: Client()
+        app.fetch_cd2_uploads = lambda _cfg: ({upload["path"]: upload}, {
+            "connected": True,
+            "copy_tasks_complete": True,
+            "upload_queue_complete": True,
+            "copy_tasks": [],
+            "downloads": [],
+        })
+
+        result, status_code = app.control_cd2_task(source, "pause_upload", dict(app.DEFAULT_CONFIG))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(status_code, 200)
+        self.assertEqual(list(requests[0][0].keys), ["upload-key-1"])
+
+    def test_cd2_push_event_and_diagnostics_are_observable(self) -> None:
+        event = app.record_cd2_push_event(SimpleNamespace(
+            messageType=4,
+            fileSystemChange=SimpleNamespace(path="/remote/Movie", newPath=""),
+        ))
+        self.assertEqual(event["type"], "FILE_SYSTEM_CHANGE")
+        self.assertEqual(app.state["cd2"]["push"]["last_event"]["path"], "/remote/Movie")
+
+        class Stub:
+            def GetRuntimeInfo(self, _request, metadata=None):
+                return SimpleNamespace(productName="CloudDrive2", productVersion="0.9", CloudAPIVersion="1.0", osInfo="Linux")
+
+            def GetRunningInfo(self, _request, metadata=None):
+                return SimpleNamespace(cpuUsage=12.5, memUsageKB=2048, totalMemoryKB=4096, uptime=100, fhTableCount=3, dirCacheCount=4, tempFileCount=5, dbDirCacheCount=6, downloadBytesPerSecond=7, uploadBytesPerSecond=8)
+
+            def GetAllTasksCount(self, _request, metadata=None):
+                return SimpleNamespace(downloadCount=1, uploadCount=2, copyTaskCount=3)
+
+            def GetOpenFileHandles(self, _request, metadata=None):
+                return SimpleNamespace(openFileHandles=[SimpleNamespace(fileHandle=1, processId=2, processPath="/cd2", filePath="/CloudNAS/Movie.iso", isDirectory=False, specialCommand="")])
+
+            def GetFileDetailProperties(self, request, metadata=None):
+                return SimpleNamespace(totalFileCount=10, totalFolderCount=2, totalSize=999, originalPath=request.path)
+
+        class Client:
+            stub = Stub()
+
+            def _create_authorized_metadata(self):
+                return []
+
+        app.get_cd2_client = lambda _cfg: Client()
+        cfg = dict(app.DEFAULT_CONFIG)
+        cfg.update({"cd2_api_enabled": True})
+        diagnostics = app.cd2_diagnostics(cfg, "/CloudNAS/Movie.iso")
+
+        self.assertTrue(diagnostics["ok"])
+        self.assertEqual(diagnostics["runtime"]["product_version"], "0.9")
+        self.assertEqual(diagnostics["task_counts"]["copy"], 3)
+        self.assertEqual(diagnostics["file_detail"]["total_size"], 999)
+        self.assertEqual(len(diagnostics["open_file_handles"]), 1)
+
     def test_cd2_upload_queue_uses_documented_pagination(self) -> None:
         class PagedUploadClient:
             def __init__(self) -> None:
@@ -1029,6 +1263,9 @@ class RevisionRecoveryTests(unittest.TestCase):
 
             def copy_file(self, source_paths, dest_dir):
                 self.copy_calls.append((source_paths, dest_dir))
+
+            def copy_file_safe(self, source_paths, dest_dir, **_kwargs):
+                return self.copy_file(source_paths, dest_dir)
 
         client = InvalidDiscClient()
         app.get_cd2_client = lambda _cfg: client

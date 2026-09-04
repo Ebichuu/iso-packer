@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from google.protobuf import empty_pb2
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from core import (
@@ -48,8 +49,10 @@ from release_calendar_fetcher import apply_tmdb_result, refresh_release_calendar
 
 try:
     from clouddrive2_client import CloudDriveClient
+    from clouddrive2_client.proto import clouddrive_pb2 as cd2_pb2
 except Exception:
     CloudDriveClient = None
+    cd2_pb2 = None
 
 # 数据目录：优先使用 /data（持久化挂载），否则使用当前目录
 APP_DIR = Path(os.getenv("DATA_DIR", "/data"))
@@ -99,6 +102,14 @@ cd2_client_cache = {
     "upload_map": {},
     "upload_status": None,
 }
+cd2_push_lock = threading.RLock()
+cd2_push_listener = {
+    "thread": None,
+    "stop_event": None,
+    "client": None,
+    "config_key": None,
+}
+cd2_push_scan_timer = None
 CD2_GRPC_CHANNEL_OPTIONS = (
     ("grpc.enable_http_proxy", 0),
     ("grpc.keepalive_time_ms", 30000),
@@ -112,6 +123,8 @@ last_log_prune = 0.0
 BDMV_REQUIRED_FILES = ("index.bdmv", "MovieObject.bdmv")
 BDMV_REQUIRED_DIRS = ("PLAYLIST", "STREAM", "CLIPINF")
 COPY_TASK_DONE_STATUSES = {"3", "completed", "complete", "done", "finish", "finished", "success", "succeeded", "已完成"}
+UPLOAD_DONE_STATUSES = {"5", "complete", "completed", "done", "finish", "finished", "success", "succeeded", "uploaded", "upload_done", "transfer_done", "已完成", "上传完成"}
+CD2_UPLOAD_CONTROL_TERMINAL_STATUSES = {"2", "5", "6", "8", "9", "10", "cancelled", "canceled", "finish", "finished", "completed", "complete", "skipped", "ignored", "error", "fatalerror", "failed"}
 CD2_UPLOAD_QUEUE_GRACE_POLLS = 3
 CD2_UPLOAD_QUEUE_GRACE_MIN_SECONDS = 30
 CD2_UPLOAD_PAGE_SIZE = 100
@@ -838,6 +851,22 @@ def cd2_state_log_events(snapshot: Dict) -> list[Dict]:
             "path": path,
             "source": "cd2_webhook",
         })
+    for item in ((cd2_state.get("push") or {}).get("recent_events") or [])[-30:]:
+        timestamp = str((item or {}).get("received_at") or "")
+        path = str((item or {}).get("path") or (item or {}).get("new_path") or "")
+        message = f"CD2 推送 · {(item or {}).get('type') or 'UNKNOWN'}"
+        if path:
+            message = f"{message}：{path}"
+        events.append({
+            "id": log_event_id("cd2_push", timestamp, message, path),
+            "time": timestamp,
+            "category": "cd2",
+            "category_label": log_category_label("cd2"),
+            "level": "info",
+            "message": message,
+            "path": path,
+            "source": "cd2_push",
+        })
     return events
 
 
@@ -1454,8 +1483,8 @@ def create_cd2_monitor_copy_tasks_for_browser_sources(cfg: Dict, sources: list[P
     client = get_cd2_client(cfg)
     if client is None:
         return {"ok": False, "message": cd2_client_cache.get("last_error") or "CD2 API 未连接"}, 400
-    if not hasattr(client, "copy_file"):
-        return {"ok": False, "message": "当前 clouddrive2-client 不支持创建复制任务"}, 400
+    if not cd2_safe_copy_available(client):
+        return {"ok": False, "message": "当前 clouddrive2-client 不支持安全复制"}, 400
 
     results = []
     ok_count = 0
@@ -1483,7 +1512,7 @@ def create_cd2_monitor_copy_tasks_for_browser_sources(cfg: Dict, sources: list[P
             record_cd2_monitor_copy_result({**result, "dest_dir": dest_dir, "checked_at": now()})
             continue
         try:
-            copy_result = client.copy_file([remote_path], dest_dir)
+            copy_result = cd2_copy_file(client, [remote_path], dest_dir)
             ok, message, result_paths = cd2_result_success(copy_result)
         except Exception as exc:
             ok, message, result_paths = False, cd2_error_message(exc), []
@@ -1581,6 +1610,70 @@ def cd2_remote_source_allowed(path: str, cfg: Dict) -> bool:
     return any(remote_path_under(candidate, root) for candidate in path_variants for root in root_variants)
 
 
+def cd2_copy_file(client, source_paths: list[str], dest_dir: str):
+    """提交不会覆盖已有文件的 CD2 复制请求。"""
+    safe_copy = getattr(client, "copy_file_safe", None)
+    if callable(safe_copy):
+        return safe_copy(
+            list(source_paths or []),
+            dest_dir,
+            conflict_policy="rename",
+            handle_conflict_recursively=True,
+        )
+
+    stub = getattr(client, "stub", None)
+    if stub is not None and cd2_pb2 is not None:
+        request = cd2_pb2.CopyFileRequest(
+            theFilePaths=list(source_paths or []),
+            destPath=dest_dir,
+            conflictPolicy=1,
+            handleConflictRecursively=True,
+        )
+        metadata_factory = getattr(client, "_create_authorized_metadata", None)
+        metadata = metadata_factory() if callable(metadata_factory) else None
+        if metadata is None:
+            return stub.CopyFile(request)
+        return stub.CopyFile(request, metadata=metadata)
+
+    raise AttributeError("当前 clouddrive2-client 不支持安全复制，已拒绝可能覆盖文件的请求")
+
+
+def cd2_safe_copy_available(client) -> bool:
+    if callable(getattr(client, "copy_file_safe", None)):
+        return True
+    stub = getattr(client, "stub", None)
+    return bool(cd2_pb2 is not None and stub is not None and callable(getattr(stub, "CopyFile", None)))
+
+
+def cd2_call_rpc(client, rpc_name: str, request=None):
+    stub = getattr(client, "stub", None)
+    if stub is not None:
+        method = getattr(stub, rpc_name, None)
+        if not callable(method):
+            raise AttributeError(f"CD2 API 不支持 {rpc_name}")
+        metadata_factory = getattr(client, "_create_authorized_metadata", None)
+        metadata = metadata_factory() if callable(metadata_factory) else None
+        if metadata is None:
+            return method(request)
+        return method(request, metadata=metadata)
+    wrapper_methods = {
+        "GetAllTasksCount": "get_all_tasks_count",
+        "GetRuntimeInfo": "get_runtime_info",
+        "GetRunningInfo": "get_running_info",
+        "GetOpenFileHandles": "get_open_file_handles",
+        "GetFileDetailProperties": "get_file_detail_properties",
+        "ForceExpireDirCache": "force_expire_dir_cache",
+    }
+    method = getattr(client, wrapper_methods.get(rpc_name, ""), None)
+    if not callable(method):
+        raise AttributeError(f"CD2 API 不支持 {rpc_name}")
+    if request is None:
+        return method()
+    if rpc_name in {"GetFileDetailProperties", "ForceExpireDirCache"}:
+        return method(getattr(request, "path", request))
+    return method(request)
+
+
 def cd2_result_success(result) -> tuple[bool, str, list[str]]:
     def field(name: str, default=None):
         if isinstance(result, dict):
@@ -1589,10 +1682,120 @@ def cd2_result_success(result) -> tuple[bool, str, list[str]]:
 
     success = field("success", True)
     error = str(field("errorMessage", "") or "")
-    paths = list(field("resultFilePaths", []) or [])
+    paths = []
+    seen_paths = set()
+    for path in list(field("resultFilePaths", []) or []):
+        normalized = normalize_path_text(path)
+        if normalized and normalized.casefold() not in seen_paths:
+            seen_paths.add(normalized.casefold())
+            paths.append(normalized)
     if success is False:
         return False, error or "CD2 复制任务创建失败", paths
     return True, error, paths
+
+
+def force_expire_cd2_dir_cache(client, path: str) -> bool:
+    path = normalize_path_text(path)
+    if not path or cd2_pb2 is None:
+        return False
+    request = cd2_pb2.FileRequest(path=path, forceRefresh=True)
+    try:
+        cd2_call_rpc(client, "ForceExpireDirCache", request)
+        return True
+    except Exception:
+        return False
+
+
+def cd2_diagnostics(cfg: Dict, path: str = "") -> Dict:
+    result = {
+        "ok": False,
+        "connected": False,
+        "checked_at": now(),
+        "runtime": None,
+        "running": None,
+        "task_counts": None,
+        "open_file_handles": [],
+        "file_detail": None,
+        "errors": {},
+    }
+    if not cfg.get("cd2_api_enabled"):
+        result["errors"]["connection"] = "CD2 API 未启用"
+        return result
+    client = get_cd2_client(cfg)
+    if client is None:
+        result["errors"]["connection"] = cd2_client_cache.get("last_error") or "CD2 API 未连接"
+        return result
+    result["connected"] = True
+    result["ok"] = True
+
+    def read_rpc(section: str, rpc_name: str, request=None):
+        try:
+            return cd2_call_rpc(client, rpc_name, request)
+        except Exception as exc:
+            result["errors"][section] = cd2_error_message(exc) or f"{rpc_name} 失败"
+            return None
+
+    runtime = read_rpc("runtime", "GetRuntimeInfo", empty_pb2.Empty())
+    if runtime is not None:
+        result["runtime"] = {
+            "product_name": str(getattr(runtime, "productName", "") or ""),
+            "product_version": str(getattr(runtime, "productVersion", "") or ""),
+            "cloud_api_version": str(getattr(runtime, "CloudAPIVersion", "") or ""),
+            "os_info": str(getattr(runtime, "osInfo", "") or ""),
+        }
+    running = read_rpc("running", "GetRunningInfo", empty_pb2.Empty())
+    if running is not None:
+        result["running"] = {
+            "cpu_usage": float_attr(running, "cpuUsage"),
+            "memory_usage_kb": int_attr(running, "memUsageKB"),
+            "total_memory_kb": int_attr(running, "totalMemoryKB"),
+            "uptime": int_attr(running, "uptime"),
+            "file_handle_count": int_attr(running, "fhTableCount"),
+            "dir_cache_count": int_attr(running, "dirCacheCount"),
+            "temp_file_count": int_attr(running, "tempFileCount"),
+            "db_dir_cache_count": int_attr(running, "dbDirCacheCount"),
+            "download_bytes_per_second": int_attr(running, "downloadBytesPerSecond"),
+            "upload_bytes_per_second": int_attr(running, "uploadBytesPerSecond"),
+        }
+    task_counts = read_rpc("task_counts", "GetAllTasksCount", empty_pb2.Empty())
+    if task_counts is not None:
+        result["task_counts"] = {
+            "download": int_attr(task_counts, "downloadCount"),
+            "upload": int_attr(task_counts, "uploadCount"),
+            "copy": int_attr(task_counts, "copyTaskCount"),
+        }
+    handles = read_rpc("open_file_handles", "GetOpenFileHandles", empty_pb2.Empty())
+    if handles is not None:
+        query = str(path or "").strip().casefold()
+        for handle in getattr(handles, "openFileHandles", []) or []:
+            item = {
+                "file_handle": int_attr(handle, "fileHandle"),
+                "process_id": int_attr(handle, "processId"),
+                "process_path": str(getattr(handle, "processPath", "") or ""),
+                "file_path": str(getattr(handle, "filePath", "") or ""),
+                "is_directory": bool(getattr(handle, "isDirectory", False)),
+                "special_command": str(getattr(handle, "specialCommand", "") or ""),
+            }
+            if not query or query in item["file_path"].casefold() or query in item["process_path"].casefold():
+                result["open_file_handles"].append(item)
+        result["open_file_handles"] = result["open_file_handles"][:200]
+    if path:
+        normalized_path = normalize_path_text(path)
+        if not normalized_path:
+            result["errors"]["file_detail"] = "文件路径为空"
+        else:
+            detail_request = cd2_pb2.FileRequest(path=normalized_path) if cd2_pb2 is not None else normalized_path
+            detail = read_rpc("file_detail", "GetFileDetailProperties", detail_request)
+            if detail is not None:
+                result["file_detail"] = {
+                    "path": normalized_path,
+                    "total_file_count": int_attr(detail, "totalFileCount"),
+                    "total_folder_count": int_attr(detail, "totalFolderCount"),
+                    "total_size": int_attr(detail, "totalSize"),
+                    "original_path": str(getattr(detail, "originalPath", "") or ""),
+                }
+    result["partial"] = bool(result["errors"])
+    return result
 
 
 def record_cd2_refresh_result(path: str, ok: bool, message: str, reason: str = "") -> None:
@@ -1635,6 +1838,7 @@ def refresh_cd2_directory(cfg: Dict, path: str, reason: str = "") -> Dict:
         record_cd2_refresh_result(remote_path, False, message, reason)
         return result
     try:
+        force_expire_cd2_dir_cache(client, remote_path)
         list(client.get_sub_files(remote_path, force_refresh=True))
     except TypeError:
         try:
@@ -1883,7 +2087,28 @@ def record_cd2_pull_result(
 
 def cd2_local_pull_path_for_source(cfg: Dict, source_path: str) -> Path:
     local_pull_dir = Path(cfg.get("cd2_local_pull_dir") or cfg.get("watch_dir") or DEFAULT_CONFIG["watch_dir"]).expanduser()
-    return (local_pull_dir / safe_filename(source_path.rsplit("/", 1)[-1])).resolve()
+    source_path = normalize_path_text(source_path)
+    base_name = safe_filename(source_path.rsplit("/", 1)[-1])
+    preferred = (local_pull_dir / base_name).resolve()
+    with lock:
+        items = list((state.get("items") or {}).items())
+        claims = list(cd2_auto_pull_claims_locked().values())
+    for key, item in items:
+        if normalize_path_text(item.get("cd2_pull_source")) == source_path:
+            return Path(key).expanduser().resolve()
+    for claim in claims:
+        if normalize_path_text((claim or {}).get("source_path")) == source_path:
+            stored = str((claim or {}).get("local_path") or "").strip()
+            if stored:
+                return Path(stored).expanduser().resolve()
+
+    preferred_key = str(preferred).casefold()
+    collision = any(str(Path(key).expanduser().resolve()).casefold() == preferred_key for key, item in items if item.get("status") != "removed")
+    collision = collision or preferred.exists()
+    if not collision:
+        return preferred
+    suffix = hashlib.sha1(source_path.encode("utf-8")).hexdigest()[:8]
+    return (local_pull_dir / f"{base_name}__CD2-{suffix}").resolve()
 
 
 def cd2_auto_pull_claim_key(source_path: str, dest_dir: str) -> str:
@@ -2065,6 +2290,7 @@ def cd2_remote_result_state(client, target_path: str) -> str:
         return "missing"
     had_error = False
     parent_path = cd2_directory_parent(target_path) or "/"
+    force_expire_cd2_dir_cache(client, parent_path)
 
     if hasattr(client, "find_file_by_path"):
         try:
@@ -2600,8 +2826,8 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
         return {"ok": False, "message": cd2_client_cache.get("last_error") or "CD2 API 未连接"}, 400
     if not hasattr(client, "get_sub_files"):
         return {"ok": False, "message": "当前 clouddrive2-client 不支持候选确认"}, 400
-    if not hasattr(client, "copy_file"):
-        return {"ok": False, "message": "当前 clouddrive2-client 不支持创建复制任务"}, 400
+    if not cd2_safe_copy_available(client):
+        return {"ok": False, "message": "当前 clouddrive2-client 不支持安全复制"}, 400
     try:
         disc_type = cd2_disc_type_for_remote_path(client, source_path)
     except Exception as exc:
@@ -2619,7 +2845,7 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
         if not claim_created:
             return {"ok": False, "message": "该远程候选已有自动拉取认领记录"}, 409
     try:
-        result = client.copy_file([source_path], dest_dir)
+        result = cd2_copy_file(client, [source_path], dest_dir)
         ok, message, result_paths = cd2_result_success(result)
     except Exception as exc:
         ok, message, result_paths = False, cd2_error_message(exc), []
@@ -2994,6 +3220,8 @@ def cd2_auth_mode_from_cfg(cfg: Dict) -> str:
 def cd2_error_message(exc: Exception) -> str:
     text = str(exc)
     lowered = text.lower()
+    if "unimplemented" in lowered or "unimplemented" in text:
+        return "当前 CD2 服务不支持该 API，已回退兼容轮询"
     if "unauthenticated" in lowered or "invalid login" in lowered:
         return "CD2 认证失败：请检查认证方式、API Token 或用户名密码"
     if "permission" in lowered or "denied" in lowered:
@@ -3093,6 +3321,13 @@ def extract_upload_status(upload) -> str:
     return "unknown"
 
 
+def extract_upload_status_enum(upload) -> str:
+    status = getattr(upload, "statusEnum", None)
+    if status not in (None, ""):
+        return str(status)
+    return ""
+
+
 def extract_task_status(task) -> str:
     for name in ("status", "statusEnum", "state", "taskStatus"):
         status = getattr(task, name, None)
@@ -3179,6 +3414,21 @@ def cd2_pending_source_task(candidate: Path, cd2_status: Optional[Dict], cfg: Op
             continue
         if cd2_task_source_matches_candidate(task.get("path"), candidate, cfg):
             return task
+    return None
+
+
+def find_upload_for_path_exact(upload_map: Dict, path: str, cfg: Optional[Dict] = None):
+    if not upload_map or not is_strict_iso_path(path):
+        return None
+    direct = {
+        normalize_upload_path(key).casefold(): value
+        for key, value in upload_map.items()
+        if is_strict_iso_path(((value or {}).get("path") or key) if isinstance(value, dict) else key)
+    }
+    for key in upload_lookup_keys(path, cfg):
+        upload = direct.get(normalize_upload_path(key).casefold())
+        if upload:
+            return upload
     return None
 
 
@@ -3324,6 +3574,7 @@ def base_cd2_upload_status(cfg: Dict) -> Dict:
         "uploads": [],
         "downloads": [],
         "copy_tasks": [],
+        "push": cd2_push_status_snapshot(),
     }
 
 
@@ -3357,6 +3608,7 @@ def build_cd2_upload_info(upload) -> Dict:
         "key": getattr(upload, "key", "") or "",
         "path": getattr(upload, "destPath", "") or "",
         "status": extract_upload_status(upload),
+        "status_enum": extract_upload_status_enum(upload),
         "current": current,
         "total": total,
         "percent": percent,
@@ -3364,6 +3616,8 @@ def build_cd2_upload_info(upload) -> Dict:
         "human": f"{percent:.1f}% ({format_size(current)} / {format_size(total)})" if total > 0 else format_size(current),
         "error": getattr(upload, "errorMessage", "") or "",
     }
+    info["done"] = cd2_upload_done(info)
+    return info
 
 
 def attach_cd2_upload_entries(status: Dict, result) -> Dict:
@@ -3519,6 +3773,10 @@ def attach_cd2_uploads(cfg: Dict, items: Dict, active: Optional[Dict] = None):
         upload = find_upload_for_path(upload_map, copy.get("target") or "", cfg)
         if upload:
             copy["cd2_upload"] = upload
+            if copy.get("cd2_control_kind") == "upload":
+                upload_status = str(upload.get("status") or "").strip().lower()
+                upload_status_enum = str(upload.get("status_enum") or "").strip().lower()
+                copy["cd2_control_paused"] = upload_status_enum == "4" or upload_status == "pause" or upload_status == "paused"
         enriched[key] = copy
     if active:
         upload = find_upload_for_path(upload_map, active.get("target") or "", cfg)
@@ -3530,14 +3788,12 @@ def attach_cd2_uploads(cfg: Dict, items: Dict, active: Optional[Dict] = None):
 
 def cd2_upload_done(upload: Optional[Dict]) -> bool:
     if not upload:
-        return True
+        return False
     status = str(upload.get("status") or "").strip().lower()
-    if status in COPY_TASK_DONE_STATUSES:
+    status_enum = str(upload.get("status_enum") or "").strip().lower()
+    if status_enum == "5" or status in UPLOAD_DONE_STATUSES:
         return True
-    total = int(upload.get("total") or 0)
-    current = int(upload.get("current") or upload.get("uploaded") or 0)
-    percent = float(upload.get("percent") or 0)
-    return (total > 0 and current >= total) or percent >= 100.0
+    return False
 
 
 def cd2_upload_queue_grace_seconds(cfg: Dict) -> int:
@@ -3783,6 +4039,139 @@ def reset_task_for_recheck(source_text: str, cfg: Dict):
         clear_cd2_upload_monitor(item)
         save_state_locked()
     return {"ok": True, "message": "已重新检测 CD2 上传队列", "source": key}, 200, "upload"
+
+
+CD2_TASK_CONTROL_LABELS = {
+    "pause_copy": "暂停 CD2 复制",
+    "resume_copy": "继续 CD2 复制",
+    "restart_copy": "重启 CD2 复制",
+    "cancel_copy": "取消 CD2 复制",
+    "pause_upload": "暂停 CD2 上传",
+    "resume_upload": "继续 CD2 上传",
+    "cancel_upload": "取消 CD2 上传",
+}
+
+
+def cd2_upload_control_is_terminal(upload: Dict) -> bool:
+    status = str((upload or {}).get("status") or "").strip().lower()
+    status_enum = str((upload or {}).get("status_enum") or "").strip().lower()
+    return status_enum in CD2_UPLOAD_CONTROL_TERMINAL_STATUSES or status in CD2_UPLOAD_CONTROL_TERMINAL_STATUSES
+
+
+def cd2_task_control_request(source_path: str, dest_path: str = "", pause: Optional[bool] = None):
+    if cd2_pb2 is None:
+        raise RuntimeError("缺少 CloudDrive2 proto 依赖")
+    if pause is None:
+        return cd2_pb2.CopyTaskRequest(sourcePath=source_path, destPath=dest_path)
+    return cd2_pb2.PauseCopyTaskRequest(sourcePath=source_path, destPath=dest_path, pause=pause)
+
+
+def cd2_upload_key_request(key: str):
+    if cd2_pb2 is None:
+        raise RuntimeError("缺少 CloudDrive2 proto 依赖")
+    return cd2_pb2.MultpleUploadFileKeyRequest(keys=[key])
+
+
+def cd2_control_task_with_api(client, kind: str, action: str, task: Dict) -> None:
+    if kind == "copy":
+        source_path = normalize_path_text(task.get("source") or "")
+        dest_path = normalize_path_text(task.get("target") or "")
+        if action == "pause_copy":
+            cd2_call_rpc(client, "PauseCopyTask", cd2_task_control_request(source_path, dest_path, pause=True))
+        elif action == "resume_copy":
+            cd2_call_rpc(client, "PauseCopyTask", cd2_task_control_request(source_path, dest_path, pause=False))
+        elif action == "restart_copy":
+            cd2_call_rpc(client, "RestartCopyTask", cd2_task_control_request(source_path, dest_path))
+        elif action == "cancel_copy":
+            cd2_call_rpc(client, "CancelCopyTask", cd2_task_control_request(source_path, dest_path))
+        else:
+            raise ValueError("不支持的 CD2 复制操作")
+        return
+
+    key = str(task.get("key") or "").strip()
+    if not key:
+        raise ValueError("CD2 上传任务缺少 key，拒绝操作")
+    request = cd2_upload_key_request(key)
+    rpc_name = {
+        "pause_upload": "PauseUploadFiles",
+        "resume_upload": "ResumeUploadFiles",
+        "cancel_upload": "CancelUploadFiles",
+    }.get(action)
+    if not rpc_name:
+        raise ValueError("不支持的 CD2 上传操作")
+    cd2_call_rpc(client, rpc_name, request)
+
+
+def control_cd2_task(source_text: str, action: str, cfg: Dict):
+    action = str(action or "").strip().lower()
+    if action not in CD2_TASK_CONTROL_LABELS:
+        return {"ok": False, "message": "不支持的 CD2 任务操作"}, 400
+    key = state_item_key(source_text)
+    if not key:
+        return {"ok": False, "message": "任务不存在或已被清理"}, 404
+    with lock:
+        item = dict(state.get("items", {}).get(key) or {})
+    kind = "copy" if action.endswith("_copy") else "upload"
+    if kind == "copy":
+        remote_source = normalize_path_text(item.get("cd2_pull_source") or "")
+        remote_dest = normalize_path_text(item.get("cd2_pull_dest") or "")
+        if not remote_source or not remote_dest:
+            return {"ok": False, "message": "当前任务没有可控的 CD2 复制源和目标"}, 409
+    else:
+        target = str(item.get("target") or "").strip()
+        if not is_strict_iso_path(target):
+            return {"ok": False, "message": "当前任务没有可控的严格 .iso 目标"}, 409
+
+    invalidate_cd2_upload_cache()
+    _upload_map, cd2_status = fetch_cd2_uploads(cfg)
+    if not cd2_status.get("connected"):
+        return {"ok": False, "message": cd2_status.get("human") or cd2_status.get("last_error") or "CD2 API 未连接"}, 409
+
+    if kind == "copy":
+        if cd2_status.get("copy_tasks_complete") is False:
+            return {"ok": False, "message": "CD2 复制任务列表读取不完整，暂不执行控制操作"}, 409
+        task = next(
+            (
+                candidate for candidate in cd2_status.get("copy_tasks", []) or []
+                if not candidate.get("done")
+                and normalize_path_text(candidate.get("source") or "") == remote_source
+                and normalize_path_text(candidate.get("target") or "") == remote_dest
+            ),
+            None,
+        )
+    else:
+        if cd2_status.get("upload_queue_complete") is False:
+            return {"ok": False, "message": "CD2 上传队列读取不完整，暂不执行控制操作"}, 409
+        upload = find_upload_for_path_exact(_upload_map, item.get("target") or "", cfg)
+        task = upload if upload and not cd2_upload_control_is_terminal(upload) else None
+    if not task:
+        return {"ok": False, "message": "当前 CD2 任务不存在、已完成或已进入终态"}, 409
+
+    client = get_cd2_client(cfg)
+    if client is None:
+        return {"ok": False, "message": cd2_client_cache.get("last_error") or "CD2 API 未连接"}, 409
+    try:
+        cd2_control_task_with_api(client, kind, action, task)
+    except Exception as exc:
+        return {"ok": False, "message": f"{CD2_TASK_CONTROL_LABELS[action]}失败：{cd2_error_message(exc)}"}, 400
+
+    checked_at = now()
+    with lock:
+        state_item = state.get("items", {}).get(key)
+        if state_item is not None:
+            state_item["cd2_task_control_last_action"] = action
+            state_item["cd2_task_control_at"] = checked_at
+            state_item["error"] = f"已提交{CD2_TASK_CONTROL_LABELS[action]}"
+            save_state_locked()
+    invalidate_cd2_upload_cache()
+    return {
+        "ok": True,
+        "message": f"{CD2_TASK_CONTROL_LABELS[action]}已提交",
+        "source": key,
+        "kind": kind,
+        "action": action,
+        "task": task,
+    }, 200
 
 
 def confirm_cd2_upload_task(source_text: str, cfg: Dict):
@@ -5018,6 +5407,15 @@ def visible_iso_items(items: Dict) -> Dict:
             status == "waiting_cd2_upload"
             or failure_code in CD2_UPLOAD_RECHECK_FAILURES
         )
+        if status == "waiting_cd2_pull" and safe_item.get("cd2_pull_source") and safe_item.get("cd2_pull_dest"):
+            safe_item["cd2_control_kind"] = "copy"
+            safe_item["cd2_control_paused"] = bool((safe_item.get("cd2_source_task") or {}).get("paused"))
+        elif status == "waiting_cd2_upload" and is_strict_iso_path(safe_item.get("target") or ""):
+            safe_item["cd2_control_kind"] = "upload"
+            safe_item["cd2_control_paused"] = False
+        else:
+            safe_item["cd2_control_kind"] = ""
+            safe_item["cd2_control_paused"] = False
         if safe_item.get("failure_code") or safe_item.get("warning_code"):
             safe_item["issue_text"] = task_issue_text(safe_item)
         visible[key] = safe_item
@@ -5832,6 +6230,187 @@ def create_isolated_cd2_client(cfg: Dict):
         return None, cd2_error_message(exc)
 
 
+def cd2_push_status_snapshot() -> Dict:
+    with lock:
+        push = dict((state.get("cd2") or {}).get("push") or {})
+    thread = cd2_push_listener.get("thread")
+    push["running"] = bool(thread and thread.is_alive())
+    push.setdefault("supported", None)
+    push.setdefault("connected", False)
+    push.setdefault("last_error", None)
+    return push
+
+
+def cd2_push_message_type(message) -> str:
+    value = getattr(message, "messageType", "")
+    try:
+        if cd2_pb2 is not None and isinstance(value, int):
+            return cd2_pb2.CloudDrivePushMessage.MessageType.Name(value)
+    except (TypeError, ValueError):
+        pass
+    text = str(value or "").strip()
+    if text.isdigit() and cd2_pb2 is not None:
+        try:
+            return cd2_pb2.CloudDrivePushMessage.MessageType.Name(int(text))
+        except (TypeError, ValueError):
+            pass
+    return text.rsplit(".", 1)[-1].upper() if text else "UNKNOWN"
+
+
+def cd2_push_event_from_message(message) -> Dict:
+    message_type = cd2_push_message_type(message)
+    change = getattr(message, "fileSystemChange", None)
+    path = str(getattr(change, "path", "") or "") if change is not None else ""
+    new_path = str(getattr(change, "newPath", "") or "") if change is not None else ""
+    return {
+        "type": message_type,
+        "path": normalize_path_text(path),
+        "new_path": normalize_path_text(new_path),
+        "received_at": now(),
+    }
+
+
+def record_cd2_push_event(message) -> Dict:
+    event = cd2_push_event_from_message(message)
+    with lock:
+        push = state.setdefault("cd2", {}).setdefault("push", {})
+        recent = list(push.get("recent_events") or [])
+        recent.append(event)
+        push.update({
+            "connected": True,
+            "supported": True,
+            "last_connected_at": event["received_at"],
+            "last_event": event,
+            "recent_events": recent[-CD2_WEBHOOK_EVENT_LIMIT:],
+            "last_error": None,
+        })
+        save_state_locked()
+    return event
+
+
+def set_cd2_push_status(**updates) -> None:
+    with lock:
+        push = state.setdefault("cd2", {}).setdefault("push", {})
+        push.update(updates)
+        save_state_locked()
+
+
+def schedule_cd2_push_recheck(cfg: Dict, event: Dict) -> None:
+    global cd2_push_scan_timer
+    kind = "files" if event.get("type") == "FILE_SYSTEM_CHANGE" else "tasks"
+    path = event.get("path") or event.get("new_path") or ""
+    with cd2_push_lock:
+        if cd2_push_scan_timer is not None and cd2_push_scan_timer.is_alive():
+            return
+
+        def run_recheck():
+            global cd2_push_scan_timer
+            with cd2_push_lock:
+                cd2_push_scan_timer = None
+            try:
+                if kind == "files":
+                    if path and cfg.get("cd2_refresh_enabled"):
+                        refresh_cd2_directory(cfg, path, "push_message")
+                    scan_once(cfg)
+                else:
+                    recheck_waiting_cd2_uploads(cfg)
+            except Exception as exc:
+                log(f"CD2 PushMessage 复查失败: {cd2_error_message(exc)}")
+
+        cd2_push_scan_timer = threading.Timer(1.0, run_recheck)
+        cd2_push_scan_timer.daemon = True
+        cd2_push_scan_timer.start()
+
+
+def stop_cd2_push_listener() -> None:
+    global cd2_push_scan_timer
+    with cd2_push_lock:
+        stop_event = cd2_push_listener.get("stop_event")
+        client = cd2_push_listener.get("client")
+        if stop_event is not None:
+            stop_event.set()
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        cd2_push_listener.update({"stop_event": None, "client": None, "config_key": None})
+        if cd2_push_scan_timer is not None:
+            cd2_push_scan_timer.cancel()
+            cd2_push_scan_timer = None
+    set_cd2_push_status(connected=False, running=False)
+
+
+def cd2_push_listener_loop(cfg: Dict, stop_event: threading.Event) -> None:
+    retry_seconds = 2
+    while not stop_event.is_set():
+        client, error = create_isolated_cd2_client(cfg)
+        if client is None:
+            set_cd2_push_status(connected=False, supported=True, last_error=error or "CD2 PushMessage 连接失败")
+            if stop_event.wait(retry_seconds):
+                break
+            retry_seconds = min(60, retry_seconds * 2)
+            continue
+        with cd2_push_lock:
+            cd2_push_listener["client"] = client
+        try:
+            stub = getattr(client, "stub", None)
+            if stub is None or not callable(getattr(stub, "PushMessage", None)):
+                set_cd2_push_status(connected=False, supported=False, last_error="当前 CD2 客户端不支持 PushMessage，已回退轮询")
+                return
+            metadata_factory = getattr(client, "_create_authorized_metadata", None)
+            metadata = metadata_factory() if callable(metadata_factory) else None
+            stream = stub.PushMessage(
+                empty_pb2.Empty(),
+                **({"metadata": metadata} if metadata is not None else {}),
+            )
+            set_cd2_push_status(connected=True, supported=True, last_connected_at=now(), last_error=None)
+            retry_seconds = 2
+            for message in stream:
+                if stop_event.is_set():
+                    break
+                event = record_cd2_push_event(message)
+                if event["type"] == "FORCE_EXIT":
+                    set_cd2_push_status(connected=False, last_error="CD2 PushMessage 收到 FORCE_EXIT，等待重新认证")
+                    stop_event.set()
+                    break
+                schedule_cd2_push_recheck(cfg, event)
+        except Exception as exc:
+            if not stop_event.is_set():
+                set_cd2_push_status(connected=False, supported=True, last_error=cd2_error_message(exc))
+        finally:
+            with cd2_push_lock:
+                if cd2_push_listener.get("client") is client:
+                    cd2_push_listener["client"] = None
+            try:
+                client.close()
+            except Exception:
+                pass
+        if stop_event.is_set():
+            break
+        if stop_event.wait(retry_seconds):
+            break
+        retry_seconds = min(60, retry_seconds * 2)
+
+
+def start_cd2_push_listener(cfg: Dict) -> None:
+    if not cfg.get("cd2_api_enabled"):
+        stop_cd2_push_listener()
+        return
+    config_key = cd2_client_key_from_cfg(cfg)
+    with cd2_push_lock:
+        thread = cd2_push_listener.get("thread")
+        if thread is not None and thread.is_alive() and cd2_push_listener.get("config_key") == config_key:
+            return
+    stop_cd2_push_listener()
+    stop_event = threading.Event()
+    thread = threading.Thread(target=cd2_push_listener_loop, args=(dict(cfg), stop_event), daemon=True, name="cd2-push-listener")
+    with cd2_push_lock:
+        cd2_push_listener.update({"thread": thread, "stop_event": stop_event, "config_key": config_key})
+    set_cd2_push_status(running=True, supported=None, connected=False, last_error=None)
+    thread.start()
+
+
 def cd2_candidate_scan_config_key(cfg: Dict):
     return (
         cd2_client_key_from_cfg(cfg),
@@ -6381,6 +6960,7 @@ def start_worker_once():
         load_state()
         cleanup_interrupted_output_partials(cfg)
         recover_interrupted_task(cfg)
+        start_cd2_push_listener(cfg)
         t = threading.Thread(target=scanner_loop, daemon=True)
         t.start()
         worker_started = True
@@ -6596,8 +7176,10 @@ def settings():
         cfg["cd2_webhook_secret"] = new_cd2_webhook_secret
     save_config(cfg)
     if old_cd2_key != cd2_client_key_from_cfg(cfg):
+        stop_cd2_push_listener()
         close_cd2_client()
         reset_cd2_candidate_scan_controller()
+    start_cd2_push_listener(cfg)
     Path(cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg["output_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
     Path(cfg.get("cd2_local_pull_dir") or cfg["watch_dir"]).expanduser().mkdir(parents=True, exist_ok=True)
@@ -6625,6 +7207,13 @@ def api_cd2_test():
         "message": status.get("human") or status.get("last_error") or "CD2 连接失败",
         "status": status,
     }), 400
+
+
+@app.route("/api/cd2/diagnostics")
+def api_cd2_diagnostics():
+    cfg = load_config()
+    path = normalize_path_text(request.args.get("path") or "")
+    return jsonify(cd2_diagnostics(cfg, path))
 
 
 @app.route("/api/cd2/directories", methods=["POST"])
@@ -6745,6 +7334,9 @@ def api_task_action():
         return jsonify(result), status_code
     if action == "confirm_upload":
         result, status_code = confirm_cd2_upload_task(source_text, cfg)
+        return jsonify(result), status_code
+    if action in CD2_TASK_CONTROL_LABELS:
+        result, status_code = control_cd2_task(source_text, action, cfg)
         return jsonify(result), status_code
     return jsonify({"ok": False, "message": "不支持的任务操作"}), 400
 
