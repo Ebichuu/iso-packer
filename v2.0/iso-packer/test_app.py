@@ -6,7 +6,6 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -189,9 +188,13 @@ class RevisionRecoveryTests(unittest.TestCase):
             "percent": 100,
         }
         failed_download = {"status": "failed", "total": 100, "current": 100}
+        completed_copy = {"status": "3", "total": 0, "current": 0}
+        active_copy_at_full_progress = {"status": "2", "total": 100, "current": 100}
 
         self.assertFalse(app.is_copy_task_done(failed_copy))
         self.assertFalse(app.is_download_done(failed_download))
+        self.assertTrue(app.is_copy_task_done(completed_copy))
+        self.assertFalse(app.is_copy_task_done(active_copy_at_full_progress))
 
     def test_manual_pull_disappearing_from_queue_stays_pending(self) -> None:
         item = {
@@ -208,7 +211,7 @@ class RevisionRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(pending)
         self.assertFalse(item.get("cd2_pull_finished_at"))
 
-    def test_seen_upload_missing_from_queue_does_not_count_as_delivered(self) -> None:
+    def test_upload_missing_from_api_stays_waiting(self) -> None:
         source = "/watch/Movie 2025"
         target = "/CloudNAS/CloudDrive/finished/Movie 2025.iso"
         app.state["items"][source] = {
@@ -227,7 +230,7 @@ class RevisionRecoveryTests(unittest.TestCase):
         item = app.state["items"][source]
         self.assertEqual(item["status"], "waiting_cd2_upload")
         self.assertNotIn("done_at", item)
-        self.assertTrue(item.get("cd2_upload_missing_since"))
+        self.assertIn("当前未返回对应任务", item["error"])
 
     def test_incomplete_cd2_task_queue_blocks_packaging(self) -> None:
         with patch.object(app, "disc_structure_ready", return_value=(True, "")):
@@ -635,41 +638,6 @@ class RevisionRecoveryTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, -15)
             self.assertIn("超过", result.stderr)
-
-    def test_remote_pull_structure_requires_complete_bdmv(self) -> None:
-        target = "/remote-destination/Movie"
-
-        class RemoteStructureClient:
-            def find_file_by_path(self, path):
-                if path == target:
-                    return SimpleNamespace(fullPathName=target, name="Movie", isDirectory=True)
-                return None
-
-            def get_sub_files(self, path, force_refresh=False):
-                if path == "/remote-destination":
-                    return [SimpleNamespace(name="Movie", fullPathName=target, isDirectory=True)]
-                if path == target:
-                    return [SimpleNamespace(name="BDMV", fullPathName=f"{target}/BDMV", isDirectory=True)]
-                if path == f"{target}/BDMV":
-                    return [
-                        SimpleNamespace(name="index.bdmv", fullPathName=f"{path}/index.bdmv", isDirectory=False),
-                        SimpleNamespace(name="MovieObject.bdmv", fullPathName=f"{path}/MovieObject.bdmv", isDirectory=False),
-                        SimpleNamespace(name="PLAYLIST", fullPathName=f"{path}/PLAYLIST", isDirectory=True),
-                        SimpleNamespace(name="STREAM", fullPathName=f"{path}/STREAM", isDirectory=True),
-                        SimpleNamespace(name="CLIPINF", fullPathName=f"{path}/CLIPINF", isDirectory=True),
-                    ]
-                return []
-
-        claim = {
-            "source_path": "/remote/Movie",
-            "dest_dir": "/remote-destination",
-            "disc_type": "BDMV",
-            "result_paths": [target],
-        }
-        self.assertEqual(
-            app.cd2_remote_pull_structure_state(RemoteStructureClient(), claim),
-            "complete",
-        )
 
     def test_deferred_cleanup_runs_after_cd2_upload_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1159,186 +1127,199 @@ class RevisionRecoveryTests(unittest.TestCase):
         self.assertEqual(status["upload_count"], 2)
         self.assertEqual(list(upload_map), ["/115/00-mkiso/One.iso", "/115/00-mkiso/Two.iso"])
 
-    def test_completed_cd2_pull_claim_requires_remote_and_local_result(self) -> None:
+    def _seed_cd2_pull_claim(self, cfg, watch_dir, source_path, status="submitted", failure_code=None):
+        claim_key = app.cd2_auto_pull_claim_key(source_path, cfg["cd2_remote_pull_dest_dir"])
+        claim = {
+            "source_path": source_path,
+            "dest_dir": cfg["cd2_remote_pull_dest_dir"],
+            "status": status,
+            "local_path": str(watch_dir / Path(source_path).name),
+            "created_at": app.now(),
+            "updated_at": app.now(),
+        }
+        if failure_code:
+            claim["failure_code"] = failure_code
+        app.state["cd2"]["auto_pull_claims"] = {claim_key: claim}
+        return claim_key
+
+    def test_cd2_copy_api_progress_is_authoritative(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             watch_dir = Path(temp_dir) / "watch"
             watch_dir.mkdir()
             cfg = dict(app.DEFAULT_CONFIG)
             cfg.update({
-                "cd2_api_enabled": True,
-                "cd2_api_password": "token",
                 "cd2_remote_pull_dest_dir": "/remote-destination",
                 "cd2_local_pull_dir": str(watch_dir),
                 "watch_dir": str(watch_dir),
-                "cd2_pull_result_grace_seconds": 0,
             })
             source_path = "/remote/Mercy.2026.V2.2160p.BluRay@CHDBits"
-            target_path = "/remote-destination/Mercy.2026.V2.2160p.BluRay@CHDBits"
-            local_path = watch_dir / Path(source_path).name
-            local_path.mkdir()
-            claim_key = app.cd2_auto_pull_claim_key(source_path, cfg["cd2_remote_pull_dest_dir"])
-            app.state["cd2"]["auto_pull_claims"] = {
-                claim_key: {
-                    "source_path": source_path,
-                    "dest_dir": cfg["cd2_remote_pull_dest_dir"],
-                    "status": "submitted",
-                    "local_path": str(local_path),
-                    "result_paths": [target_path],
-                    "created_at": app.now(),
-                    "updated_at": app.now(),
-                }
+            claim_key = self._seed_cd2_pull_claim(cfg, watch_dir, source_path)
+            task = {
+                "kind": "copy",
+                "source": source_path,
+                "target": cfg["cd2_remote_pull_dest_dir"],
+                "status": "2",
+                "current": 42,
+                "total": 100,
+                "percent": 42.0,
+                "done_files": 1,
+                "total_files": 3,
+                "done": False,
+                "human": "CD2 复制中 42.0%",
             }
 
-            class RemoteResultClient:
-                def find_file_by_path(self, path):
-                    self.path = path
-                    return SimpleNamespace(fullPathName=target_path, name=Path(target_path).name, isDirectory=True)
+            summary = app.reconcile_cd2_auto_pull_claims(
+                cfg,
+                {"connected": True, "copy_tasks_complete": True, "copy_tasks": [task]},
+            )
 
-            app.get_cd2_client = lambda _cfg: RemoteResultClient()
-            app.reconcile_cd2_auto_pull_claims(cfg, {"connected": True, "copy_tasks": []})
+            self.assertEqual(summary["waiting"], 1)
+            claim = app.state["cd2"]["auto_pull_claims"][claim_key]
+            self.assertEqual(claim["status"], "submitted")
+            self.assertEqual(claim["last_task"]["current"], 42)
+            item = app.state["items"][str(watch_dir / Path(source_path).name)]
+            self.assertEqual(item["status"], "waiting_cd2_pull")
+            self.assertIn("42.0%", item["error"])
 
-            self.assertEqual(app.state["cd2"]["auto_pull_claims"][claim_key]["status"], "completed")
-
-    def test_missing_cd2_pull_result_releases_claim_for_one_retry(self) -> None:
+    def test_cd2_copy_api_completion_marks_pull_completed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             watch_dir = Path(temp_dir) / "watch"
             watch_dir.mkdir()
             cfg = dict(app.DEFAULT_CONFIG)
             cfg.update({
-                "cd2_api_enabled": True,
-                "cd2_api_password": "token",
                 "cd2_remote_pull_dest_dir": "/remote-destination",
                 "cd2_local_pull_dir": str(watch_dir),
                 "watch_dir": str(watch_dir),
-                "cd2_pull_result_grace_seconds": 0,
             })
-            source_path = "/remote/Americana.2025.BluRay@OurBits"
-            target_path = "/remote-destination/Americana.2025.BluRay@OurBits"
-            claim_key = app.cd2_auto_pull_claim_key(source_path, cfg["cd2_remote_pull_dest_dir"])
-            app.state["cd2"]["auto_pull_claims"] = {
-                claim_key: {
-                    "source_path": source_path,
-                    "dest_dir": cfg["cd2_remote_pull_dest_dir"],
-                    "status": "submitted",
-                    "local_path": str(watch_dir / Path(source_path).name),
-                    "result_paths": [target_path],
-                    "created_at": app.now(),
-                    "updated_at": app.now(),
-                }
+            source_path = "/remote/Mercy.2026.V2.2160p.BluRay@CHDBits"
+            claim_key = self._seed_cd2_pull_claim(cfg, watch_dir, source_path)
+            task = {
+                "kind": "copy",
+                "source": source_path,
+                "target": cfg["cd2_remote_pull_dest_dir"],
+                "status": "3",
+                "current": 100,
+                "total": 100,
+                "percent": 100.0,
+                "done_files": 1,
+                "total_files": 1,
+                "done": True,
+                "human": "CD2 复制完成 100.0%",
             }
 
-            class MissingResultClient:
-                def find_file_by_path(self, _path):
-                    return SimpleNamespace()
+            app.reconcile_cd2_auto_pull_claims(
+                cfg,
+                {"connected": True, "copy_tasks_complete": True, "copy_tasks": [task]},
+            )
 
-                def get_sub_files(self, _path, force_refresh=False):
-                    return []
+            claim = app.state["cd2"]["auto_pull_claims"][claim_key]
+            self.assertEqual(claim["status"], "completed")
+            item = app.state["items"][str(watch_dir / Path(source_path).name)]
+            self.assertEqual(item["status"], "waiting_cd2_pull")
+            self.assertTrue(item.get("cd2_pull_finished_at"))
 
-            app.get_cd2_client = lambda _cfg: MissingResultClient()
-            app.reconcile_cd2_auto_pull_claims(cfg, {"connected": True, "copy_tasks": []})
-
-            self.assertNotIn(claim_key, app.state["cd2"]["auto_pull_claims"])
-            recent = app.state["cd2"]["pull"]["recent_results"][-1]
-            self.assertEqual(recent["failure_code"], "cd2_pull_missing_result")
-            self.assertTrue(recent["retryable"])
-            self.assertFalse(app.cd2_pull_recent_failure(source_path))
-
-    def test_missing_cd2_pull_result_after_retry_becomes_failure(self) -> None:
+    def test_cd2_copy_api_failure_is_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             watch_dir = Path(temp_dir) / "watch"
             watch_dir.mkdir()
             cfg = dict(app.DEFAULT_CONFIG)
             cfg.update({
-                "cd2_api_enabled": True,
-                "cd2_api_password": "token",
                 "cd2_remote_pull_dest_dir": "/remote-destination",
                 "cd2_local_pull_dir": str(watch_dir),
                 "watch_dir": str(watch_dir),
-                "cd2_pull_result_grace_seconds": 0,
             })
-            source_path = "/remote/Anaconda.V2.2025.BluRay@CHDBits"
-            target_path = "/remote-destination/Anaconda.V2.2025.BluRay@CHDBits"
-            claim_key = app.cd2_auto_pull_claim_key(source_path, cfg["cd2_remote_pull_dest_dir"])
-            app.state["cd2"].setdefault("pull", {})["recent_results"] = [{
-                "source_path": source_path,
-                "dest_dir": cfg["cd2_remote_pull_dest_dir"],
-                "ok": False,
-                "failure_code": "cd2_pull_missing_result",
-                "retryable": True,
-                "created_at": app.now(),
-            }]
-            app.state["cd2"]["auto_pull_claims"] = {
-                claim_key: {
-                    "source_path": source_path,
-                    "dest_dir": cfg["cd2_remote_pull_dest_dir"],
-                    "status": "submitted",
-                    "local_path": str(watch_dir / Path(source_path).name),
-                    "result_paths": [target_path],
-                    "created_at": app.now(),
-                    "updated_at": app.now(),
-                }
+            source_path = "/remote/Mercy.2026.V2.2160p.BluRay@CHDBits"
+            claim_key = self._seed_cd2_pull_claim(cfg, watch_dir, source_path)
+            task = {
+                "kind": "copy",
+                "source": source_path,
+                "target": cfg["cd2_remote_pull_dest_dir"],
+                "status": "4",
+                "failed_files": 1,
+                "done": False,
+                "errors": ["目标空间不足"],
+                "human": "CD2 复制失败",
             }
 
-            class MissingResultClient:
-                def find_file_by_path(self, _path):
-                    return SimpleNamespace()
+            app.reconcile_cd2_auto_pull_claims(
+                cfg,
+                {"connected": True, "copy_tasks_complete": True, "copy_tasks": [task]},
+            )
 
-                def get_sub_files(self, _path, force_refresh=False):
-                    return []
-
-            app.get_cd2_client = lambda _cfg: MissingResultClient()
-            app.reconcile_cd2_auto_pull_claims(cfg, {"connected": True, "copy_tasks": []})
-
-            self.assertNotIn(claim_key, app.state["cd2"]["auto_pull_claims"])
+            claim = app.state["cd2"]["auto_pull_claims"][claim_key]
+            self.assertEqual(claim["status"], "failed")
+            self.assertEqual(claim["failure_code"], "cd2_copy_failed")
             item = app.state["items"][str(watch_dir / Path(source_path).name)]
             self.assertEqual(item["status"], "transfer_failed")
-            self.assertEqual(item["failure_code"], "cd2_pull_missing_result")
+            self.assertEqual(item["failure_code"], "cd2_copy_failed")
 
-    def test_cd2_upload_progress_resets_stall_timer(self) -> None:
+    def test_cd2_copy_api_missing_task_stays_pending_without_remote_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watch_dir = Path(temp_dir) / "watch"
+            watch_dir.mkdir()
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_remote_pull_dest_dir": "/remote-destination",
+                "cd2_local_pull_dir": str(watch_dir),
+                "watch_dir": str(watch_dir),
+            })
+            source_path = "/remote/Mercy.2026.V2.2160p.BluRay@CHDBits"
+            claim_key = self._seed_cd2_pull_claim(cfg, watch_dir, source_path)
+            with patch.object(app, "get_cd2_client", side_effect=AssertionError("不应访问远端结果")):
+                summary = app.reconcile_cd2_auto_pull_claims(
+                    cfg,
+                    {"connected": True, "copy_tasks_complete": True, "copy_tasks": []},
+                )
+
+            self.assertEqual(summary["waiting"], 1)
+            self.assertEqual(app.state["cd2"]["auto_pull_claims"][claim_key]["status"], "submitted")
+            item = app.state["items"][str(watch_dir / Path(source_path).name)]
+            self.assertEqual(item["status"], "waiting_cd2_pull")
+            self.assertNotIn("recent_results", app.state["cd2"].get("pull", {}))
+
+    def test_legacy_pull_failure_is_recovered_by_live_api_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watch_dir = Path(temp_dir) / "watch"
+            watch_dir.mkdir()
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_remote_pull_dest_dir": "/remote-destination",
+                "cd2_local_pull_dir": str(watch_dir),
+                "watch_dir": str(watch_dir),
+            })
+            source_path = "/remote/Mercy.2026.V2.2160p.BluRay@CHDBits"
+            claim_key = self._seed_cd2_pull_claim(
+                cfg, watch_dir, source_path, status="failed", failure_code="cd2_pull_local_missing"
+            )
+            task = {
+                "kind": "copy",
+                "source": source_path,
+                "target": cfg["cd2_remote_pull_dest_dir"],
+                "status": "1",
+                "current": 10,
+                "total": 100,
+                "done": False,
+                "human": "CD2 复制中 10.0%",
+            }
+            app.reconcile_cd2_auto_pull_claims(
+                cfg,
+                {"connected": True, "copy_tasks_complete": True, "copy_tasks": [task]},
+            )
+
+            self.assertEqual(app.state["cd2"]["auto_pull_claims"][claim_key]["status"], "submitted")
+            item = app.state["items"][str(watch_dir / Path(source_path).name)]
+            self.assertEqual(item["status"], "waiting_cd2_pull")
+            self.assertNotIn("failure_code", item)
+
+    def test_cd2_upload_without_progress_stays_waiting(self) -> None:
         source = "/watch/Grace 2025"
         target = "/CloudNAS/CloudDrive/finished/Grace 2025.iso"
-        old_progress_at = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
-        recent_observation = (datetime.now() - timedelta(seconds=10)).strftime("%Y-%m-%d %H:%M:%S")
         app.state["items"][source] = {
             "status": "waiting_cd2_upload",
             "target": target,
             "pack_iso": True,
-            "cd2_upload_wait_started_at": old_progress_at,
-            "cd2_upload_seen_at": old_progress_at,
-            "cd2_upload_progress_at": old_progress_at,
+            "failure_code": "cd2_upload_stalled",
             "cd2_upload_progress_current": 100,
-            "cd2_upload_progress_percent": 10.0,
-            "cd2_upload_last_observed_at": recent_observation,
-        }
-        upload = {"path": target, "status": "uploading", "current": 101, "total": 1000, "percent": 10.1}
-        checked_at = app.now()
-
-        app.check_waiting_cd2_uploads(
-            dict(app.DEFAULT_CONFIG),
-            {app.normalize_upload_path(target): upload},
-            {"connected": True, "checked_at": checked_at, "human": "connected"},
-        )
-
-        item = app.state["items"][source]
-        self.assertEqual(item["status"], "waiting_cd2_upload")
-        self.assertEqual(item["cd2_upload_progress_current"], 101)
-        self.assertEqual(item["cd2_upload_progress_at"], checked_at)
-
-    def test_cd2_upload_stalls_after_thirty_minutes_without_progress(self) -> None:
-        source = "/watch/Grace 2025"
-        target = "/CloudNAS/CloudDrive/finished/Grace 2025.iso"
-        old_progress_at = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
-        recent_observation = (datetime.now() - timedelta(seconds=10)).strftime("%Y-%m-%d %H:%M:%S")
-        app.state["items"][source] = {
-            "status": "waiting_cd2_upload",
-            "target": target,
-            "pack_iso": True,
-            "cd2_upload_wait_started_at": old_progress_at,
-            "cd2_upload_seen_at": old_progress_at,
-            "cd2_upload_progress_at": old_progress_at,
-            "cd2_upload_progress_current": 100,
-            "cd2_upload_progress_percent": 10.0,
-            "cd2_upload_last_observed_at": recent_observation,
         }
         upload = {"path": target, "status": "uploading", "current": 100, "total": 1000, "percent": 10.0}
 
@@ -1349,82 +1330,36 @@ class RevisionRecoveryTests(unittest.TestCase):
         )
 
         item = app.state["items"][source]
-        self.assertEqual(item["status"], "transfer_failed")
-        self.assertEqual(item["failure_code"], "cd2_upload_stalled")
-        self.assertEqual(item["target"], target)
+        self.assertEqual(item["status"], "waiting_cd2_upload")
+        self.assertNotIn("failure_code", item)
+        self.assertEqual(item["cd2_upload"]["current"], 100)
 
-    def test_cd2_upload_missing_after_thirty_minutes(self) -> None:
-        source = "/watch/Mona Lisa 1986"
-        target = "/CloudNAS/CloudDrive/finished/Mona Lisa 1986.iso"
-        missing_since = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
-        recent_observation = (datetime.now() - timedelta(seconds=10)).strftime("%Y-%m-%d %H:%M:%S")
+    def test_cd2_upload_api_failure_is_terminal(self) -> None:
+        source = "/watch/Failed upload"
+        target = "/CloudNAS/CloudDrive/finished/Failed upload.iso"
         app.state["items"][source] = {
             "status": "waiting_cd2_upload",
             "target": target,
             "pack_iso": True,
-            "cd2_upload_wait_started_at": missing_since,
-            "cd2_upload_missing_since": missing_since,
-            "cd2_upload_last_observed_at": recent_observation,
+        }
+        upload = {
+            "path": target,
+            "status": "failed",
+            "error": "目标空间不足",
+            "current": 100,
+            "total": 1000,
+            "percent": 10.0,
         }
 
         app.check_waiting_cd2_uploads(
             dict(app.DEFAULT_CONFIG),
-            {},
+            {app.normalize_upload_path(target): upload},
             {"connected": True, "checked_at": app.now(), "human": "connected"},
         )
 
         item = app.state["items"][source]
         self.assertEqual(item["status"], "transfer_failed")
-        self.assertEqual(item["failure_code"], "cd2_upload_missing")
-
-    def test_cd2_disconnect_pauses_stall_detection(self) -> None:
-        source = "/watch/Grace 2025"
-        target = "/CloudNAS/CloudDrive/finished/Grace 2025.iso"
-        old_progress_at = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
-        app.state["items"][source] = {
-            "status": "waiting_cd2_upload",
-            "target": target,
-            "pack_iso": True,
-            "cd2_upload_wait_started_at": old_progress_at,
-            "cd2_upload_seen_at": old_progress_at,
-            "cd2_upload_progress_at": old_progress_at,
-            "cd2_upload_progress_current": 100,
-            "cd2_upload_progress_percent": 10.0,
-            "cd2_upload_last_observed_at": old_progress_at,
-        }
-
-        app.check_waiting_cd2_uploads(
-            dict(app.DEFAULT_CONFIG),
-            {},
-            {"connected": False, "checked_at": app.now(), "human": "disconnected"},
-        )
-
-        item = app.state["items"][source]
-        self.assertEqual(item["status"], "waiting_cd2_upload")
-        self.assertTrue(item["cd2_upload_monitor_paused"])
-
-    def test_incomplete_upload_pagination_pauses_missing_detection(self) -> None:
-        source = "/watch/Incomplete queue 2025"
-        target = "/CloudNAS/CloudDrive/finished/Incomplete queue 2025.iso"
-        missing_since = (datetime.now() - timedelta(minutes=31)).strftime("%Y-%m-%d %H:%M:%S")
-        app.state["items"][source] = {
-            "status": "waiting_cd2_upload",
-            "target": target,
-            "pack_iso": True,
-            "cd2_upload_wait_started_at": missing_since,
-            "cd2_upload_missing_since": missing_since,
-        }
-
-        app.check_waiting_cd2_uploads(
-            dict(app.DEFAULT_CONFIG),
-            {},
-            {"connected": True, "checked_at": app.now(), "upload_queue_complete": False, "human": "partial"},
-        )
-
-        item = app.state["items"][source]
-        self.assertEqual(item["status"], "waiting_cd2_upload")
-        self.assertTrue(item["cd2_upload_monitor_paused"])
-        self.assertEqual(item["cd2_upload_missing_since"], missing_since)
+        self.assertEqual(item["failure_code"], "cd2_upload_failed")
 
     def test_upload_recheck_resets_monitor_failure(self) -> None:
         source = "/watch/Grace 2025"
@@ -1645,6 +1580,7 @@ class RevisionRecoveryTests(unittest.TestCase):
 
         self.assertTrue(app.cd2_remote_task_matches_pull(source_a, shared_target, status))
         self.assertTrue(app.cd2_remote_task_matches_pull(source_b, shared_target, status))
+        self.assertFalse(app.cd2_remote_task_matches_pull(source_a, "/mnt/another-target", status))
         self.assertFalse(app.cd2_remote_task_matches_pull(source_c, shared_target, status))
 
         pending_a = app.cd2_recorded_pull_pending(
