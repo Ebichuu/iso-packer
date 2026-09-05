@@ -9,6 +9,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import app
 
@@ -65,6 +66,7 @@ class RevisionRecoveryTests(unittest.TestCase):
         app.STATE_PATH = test_data_dir / "state.json"
         app.LOG_PATH = test_data_dir / "iso-packer.log"
         app.state = {"items": {}, "last_scan": None, "active": None, "events": [], "cd2": {}}
+        app.pack_cancel_event.clear()
         app.cd2_client_cache = {
             "key": None,
             "client": None,
@@ -85,6 +87,7 @@ class RevisionRecoveryTests(unittest.TestCase):
         for name, path in self.original_paths.items():
             setattr(app, name, path)
         app.cd2_client_cache = self.original_cd2_cache
+        app.pack_cancel_event.clear()
         self.state_dir.cleanup()
 
     def test_release_identity_requires_explicit_version_and_site(self) -> None:
@@ -99,6 +102,20 @@ class RevisionRecoveryTests(unittest.TestCase):
             {
                 "name": "same film site v2",
                 "value": "Mercy.2026.V2.2160p.BluRay@CHDBits",
+                "version": 2,
+                "status": "versioned",
+                "site": "chdbits",
+            },
+            {
+                "name": "version before year v1",
+                "value": "Mercy V1 2026 2160p BluRay@CHDBits",
+                "version": 1,
+                "status": "versioned",
+                "site": "chdbits",
+            },
+            {
+                "name": "version before year v2",
+                "value": "Mercy V2 2026 2160p BluRay@CHDBits",
                 "version": 2,
                 "status": "versioned",
                 "site": "chdbits",
@@ -151,11 +168,83 @@ class RevisionRecoveryTests(unittest.TestCase):
             identities["same film site v1"]["identity_key"],
             identities["same film site v2"]["identity_key"],
         )
+        self.assertEqual(
+            identities["version before year v1"]["identity_key"],
+            identities["version before year v2"]["identity_key"],
+        )
         self.assertNotEqual(
             identities["same film site v1"]["identity_key"],
             identities["different site"]["identity_key"],
         )
         self.assertEqual(identities["unversioned coexists"]["identity_key"], identities["same film site v1"]["identity_key"])
+
+    def test_failed_cd2_tasks_never_count_as_complete_at_100_percent(self) -> None:
+        failed_copy = {
+            "status": "4",
+            "failed_files": 0,
+            "total_files": 10,
+            "done_files": 10,
+            "total": 100,
+            "current": 100,
+            "percent": 100,
+        }
+        failed_download = {"status": "failed", "total": 100, "current": 100}
+
+        self.assertFalse(app.is_copy_task_done(failed_copy))
+        self.assertFalse(app.is_download_done(failed_download))
+
+    def test_manual_pull_disappearing_from_queue_stays_pending(self) -> None:
+        item = {
+            "cd2_pull_source": "/remote/Movie",
+            "cd2_pull_dest": "/mnt/watch",
+            "cd2_pull_mode": "manual",
+            "cd2_pull_created_at": app.now(),
+        }
+        pending = app.cd2_recorded_pull_pending(
+            item,
+            {"connected": True, "copy_tasks": [], "downloads": []},
+        )
+
+        self.assertIsNotNone(pending)
+        self.assertFalse(item.get("cd2_pull_finished_at"))
+
+    def test_seen_upload_missing_from_queue_does_not_count_as_delivered(self) -> None:
+        source = "/watch/Movie 2025"
+        target = "/CloudNAS/CloudDrive/finished/Movie 2025.iso"
+        app.state["items"][source] = {
+            "status": "waiting_cd2_upload",
+            "target": target,
+            "pack_iso": True,
+            "cd2_upload_seen_at": app.now(),
+        }
+
+        app.check_waiting_cd2_uploads(
+            dict(app.DEFAULT_CONFIG),
+            {},
+            {"connected": True, "checked_at": app.now(), "human": "connected"},
+        )
+
+        item = app.state["items"][source]
+        self.assertEqual(item["status"], "waiting_cd2_upload")
+        self.assertNotIn("done_at", item)
+        self.assertTrue(item.get("cd2_upload_missing_since"))
+
+    def test_incomplete_cd2_task_queue_blocks_packaging(self) -> None:
+        with patch.object(app, "disc_structure_ready", return_value=(True, "")):
+            status, reason, pending = app.source_readiness_blocker(
+                Path("/watch/Movie 2025"),
+                1024,
+                {
+                    "connected": True,
+                    "copy_tasks_complete": False,
+                    "download_tasks_complete": True,
+                },
+                dict(app.DEFAULT_CONFIG),
+            )
+
+        self.assertEqual(status, "waiting_partial")
+        self.assertIn("读取不完整", reason)
+        self.assertIsNone(pending)
 
     def test_replacement_candidates_only_match_lower_version_same_site(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -426,7 +515,7 @@ class RevisionRecoveryTests(unittest.TestCase):
             result = app.transfer_iso_to_mount(target, cfg)
 
             self.assertEqual(result, existing_target)
-            self.assertFalse(target.exists())
+            self.assertTrue(target.exists())
             self.assertTrue(existing_target.exists())
 
     def test_transfer_writes_only_final_iso_name_to_cd2_mount(self) -> None:
@@ -448,7 +537,182 @@ class RevisionRecoveryTests(unittest.TestCase):
 
             self.assertEqual(result, cd2_dir / target.name)
             self.assertEqual([path.name for path in cd2_dir.iterdir()], [target.name])
+            self.assertTrue(target.exists())
+
+    def test_transfer_removes_local_iso_when_upload_wait_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            cd2_dir = base / "cd2"
+            cd2_dir.mkdir()
+            target = base / "Movie.2026.iso"
+            target.write_bytes(b"valid-iso")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_transfer_enabled": True,
+                "cd2_wait_upload_complete": False,
+                "cd2_require_mount": False,
+                "cd2_target_dir": str(cd2_dir),
+            })
+
+            app.validate_iso = lambda _target: True
+            result = app.transfer_iso_to_mount(target, cfg)
+
+            self.assertEqual(result, cd2_dir / target.name)
             self.assertFalse(target.exists())
+            self.assertEqual([path.name for path in cd2_dir.iterdir()], [target.name])
+
+    def test_cd2_target_must_stay_under_mounted_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            mount_root = base / "CloudDrive"
+            outside = base / "outside"
+            mount_root.mkdir()
+            outside.mkdir()
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "cd2_require_mount": True,
+                "cd2_mount_root": str(mount_root),
+                "cd2_target_dir": str(outside),
+            })
+
+            with patch.object(Path, "is_mount", return_value=True):
+                self.assertIsNone(app.resolve_cd2_target_dir(cfg))
+
+    def test_file_operation_destination_stays_in_allowed_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            watch_dir = base / "watch"
+            output_dir = base / "output"
+            mount_root = base / "CloudDrive"
+            outside = base / "outside"
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "watch_dir": str(watch_dir),
+                "output_dir": str(output_dir),
+                "cd2_mount_root": str(mount_root),
+            })
+
+            self.assertEqual(
+                app.resolve_file_operation_destination(cfg, str(watch_dir / "archive")),
+                (watch_dir / "archive").resolve(),
+            )
+            with self.assertRaises(ValueError):
+                app.resolve_file_operation_destination(cfg, str(outside))
+
+    def test_iso_validation_timeout_is_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "Movie.iso"
+            target.write_bytes(b"iso")
+            with patch.object(app.subprocess, "run", side_effect=app.subprocess.TimeoutExpired("xorriso", 1)):
+                self.assertFalse(app.validate_iso(target))
+
+    def test_iso_packing_timeout_terminates_genisoimage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "Movie"
+            source.mkdir()
+            target = Path(temp_dir) / "Movie.iso.partial"
+
+            class HangingProcess:
+                returncode = None
+
+                def poll(self):
+                    return self.returncode
+
+                def terminate(self):
+                    self.returncode = -15
+
+                def wait(self, timeout=None):
+                    return self.returncode
+
+            process = HangingProcess()
+            with (
+                patch.object(app.subprocess, "Popen", return_value=process),
+                patch.object(app, "ISO_PACK_TIMEOUT_SECONDS", 1),
+                patch.object(app, "ISO_PACK_STALL_SECONDS", 999),
+                patch.object(app.time, "monotonic", side_effect=[0.0, 2.0]),
+            ):
+                result = app.run_iso(source, target, 100)
+
+            self.assertEqual(result.returncode, -15)
+            self.assertIn("超过", result.stderr)
+
+    def test_remote_pull_structure_requires_complete_bdmv(self) -> None:
+        target = "/remote-destination/Movie"
+
+        class RemoteStructureClient:
+            def find_file_by_path(self, path):
+                if path == target:
+                    return SimpleNamespace(fullPathName=target, name="Movie", isDirectory=True)
+                return None
+
+            def get_sub_files(self, path, force_refresh=False):
+                if path == "/remote-destination":
+                    return [SimpleNamespace(name="Movie", fullPathName=target, isDirectory=True)]
+                if path == target:
+                    return [SimpleNamespace(name="BDMV", fullPathName=f"{target}/BDMV", isDirectory=True)]
+                if path == f"{target}/BDMV":
+                    return [
+                        SimpleNamespace(name="index.bdmv", fullPathName=f"{path}/index.bdmv", isDirectory=False),
+                        SimpleNamespace(name="MovieObject.bdmv", fullPathName=f"{path}/MovieObject.bdmv", isDirectory=False),
+                        SimpleNamespace(name="PLAYLIST", fullPathName=f"{path}/PLAYLIST", isDirectory=True),
+                        SimpleNamespace(name="STREAM", fullPathName=f"{path}/STREAM", isDirectory=True),
+                        SimpleNamespace(name="CLIPINF", fullPathName=f"{path}/CLIPINF", isDirectory=True),
+                    ]
+                return []
+
+        claim = {
+            "source_path": "/remote/Movie",
+            "dest_dir": "/remote-destination",
+            "disc_type": "BDMV",
+            "result_paths": [target],
+        }
+        self.assertEqual(
+            app.cd2_remote_pull_structure_state(RemoteStructureClient(), claim),
+            "complete",
+        )
+
+    def test_deferred_cleanup_runs_after_cd2_upload_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            watch_dir = base / "watch"
+            output_dir = base / "output"
+            target_dir = base / "cd2"
+            source = watch_dir / "Movie 2026"
+            local_iso = output_dir / "Movie 2026.iso"
+            remote_iso = target_dir / local_iso.name
+            source.mkdir(parents=True)
+            output_dir.mkdir()
+            target_dir.mkdir()
+            local_iso.write_bytes(b"local")
+            remote_iso.write_bytes(b"remote")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "watch_dir": str(watch_dir),
+                "output_dir": str(output_dir),
+                "cd2_target_dir": str(target_dir),
+                "cd2_wait_upload_complete": True,
+                "delete_source_after_success": True,
+            })
+            app.state["items"][str(source)] = {
+                "status": "waiting_cd2_upload",
+                "target": str(remote_iso),
+                "local_output_target": str(local_iso),
+                "delete_source_pending": True,
+                "pack_iso": True,
+                "cd2_upload_wait_started_at": app.now(),
+            }
+
+            app.check_waiting_cd2_uploads(
+                cfg,
+                {str(remote_iso): {"path": str(remote_iso), "status": "5", "status_enum": "5"}},
+                {"connected": True, "checked_at": app.now(), "upload_queue_complete": True},
+            )
+
+            item = app.state["items"][str(source)]
+            self.assertEqual(item["status"], "transfer_done")
+            self.assertFalse(local_iso.exists())
+            self.assertFalse(source.exists())
+            self.assertNotIn("delete_source_pending", item)
 
     def test_transfer_rejects_non_iso_source_without_touching_mount(self) -> None:
         for filename in ("Movie.2026.iso.partial", "Movie.2026.iso..partial", "Movie.2026.mkv"):
@@ -629,6 +893,32 @@ class RevisionRecoveryTests(unittest.TestCase):
         self.assertEqual(list(request.theFilePaths), ["/remote/source/Movie"])
         self.assertEqual(metadata, [("authorization", "Bearer test")])
         self.assertEqual(app.cd2_result_success(result)[2], ["/remote/target/Movie (1)"])
+
+    def test_cd2_rename_result_maps_to_actual_local_pull_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_dir = Path(temp_dir) / "watch"
+            fallback = local_dir / "Movie"
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({"cd2_local_pull_dir": str(local_dir), "watch_dir": str(local_dir)})
+
+            actual = app.cd2_local_pull_path_from_result(
+                cfg,
+                "/remote/target",
+                ["/remote/target/Movie (1)"],
+                fallback,
+            )
+
+            self.assertEqual(actual, (local_dir / "Movie (1)").resolve())
+
+    def test_upload_matching_does_not_fallback_to_same_basename(self) -> None:
+        upload_map = {
+            "/remote/site-b/Movie.iso": {
+                "path": "/remote/site-b/Movie.iso",
+                "status": "Transfer",
+            },
+        }
+
+        self.assertIsNone(app.find_upload_for_path(upload_map, "/remote/site-a/Movie.iso", {"cd2_path_aliases": []}))
 
     def test_cd2_local_pull_path_disambiguates_same_basename_sources(self) -> None:
         cfg = dict(app.DEFAULT_CONFIG)
@@ -1202,6 +1492,22 @@ class RevisionRecoveryTests(unittest.TestCase):
 
         self.assertEqual(stats["active"], 1)
         self.assertEqual(stats["waiting"], 2)
+
+    def test_active_pack_can_be_cancelled(self) -> None:
+        source = "/watch/Movie 2026"
+        app.state["items"][source] = {"status": "running", "pack_iso": True}
+        app.state["active"] = {
+            "source": source,
+            "status": "running",
+            "progress": {"phase": "packing"},
+        }
+
+        result, status_code = app.cancel_active_pack(source)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(status_code, 200)
+        self.assertTrue(app.pack_cancel_event.is_set())
+        self.assertIn("取消", app.state["items"][source]["error"])
 
     def test_bdmv_root_scan_returns_all_candidates_without_child_requests(self) -> None:
         root = "/remote/01-BDMV"

@@ -80,6 +80,7 @@ cd2_lock = threading.RLock()
 worker_lock = threading.Lock()
 file_operation_lock = threading.RLock()
 file_operation_tasks = {}
+pack_cancel_event = threading.Event()
 cd2_candidate_scan_lock = threading.RLock()
 cd2_candidate_scan_state = {
     "thread": None,
@@ -123,6 +124,10 @@ last_log_prune = 0.0
 BDMV_REQUIRED_FILES = ("index.bdmv", "MovieObject.bdmv")
 BDMV_REQUIRED_DIRS = ("PLAYLIST", "STREAM", "CLIPINF")
 COPY_TASK_DONE_STATUSES = {"3", "completed", "complete", "done", "finish", "finished", "success", "succeeded", "已完成"}
+COPY_TASK_FAILED_STATUSES = {
+    "4", "failed", "failure", "error", "fatalerror", "cancel", "cancelled", "canceled",
+    "aborted", "abort", "已失败", "已取消",
+}
 UPLOAD_DONE_STATUSES = {"5", "complete", "completed", "done", "finish", "finished", "success", "succeeded", "uploaded", "upload_done", "transfer_done", "已完成", "上传完成"}
 CD2_UPLOAD_CONTROL_TERMINAL_STATUSES = {"2", "5", "6", "8", "9", "10", "cancelled", "canceled", "finish", "finished", "completed", "complete", "skipped", "ignored", "error", "fatalerror", "failed"}
 CD2_UPLOAD_QUEUE_GRACE_POLLS = 3
@@ -137,10 +142,16 @@ CD2_AUTO_PULL_CREATING_TIMEOUT_SECONDS = 300
 CD2_PULL_RESULT_GRACE_SECONDS = 30
 CD2_PULL_RESULT_RETRY_LIMIT = 1
 CD2_UPLOAD_MATCH_MODES = {"alias_then_suffix", "alias_only"}
+ISO_PACK_TIMEOUT_SECONDS = 24 * 60 * 60
+ISO_PACK_STALL_SECONDS = 30 * 60
+ISO_VALIDATE_TIMEOUT_SECONDS = 10 * 60
+ISO_TRANSFER_TIMEOUT_SECONDS = 24 * 60 * 60
+ISO_TRANSFER_STALL_SECONDS = 30 * 60
 FAILURE_LABELS = {
     "insufficient_space": "空间不足",
     "output_exists": "输出ISO已存在",
     "pack_failed": "封装失败",
+    "pack_cancelled": "封装已取消",
     "verify_failed": "校验失败",
     "transfer_failed": "CD2 转移失败",
     "target_exists": "上传目录已有同名ISO",
@@ -154,6 +165,7 @@ FAILURE_SUGGESTIONS = {
     "insufficient_space": "清理输出目录或降低最小空间阈值后等待下轮扫描。",
     "output_exists": "输出目录已经有同名 ISO，但无法确认它是可复用的完整文件；请手动删除、移动或改名后再重新封装。",
     "pack_failed": "查看系统日志里的 genisoimage 错误，确认原盘结构完整且路径可读。",
+    "pack_cancelled": "封装已取消，源目录和未完成的 .partial 文件会保留/清理，可在确认源目录稳定后重新封装。",
     "verify_failed": "保留源目录和 ISO，优先检查 xorriso 是否可用以及输出文件是否完整。",
     "transfer_failed": "检查 CD2 挂载目录、目标路径权限和磁盘空间后重新封装。",
     "target_exists": "上传目录已经有同名 ISO，但无法确认它是同一份完整文件；请手动删除、移动或改名后再重新封装。",
@@ -944,6 +956,9 @@ def load_config() -> Dict:
     cfg.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
     migrated = migrate_config_schema(cfg, data)
     migrate_legacy_cd2_pull_config(cfg, data)
+    if cfg.get("cd2_upload_match_mode") == "alias_then_suffix":
+        cfg["cd2_upload_match_mode"] = "alias_only"
+        migrated = True
     cfg["cd2_path_aliases"] = cd2_path_aliases_from_cfg(cfg)
     cfg["cd2_path_aliases_text"] = cd2_path_aliases_to_text(cfg)
     cfg["cd2_remote_source_dirs"] = parse_cd2_remote_source_dirs(cfg.get("cd2_remote_source_dirs"))
@@ -1092,6 +1107,28 @@ def resolve_absolute_path(value: str) -> Path:
 
 def path_in_any_root(path: Path, roots) -> bool:
     return any(path_in_root(path, root) for root in roots)
+
+
+def file_operation_destination_roots(cfg: Dict) -> list[Path]:
+    roots = []
+    for field in DIRECTORY_PICKER_SCOPES["file_destination"]:
+        raw = (cfg or {}).get(field)
+        if not raw:
+            continue
+        try:
+            root = resolve_absolute_path(raw)
+        except Exception:
+            continue
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def resolve_file_operation_destination(cfg: Dict, raw_path: str) -> Path:
+    path = resolve_absolute_path(raw_path)
+    if not path_in_any_root(path, file_operation_destination_roots(cfg)):
+        raise ValueError("文件操作目标必须位于监控、输出或 CD2 挂载目录内")
+    return path
 
 
 def directory_picker_roots(cfg: Dict, scope: str):
@@ -1941,6 +1978,15 @@ def cd2_disc_type_for_remote_path(client, path: str) -> str:
     return ""
 
 
+def cd2_root_is_disc_structure(children, disc_type: str) -> bool:
+    names = {cd2_file_name(item).casefold() for item in children or []}
+    if disc_type == "BDMV":
+        return {"playlist", "stream", "clipinf"}.issubset(names)
+    if disc_type == "VIDEO_TS":
+        return "video_ts.ifo" in names
+    return False
+
+
 def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False, client=None) -> Dict:
     pull_configured = bool(cfg.get("cd2_manual_pull_enabled") or cfg.get("cd2_auto_pull_enabled"))
     pull_guard_enabled = cd2_pull_disabled()
@@ -1982,14 +2028,30 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False, client=No
         return payload
     for root, remote_root in zip(roots, remote_roots):
         root_disc_type = cd2_remote_root_disc_type(remote_root)
-        stack = [(remote_root, 0, bool(force_refresh))]
-        while stack:
-            current_root, current_depth, current_force_refresh = stack.pop()
+        if root_disc_type:
             try:
-                children = list_cd2_sub_files(client, current_root, force_refresh=current_force_refresh)
+                root_children = list_cd2_sub_files(client, remote_root, force_refresh=force_refresh)
             except Exception as exc:
-                payload["errors"].append({"root": current_root, "message": cd2_error_message(exc)})
+                payload["errors"].append({"root": remote_root, "message": cd2_error_message(exc)})
                 continue
+            if cd2_root_is_disc_structure(root_children, root_disc_type):
+                payload["errors"].append({
+                    "root": remote_root,
+                    "message": f"配置的 CD2 监控根目录本身是 {root_disc_type} 结构，请改为其上级影片目录",
+                })
+                continue
+        preloaded_children = root_children if root_disc_type else None
+        stack = [(remote_root, 0, bool(force_refresh), preloaded_children)]
+        while stack:
+            current_root, current_depth, current_force_refresh, cached_children = stack.pop()
+            if cached_children is not None:
+                children = cached_children
+            else:
+                try:
+                    children = list_cd2_sub_files(client, current_root, force_refresh=current_force_refresh)
+                except Exception as exc:
+                    payload["errors"].append({"root": current_root, "message": cd2_error_message(exc)})
+                    continue
             children.sort(
                 key=lambda item: (
                     cd2_time_sort_value(getattr(item, "writeTime", None) or getattr(item, "modifyTime", None)),
@@ -2027,7 +2089,7 @@ def scan_cd2_remote_candidates(cfg: Dict, force_refresh: bool = False, client=No
                     payload["candidates"].append(candidate)
                     continue
                 if child_depth < scan_depth:
-                    stack.append((child_path, child_depth, False))
+                    stack.append((child_path, child_depth, False, None))
     payload["candidates"].sort(
         key=lambda item: (
             cd2_time_sort_value(item.get("modified")),
@@ -2181,6 +2243,7 @@ def cd2_auto_pull_claim_status(cfg: Dict, source_path: str, dest_dir: str) -> Op
                 claim = {
                     "source_path": source_path,
                     "dest_dir": dest_dir,
+                    "mode": item.get("cd2_pull_mode") or "auto",
                     "status": legacy_status,
                     "created_at": item.get("cd2_pull_created_at") or now(),
                     "updated_at": now(),
@@ -2200,6 +2263,7 @@ def cd2_auto_pull_claim_status(cfg: Dict, source_path: str, dest_dir: str) -> Op
             claim = {
                 "source_path": source_path,
                 "dest_dir": dest_dir,
+                "mode": result.get("mode") or "auto",
                 "status": "submitted",
                 "created_at": result.get("created_at") or now(),
                 "updated_at": now(),
@@ -2211,7 +2275,7 @@ def cd2_auto_pull_claim_status(cfg: Dict, source_path: str, dest_dir: str) -> Op
     return None
 
 
-def claim_cd2_auto_pull(cfg: Dict, source_path: str, dest_dir: str) -> tuple[bool, Optional[Dict]]:
+def claim_cd2_auto_pull(cfg: Dict, source_path: str, dest_dir: str, mode: str = "auto") -> tuple[bool, Optional[Dict]]:
     source_path = normalize_path_text(source_path)
     dest_dir = normalize_path_text(dest_dir)
     claim_key = cd2_auto_pull_claim_key(source_path, dest_dir)
@@ -2224,6 +2288,7 @@ def claim_cd2_auto_pull(cfg: Dict, source_path: str, dest_dir: str) -> tuple[boo
         claim = {
             "source_path": source_path,
             "dest_dir": dest_dir,
+            "mode": mode if mode in {"auto", "manual"} else "auto",
             "status": "creating",
             "created_at": now(),
             "updated_at": now(),
@@ -2327,6 +2392,66 @@ def cd2_remote_pull_result_state(client, claim: Dict) -> str:
     return "missing"
 
 
+def cd2_remote_disc_structure_state(client, target_path: str, disc_type: str) -> str:
+    """确认远端复制结果不只是目录存在，而是具备基本原盘结构。"""
+    if not hasattr(client, "get_sub_files") or not disc_type:
+        return "complete"
+    target_path = normalize_path_text(target_path)
+    try:
+        children = list_cd2_sub_files(client, target_path, force_refresh=True)
+    except Exception:
+        return "error"
+    by_name = {cd2_file_name(item).casefold(): item for item in children}
+    if disc_type == "BDMV":
+        bdmv = by_name.get("bdmv")
+        if not bdmv or not cd2_file_is_dir(bdmv):
+            return "incomplete"
+        structure_path = cd2_file_path(bdmv, target_path)
+        try:
+            structure_children = list_cd2_sub_files(client, structure_path, force_refresh=True)
+        except Exception:
+            return "error"
+        structure_by_name = {cd2_file_name(item).casefold(): item for item in structure_children}
+        for filename in BDMV_REQUIRED_FILES:
+            child = structure_by_name.get(filename.casefold())
+            if not child or cd2_file_is_dir(child):
+                return "incomplete"
+        for dirname in BDMV_REQUIRED_DIRS:
+            child = structure_by_name.get(dirname.casefold())
+            if not child or not cd2_file_is_dir(child):
+                return "incomplete"
+        return "complete"
+    if disc_type == "VIDEO_TS":
+        child = by_name.get("video_ts.ifo")
+        return "complete" if child and not cd2_file_is_dir(child) else "incomplete"
+    return "complete"
+
+
+def cd2_remote_pull_structure_state(client, claim: Dict) -> str:
+    disc_type = str((claim or {}).get("disc_type") or "").upper()
+    if not disc_type:
+        return "complete"
+    saw_present = False
+    saw_incomplete = False
+    saw_error = False
+    for path in cd2_pull_result_paths(claim):
+        if cd2_remote_result_state(client, path) != "present":
+            continue
+        saw_present = True
+        structure_state = cd2_remote_disc_structure_state(client, path, disc_type)
+        if structure_state == "complete":
+            return "complete"
+        if structure_state == "error":
+            saw_error = True
+        else:
+            saw_incomplete = True
+    if saw_error:
+        return "error"
+    if saw_incomplete or saw_present:
+        return "incomplete"
+    return "missing"
+
+
 def cd2_remote_pull_result_exists(client, claim: Dict) -> bool:
     return cd2_remote_pull_result_state(client, claim) == "present"
 
@@ -2348,6 +2473,32 @@ def cd2_pull_missing_result_attempts(source_path: str, dest_dir: str) -> int:
 def cd2_pull_item_path(cfg: Dict, claim: Dict) -> Path:
     local_path = (claim or {}).get("local_path")
     return Path(local_path).expanduser() if local_path else cd2_local_pull_path_for_source(cfg, claim.get("source_path") or "")
+
+
+def cd2_local_pull_path_from_result(
+    cfg: Dict,
+    dest_dir: str,
+    result_paths: list[str],
+    fallback: Path,
+) -> Path:
+    """Map CD2's actual Rename result back to the local mount path."""
+    normalized_dest = normalize_path_text(dest_dir).casefold()
+    local_dir = Path(
+        cfg.get("cd2_local_pull_dir") or cfg.get("watch_dir") or DEFAULT_CONFIG["watch_dir"]
+    ).expanduser()
+    candidates = []
+    for result_path in result_paths or []:
+        normalized = normalize_path_text(result_path)
+        if not normalized:
+            continue
+        parent, _, name = normalized.rpartition("/")
+        if not name:
+            continue
+        if parent.casefold() == normalized_dest:
+            candidates.append(name)
+    if len(candidates) == 1:
+        return (local_dir / safe_filename(candidates[0])).resolve()
+    return fallback
 
 
 def update_cd2_pull_item_result(
@@ -2400,6 +2551,7 @@ def reconcile_cd2_auto_pull_claims(cfg: Dict, cd2_status: Optional[Dict]) -> Dic
         return summary
     for claim in claims:
         summary["checked"] += 1
+        mode = claim.get("mode") or "auto"
         source_path = normalize_path_text(claim.get("source_path"))
         dest_dir = normalize_path_text(claim.get("dest_dir"))
         task = next(
@@ -2422,9 +2574,26 @@ def reconcile_cd2_auto_pull_claims(cfg: Dict, cd2_status: Optional[Dict]) -> Dic
             update_cd2_auto_pull_claim(source_path, dest_dir, "submitted", last_check_error="CD2 远端结果确认失败")
             summary["waiting"] += 1
             continue
+        if remote_state == "present":
+            structure_state = cd2_remote_pull_structure_state(client, claim)
+            if structure_state == "error":
+                update_cd2_auto_pull_claim(source_path, dest_dir, "submitted", last_check_error="CD2 远端原盘结构确认失败")
+                summary["waiting"] += 1
+                continue
+            if structure_state == "incomplete":
+                update_cd2_auto_pull_claim(source_path, dest_dir, "submitted", last_check_error="CD2 远端原盘结构仍未完整")
+                summary["waiting"] += 1
+                continue
         local_path = cd2_pull_item_path(cfg, claim)
         local_exists = local_path.exists()
         if remote_state == "present" and local_exists:
+            if claim.get("disc_type"):
+                local_ready, local_reason = disc_structure_ready(local_path)
+                if not local_ready:
+                    update_cd2_auto_pull_claim(source_path, dest_dir, "submitted", last_check_error=local_reason)
+                    update_cd2_pull_item_result(cfg, claim, "waiting_cd2_pull", f"等待本地挂载原盘结构完整: {local_reason}")
+                    summary["waiting"] += 1
+                    continue
             checked_at = now()
             update_cd2_auto_pull_claim(
                 source_path,
@@ -2446,7 +2615,7 @@ def reconcile_cd2_auto_pull_claims(cfg: Dict, cd2_status: Optional[Dict]) -> Dic
         if remote_state == "present":
             message = f"CD2 远端结果已存在，但本地挂载不可见: {local_path}"
             update_cd2_auto_pull_claim(source_path, dest_dir, "failed", failure_code="cd2_pull_local_missing", error=message)
-            record_cd2_pull_result(source_path, dest_dir, False, message, mode="auto", failure_code="cd2_pull_local_missing", retryable=False)
+            record_cd2_pull_result(source_path, dest_dir, False, message, mode=mode, failure_code="cd2_pull_local_missing", retryable=False)
             update_cd2_pull_item_result(cfg, claim, "transfer_failed", message, "cd2_pull_local_missing")
             summary["failed"] += 1
             log(message)
@@ -2459,7 +2628,7 @@ def reconcile_cd2_auto_pull_claims(cfg: Dict, cd2_status: Optional[Dict]) -> Dic
             dest_dir,
             False,
             message,
-            mode="auto",
+            mode=mode,
             failure_code="cd2_pull_missing_result",
             retryable=retryable,
         )
@@ -2499,7 +2668,7 @@ def cd2_remote_candidate_status(cfg: Dict, source_path: str) -> Dict:
             pull_status_label = "处理中"
             pull_state = "active"
         result.update({
-            "pull_mode": "auto",
+            "pull_mode": claim.get("mode") or "auto",
             "pull_created_at": claim.get("created_at") or "",
             "pull_status_label": pull_status_label,
         })
@@ -2636,7 +2805,8 @@ def cd2_auto_pull_active_count() -> int:
         items = list((state.get("items") or {}).values())
     active_claim_keys = {
         key for key, claim in claims.items()
-        if (claim or {}).get("status") in {"creating", "submitted"}
+        if (claim or {}).get("mode", "auto") == "auto"
+        and (claim or {}).get("status") in {"creating", "submitted"}
     }
     count = len(active_claim_keys)
     for item in items:
@@ -2840,10 +3010,10 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
         return {"ok": False, "message": message}, 400
 
     claim_created = False
-    if mode == "auto":
-        claim_created, existing_claim = claim_cd2_auto_pull(cfg, source_path, dest_dir)
+    if mode in {"auto", "manual"}:
+        claim_created, existing_claim = claim_cd2_auto_pull(cfg, source_path, dest_dir, mode=mode)
         if not claim_created:
-            return {"ok": False, "message": "该远程候选已有自动拉取认领记录"}, 409
+            return {"ok": False, "message": "该远程候选已有拉取认领记录"}, 409
     try:
         result = cd2_copy_file(client, [source_path], dest_dir)
         ok, message, result_paths = cd2_result_success(result)
@@ -2855,6 +3025,7 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
             release_cd2_auto_pull_claim(source_path, dest_dir)
         return {"ok": False, "message": message}, 400
 
+    local_source = cd2_local_pull_path_from_result(cfg, dest_dir, result_paths, local_source)
     created_at = now()
     with lock:
         item = state.setdefault("items", {}).setdefault(str(local_source), {"first_seen": created_at})
@@ -2883,6 +3054,8 @@ def create_cd2_pull_task(cfg: Dict, source_path: str, mode: str = "manual", cd2_
             source_path,
             dest_dir,
             "submitted",
+            mode=mode,
+            disc_type=disc_type,
             local_path=str(local_source),
             result_paths=result_paths,
         )
@@ -3014,13 +3187,15 @@ def maybe_auto_pull_cd2_candidate(cfg: Dict, cd2_status: Optional[Dict]) -> Opti
 def cd2_recorded_pull_pending(item: Dict, cd2_status: Optional[Dict], finish_missing: bool = True) -> Optional[Dict]:
     source_path = normalize_path_text((item or {}).get("cd2_pull_source"))
     dest_dir = normalize_path_text((item or {}).get("cd2_pull_dest"))
+    pull_mode = (item or {}).get("cd2_pull_mode") or ""
     if not source_path:
         return None
     if item.get("cd2_pull_finished_at"):
-        if item.get("cd2_pull_mode") == "auto":
+        if pull_mode in {"auto", "manual"}:
             update_cd2_auto_pull_claim(source_path, dest_dir, "completed")
         return None
-    if item.get("cd2_pull_mode") == "auto":
+    claim = None
+    if pull_mode in {"auto", "manual"}:
         claim = cd2_auto_pull_claim_status({}, source_path, dest_dir)
         if claim and claim.get("status") == "failed":
             return {
@@ -3047,18 +3222,28 @@ def cd2_recorded_pull_pending(item: Dict, cd2_status: Optional[Dict], finish_mis
             return task
     if not finish_missing:
         return None
-    if item.get("cd2_pull_mode") == "auto":
-        claim = cd2_auto_pull_claim_status({}, source_path, dest_dir)
-        if claim and claim.get("status") != "completed":
-            return {
-                "kind": "copy",
-                "source": source_path,
-                "target": dest_dir,
-                "human": "CD2 复制任务已结束，等待远端结果确认",
-                "done": False,
-            }
+    if claim and claim.get("status") != "completed":
+        return {
+            "kind": "copy",
+            "source": source_path,
+            "target": dest_dir,
+            "human": "CD2 复制任务已结束，等待远端结果确认",
+            "done": False,
+        }
+    if (
+        pull_mode in {"auto", "manual"}
+        and item.get("cd2_pull_created_at")
+        and (not claim or claim.get("status") != "completed")
+    ):
+        return {
+            "kind": "copy",
+            "source": source_path,
+            "target": dest_dir,
+            "human": "等待确认 CD2 复制任务结果",
+            "done": False,
+        }
     item["cd2_pull_finished_at"] = now()
-    if item.get("cd2_pull_mode") == "auto":
+    if pull_mode in {"auto", "manual"}:
         update_cd2_auto_pull_claim(source_path, dest_dir, "completed")
     return None
 
@@ -3131,11 +3316,13 @@ def upload_lookup_keys(path: str, cfg: Optional[Dict] = None):
         if not root_value:
             continue
         try:
-            root = Path(str(root_value)).expanduser().resolve()
-            target = Path(str(path)).expanduser().resolve()
-            relative = target.relative_to(root)
+            root_text = str(root_value)
+            root = Path(root_text).expanduser()
+            target = Path(str(path)).expanduser()
+            relative = target.resolve().relative_to(root.resolve())
         except Exception:
             continue
+        keys.append(normalize_upload_path(str(root / relative)))
         parts = relative.parts
         for index in range(len(parts)):
             suffix = "/".join(parts[index:])
@@ -3157,32 +3344,21 @@ def cd2_upload_match_mode_from_cfg(cfg: Optional[Dict] = None) -> str:
     mode = str((cfg or {}).get("cd2_upload_match_mode") or DEFAULT_CONFIG["cd2_upload_match_mode"]).strip()
     if mode not in CD2_UPLOAD_MATCH_MODES:
         return DEFAULT_CONFIG["cd2_upload_match_mode"]
-    return mode
+    return "alias_only"
 
 
 def find_upload_for_path(upload_map: Dict, path: str, cfg: Optional[Dict] = None):
     if not upload_map or not is_strict_iso_path(path):
         return None
     direct = {
-        normalize_upload_path(key): value
+        normalize_upload_path(key).casefold(): value
         for key, value in upload_map.items()
         if is_strict_iso_path(((value or {}).get("path") or key) if isinstance(value, dict) else key)
     }
     for key in upload_lookup_keys(path, cfg):
-        upload = direct.get(key)
+        upload = direct.get(key.casefold())
         if upload:
             return upload
-    if cd2_upload_match_mode_from_cfg(cfg) == "alias_only":
-        return None
-    candidates = [(normalize_upload_path(key).lower(), value) for key, value in direct.items()]
-    for key in upload_lookup_keys(path, cfg):
-        lowered = key.lower().strip("/")
-        if not lowered:
-            continue
-        for candidate, upload in candidates:
-            candidate = candidate.strip("/")
-            if candidate == lowered or candidate.endswith("/" + lowered) or lowered.endswith("/" + candidate):
-                return upload
     return None
 
 
@@ -3336,11 +3512,24 @@ def extract_task_status(task) -> str:
     return "unknown"
 
 
+def task_status_in(status: str, statuses: set[str]) -> bool:
+    normalized = str(status or "").strip().lower()
+    if normalized in statuses:
+        return True
+    return normalized.rsplit(".", 1)[-1] in statuses
+
+
+def is_task_failed(info: Dict) -> bool:
+    return task_status_in(info.get("status"), COPY_TASK_FAILED_STATUSES)
+
+
 def is_copy_task_done(info: Dict) -> bool:
     status = str(info.get("status") or "").strip().lower()
-    if status in COPY_TASK_DONE_STATUSES:
-        return True
     failed_files = int(info.get("failed_files") or 0)
+    if is_task_failed(info) or failed_files > 0:
+        return False
+    if task_status_in(status, COPY_TASK_DONE_STATUSES):
+        return True
     total_files = int(info.get("total_files") or 0)
     done_files = int(info.get("done_files") or 0)
     total = int(info.get("total") or 0)
@@ -3352,8 +3541,10 @@ def is_copy_task_done(info: Dict) -> bool:
 
 
 def is_download_done(info: Dict) -> bool:
+    if is_task_failed(info):
+        return False
     status = str(info.get("status") or "").strip().lower()
-    if status in COPY_TASK_DONE_STATUSES:
+    if task_status_in(status, COPY_TASK_DONE_STATUSES):
         return True
     total = int(info.get("total") or 0)
     current = int(info.get("current") or 0)
@@ -3452,6 +3643,11 @@ def source_readiness_blocker(source: Path, source_size: int, cd2_status: Optiona
     if not structure_ready:
         return "waiting_partial", structure_reason, None
     if not ignore_cd2_tasks:
+        if cd2_status and cd2_status.get("connected") and (
+            cd2_status.get("copy_tasks_complete") is False
+            or cd2_status.get("download_tasks_complete") is False
+        ):
+            return "waiting_partial", "CD2 复制/下载任务列表读取不完整，暂不执行封装", None
         pending_task = cd2_pending_source_task(source, cd2_status, cfg)
         if pending_task:
             return "waiting_partial", cd2_pending_reason(pending_task), pending_task
@@ -3726,18 +3922,28 @@ def fetch_cd2_uploads(cfg: Dict):
         return cd2_disconnected_status(cfg, status, message)
     if upload_error:
         queue_errors.append(upload_error)
-    try:
-        downloads = fetch_cd2_downloads(client)
-    except Exception as exc:
+    download_tasks_complete = hasattr(client, "get_download_file_list")
+    if download_tasks_complete:
+        try:
+            downloads = fetch_cd2_downloads(client)
+        except Exception as exc:
+            downloads = []
+            download_tasks_complete = False
+            queue_errors.append(f"下载任务读取失败：{cd2_error_message(exc)}")
+    else:
         downloads = []
-        queue_errors.append(f"下载任务读取失败：{cd2_error_message(exc)}")
-    copy_tasks_complete = True
-    try:
-        copy_tasks = fetch_cd2_copy_tasks(client)
-    except Exception as exc:
+        queue_errors.append("当前 clouddrive2-client 不支持下载任务查询")
+    copy_tasks_complete = hasattr(client, "get_copy_tasks")
+    if copy_tasks_complete:
+        try:
+            copy_tasks = fetch_cd2_copy_tasks(client)
+        except Exception as exc:
+            copy_tasks = []
+            copy_tasks_complete = False
+            queue_errors.append(f"复制任务读取失败：{cd2_error_message(exc)}")
+    else:
         copy_tasks = []
-        copy_tasks_complete = False
-        queue_errors.append(f"复制任务读取失败：{cd2_error_message(exc)}")
+        queue_errors.append("当前 clouddrive2-client 不支持复制任务查询")
 
     checked_at = now()
     status.update({
@@ -3754,6 +3960,7 @@ def fetch_cd2_uploads(cfg: Dict):
         "copy_task_count": len(copy_tasks),
         "downloads": downloads,
         "copy_tasks": copy_tasks,
+        "download_tasks_complete": download_tasks_complete,
         "upload_queue_complete": bool(upload_queue_complete),
         "copy_tasks_complete": copy_tasks_complete,
     })
@@ -3872,6 +4079,7 @@ def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[
     observation_gap_seconds = cd2_upload_observation_gap_seconds(cfg)
     checked_at = str((cd2_status or {}).get("checked_at") or "")
     log_messages = []
+    deferred_cleanup = []
     with lock:
         items = state.get("items", {})
         for key, item in items.items():
@@ -3897,13 +4105,10 @@ def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[
             upload = find_upload_for_path(upload_map, item.get("target") or "", cfg)
             if upload and cd2_upload_done(upload):
                 finish_cd2_upload_item(item, upload, now_value)
+                if item.get("delete_source_pending"):
+                    deferred_cleanup.append((key, dict(item)))
                 log_messages.append(f"CD2 上传完成: {item.get('target') or key}")
                 continue
-            if not upload and item.get("cd2_upload_seen_at"):
-                finish_cd2_upload_item(item, None, now_value)
-                log_messages.append(f"CD2 上传队列已清理: {item.get('target') or key}")
-                continue
-
             observation_interrupted = bool(item.pop("cd2_upload_monitor_paused", False))
             if last_observed_at and checked_at:
                 observation_interrupted = observation_interrupted or seconds_between(last_observed_at, checked_at) > observation_gap_seconds
@@ -3952,6 +4157,17 @@ def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[
                     f"{CD2_UPLOAD_STALL_SECONDS}s"
                 )
         save_state_locked()
+    for key, item_snapshot in deferred_cleanup:
+        cleanup_error = complete_deferred_transfer_cleanup(Path(key).expanduser(), item_snapshot, cfg)
+        with lock:
+            current = state.get("items", {}).get(key)
+            if current is None:
+                continue
+            if cleanup_error:
+                set_warning(current, "deferred_cleanup_failed", cleanup_error)
+            else:
+                current.pop("delete_source_pending", None)
+            save_state_locked()
     for message in log_messages:
         log(message)
 
@@ -4174,6 +4390,26 @@ def control_cd2_task(source_text: str, action: str, cfg: Dict):
     }, 200
 
 
+def cancel_active_pack(source_text: str):
+    key = state_item_key(source_text)
+    if not key:
+        return {"ok": False, "message": "任务不存在或已被清理"}, 404
+    with lock:
+        active = dict(state.get("active") or {})
+        if active.get("source") != key:
+            return {"ok": False, "message": "当前任务已经结束或不是正在执行的封装"}, 409
+        phase = str((active.get("progress") or {}).get("phase") or active.get("status") or "")
+        if phase not in {"packing", "running", "ready"}:
+            return {"ok": False, "message": "当前已经进入封装后的校验或转存阶段，不能取消"}, 409
+        pack_cancel_event.set()
+        item = state.get("items", {}).get(key)
+        if item is not None:
+            item["error"] = "已请求取消当前 ISO 封装"
+            item["last_changed"] = now()
+        save_state_locked()
+    return {"ok": True, "message": "已请求取消当前 ISO 封装", "source": key}, 200
+
+
 def confirm_cd2_upload_task(source_text: str, cfg: Dict):
     key = state_item_key(source_text)
     if not key:
@@ -4233,7 +4469,19 @@ def confirm_cd2_upload_task(source_text: str, cfg: Dict):
         current["target_size"] = actual_size
         current["cd2_upload_manual_confirmed"] = True
         current["cd2_upload_manual_confirmed_at"] = finished_at
+        deferred_cleanup = bool(current.get("delete_source_pending"))
+        cleanup_snapshot = dict(current)
         save_state_locked()
+    if deferred_cleanup:
+        cleanup_error = complete_deferred_transfer_cleanup(source, cleanup_snapshot, cfg)
+        with lock:
+            current = state.get("items", {}).get(key)
+            if current is not None:
+                if cleanup_error:
+                    set_warning(current, "deferred_cleanup_failed", cleanup_error)
+                else:
+                    current.pop("delete_source_pending", None)
+                save_state_locked()
     log(f"人工确认 CD2 上传完成: {target}")
     return {"ok": True, "message": "已确认 CD2 上传完成", "source": key, "target": str(target)}, 200
 
@@ -4418,7 +4666,7 @@ def normalize_release_site(value: str) -> str:
 def parse_release_identity(value: str) -> Dict:
     """Parse the conservative identity used for automatic ISO replacement."""
     name = release_name_stem(value)
-    title, year = local_media_tmdb_query(name)
+    title, year = local_media_tmdb_query(RELEASE_VERSION_LIKE_RE.sub(" ", name))
     version_tokens = list(RELEASE_VERSION_LIKE_RE.finditer(name))
     valid_tokens = list(RELEASE_VERSION_TOKEN_RE.finditer(name))
     version = None
@@ -4589,6 +4837,26 @@ def mark_active_status(status: str, target: Path, phase: Optional[str] = None) -
         save_state_locked()
 
 
+def terminate_subprocess(proc) -> None:
+    try:
+        proc.terminate()
+    except Exception:
+        return
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+    except TypeError:
+        proc.wait()
+
+
 def run_iso(source: Path, target: Path, source_size: int) -> subprocess.CompletedProcess:
     volid = safe_volume_id(source.stem if source.is_file() else source.name)[:32].upper() or "DISC"
     # genisoimage supports UDF, which is important for Blu-ray folders and files over 4 GB.
@@ -4604,13 +4872,35 @@ def run_iso(source: Path, target: Path, source_size: int) -> subprocess.Complete
     ]
     stderr_path = target.with_suffix(target.suffix + ".stderr")
     stdout = ""
+    timed_out_reason = ""
+    cancelled = False
     with stderr_path.open("w+", encoding="utf-8", errors="ignore") as errfh:
         proc = subprocess.Popen(cmd, cwd=str(source.parent), text=True, stdout=subprocess.DEVNULL, stderr=errfh)
         last_update = 0.0
+        started_at = time.monotonic()
+        last_progress_at = started_at
+        last_size = 0
         while proc.poll() is None:
             current = target.stat().st_size if target.exists() else 0
             percent = 100.0 if source_size <= 0 else current * 100 / source_size
             current_time = time.time()
+            monotonic_time = time.monotonic()
+            if current > last_size:
+                last_size = current
+                last_progress_at = monotonic_time
+            if monotonic_time - started_at >= ISO_PACK_TIMEOUT_SECONDS:
+                timed_out_reason = f"genisoimage 超过 {ISO_PACK_TIMEOUT_SECONDS // 3600} 小时未完成，已终止"
+                terminate_subprocess(proc)
+                break
+            if monotonic_time - last_progress_at >= ISO_PACK_STALL_SECONDS:
+                timed_out_reason = f"genisoimage 连续 {ISO_PACK_STALL_SECONDS // 60} 分钟没有写入进展，已终止"
+                terminate_subprocess(proc)
+                break
+            if pack_cancel_event.is_set():
+                timed_out_reason = "已请求取消当前 ISO 封装，genisoimage 已终止"
+                cancelled = True
+                terminate_subprocess(proc)
+                break
             if current_time - last_update >= 2:
                 update_active_progress("packing", target, {
                     "percent": min(percent, 99.9),
@@ -4624,6 +4914,8 @@ def run_iso(source: Path, target: Path, source_size: int) -> subprocess.Complete
         errfh.flush()
         errfh.seek(0)
         stderr = errfh.read()
+    if timed_out_reason:
+        stderr = f"{stderr.rstrip()}\n{timed_out_reason}".strip()
     try:
         stderr_path.unlink()
     except FileNotFoundError:
@@ -4635,22 +4927,36 @@ def run_iso(source: Path, target: Path, source_size: int) -> subprocess.Complete
         "total": source_size,
         "stage_text": "ISO 生成完成，等待校验",
     })
-    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    completed = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    completed.cancelled = cancelled
+    return completed
 
 
 def validate_iso(target: Path) -> bool:
     if not target.exists() or target.stat().st_size <= 0:
         return False
-    result = subprocess.run(["xorriso", "-indev", str(target), "-toc"], text=True, capture_output=True)
+    try:
+        result = subprocess.run(
+            ["xorriso", "-indev", str(target), "-toc"],
+            text=True,
+            capture_output=True,
+            timeout=ISO_VALIDATE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        log(f"xorriso 校验超过 {ISO_VALIDATE_TIMEOUT_SECONDS // 60} 分钟，已终止: {target}")
+        return False
     return result.returncode == 0
 
 
 
 def resolve_cd2_target_dir(cfg: Dict) -> Optional[Path]:
-    mount_root = Path(str(cfg.get("cd2_mount_root") or DEFAULT_CONFIG["cd2_mount_root"])).expanduser()
+    mount_root = resolve_absolute_path(cfg.get("cd2_mount_root") or DEFAULT_CONFIG["cd2_mount_root"])
     target_dir = Path(str(cfg.get("cd2_target_dir") or DEFAULT_CONFIG["cd2_target_dir"])).expanduser()
     if cfg.get("cd2_require_mount", True) and not mount_root.is_mount():
         log(f"CloudDrive2挂载目录未挂载，停止转移: {mount_root}")
+        return None
+    if cfg.get("cd2_require_mount", True) and not path_in_root(target_dir, mount_root):
+        log(f"CloudDrive2目标目录不在挂载根目录内，停止转移: {target_dir} -> {mount_root}")
         return None
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -4682,6 +4988,8 @@ def remove_failed_cd2_transfer_target(final_path: Path) -> None:
 def copy_iso_to_mount(source: Path, final_path: Path, total: int) -> bool:
     copied = 0
     last_update = 0.0
+    started_at = time.monotonic()
+    last_progress_at = started_at
     created = False
     try:
         with source.open("rb") as src, final_path.open("xb") as dst:
@@ -4693,6 +5001,13 @@ def copy_iso_to_mount(source: Path, final_path: Path, total: int) -> bool:
                 dst.write(chunk)
                 copied += len(chunk)
                 current_time = time.time()
+                monotonic_time = time.monotonic()
+                if monotonic_time - started_at >= ISO_TRANSFER_TIMEOUT_SECONDS:
+                    raise TimeoutError(f"ISO 转存超过 {ISO_TRANSFER_TIMEOUT_SECONDS // 3600} 小时")
+                if copied > 0 and monotonic_time - last_progress_at >= ISO_TRANSFER_STALL_SECONDS:
+                    raise TimeoutError("ISO 转存长时间没有进展")
+                if copied:
+                    last_progress_at = monotonic_time
                 if current_time - last_update >= 2:
                     percent = 100.0 if total <= 0 else copied * 100 / total
                     update_active_progress("transfer", final_path, {
@@ -4731,6 +5046,9 @@ def copy_iso_to_mount(source: Path, final_path: Path, total: int) -> bool:
 
 
 def finalize_cd2_transfer(target: Path, final_path: Path, total: int) -> bool:
+    if not final_path.exists():
+        log(f"CloudDrive2目标不存在: {final_path}")
+        return False
     if final_path.stat().st_size != total:
         log(f"CloudDrive2最终文件大小校验失败: {final_path.stat().st_size} != {total}")
         remove_failed_cd2_transfer_target(final_path)
@@ -4742,8 +5060,7 @@ def finalize_cd2_transfer(target: Path, final_path: Path, total: int) -> bool:
         "verified": True,
         "stage_text": "目标文件大小校验通过，正在收尾",
     })
-    target.unlink()
-    log(f"CloudDrive2转移完成并校验通过，已删除输出目录临时ISO: {target}，目标文件保留: {final_path}")
+    log(f"CloudDrive2转移完成并校验通过，目标文件保留: {final_path}")
     return True
 
 
@@ -4788,8 +5105,11 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
     final_path = target_dir / target.name
     if final_path.exists() and cd2_transfer_target_is_complete(target, final_path):
         try:
-            target.unlink()
-            log(f"CloudDrive2 目标目录已有同名且校验通过的 ISO，删除本机重复文件: {target}")
+            if not cfg.get("cd2_wait_upload_complete", True):
+                target.unlink()
+                log(f"CloudDrive2 目标目录已有同名且校验通过的 ISO，删除本机重复文件: {target}")
+            else:
+                log(f"CloudDrive2 目标目录已有同名且校验通过的 ISO，保留本机副本等待云端完成: {target}")
         except Exception as exc:
             log(f"CloudDrive2 目标目录已有同名且校验通过的 ISO，本机重复文件删除失败: {target} ({exc})")
         maybe_refresh_cd2_after_transfer(cfg, final_path)
@@ -4805,6 +5125,11 @@ def transfer_iso_to_mount(target: Path, cfg: Dict) -> Optional[Path]:
             return None
         if not finalize_cd2_transfer(target, final_path, total):
             return None
+        if not cfg.get("cd2_wait_upload_complete", True):
+            target.unlink()
+            log(f"CloudDrive2 转存完成，删除本机输出 ISO: {target}")
+        else:
+            log(f"CloudDrive2 转存完成，保留本机输出 ISO 等待云端完成: {target}")
         maybe_refresh_cd2_after_transfer(cfg, final_path)
         return final_path
     except Exception as exc:
@@ -4907,6 +5232,7 @@ def start_process_item_task(source: Path, target: Path, source_size: int, task_s
                 return f"跳过重复启动任务: {source}"
             return f"已有任务执行中，跳过 {source}: {active_source}"
 
+        pack_cancel_event.clear()
         item = state["items"].setdefault(str(source), {})
         item.update({
             "task_started_at": task_started_at,
@@ -4941,12 +5267,12 @@ def start_process_item_task(source: Path, target: Path, source_size: int, task_s
     return None
 
 
-def record_pack_failure(source: Path, error: str) -> None:
+def record_pack_failure(source: Path, error: str, failure_code: str = "pack_failed") -> None:
     with lock:
         state["active"] = None
         item = state["items"].setdefault(str(source), {})
         item["status"] = "failed"
-        set_failure(item, "pack_failed", error)
+        set_failure(item, failure_code, error)
         item["pack_finished_at"] = now()
         item["finished_at"] = now()
         item["last_changed"] = now()
@@ -5024,6 +5350,8 @@ def delete_source_if_configured(source: Path, cfg: Dict) -> Optional[str]:
     if not cfg.get("delete_source_after_success"):
         return None
     try:
+        if not source.exists():
+            return None
         if source.is_dir():
             shutil.rmtree(source)
         else:
@@ -5035,6 +5363,28 @@ def delete_source_if_configured(source: Path, cfg: Dict) -> Optional[str]:
         return str(exc)
 
 
+def complete_deferred_transfer_cleanup(source: Path, item: Dict, cfg: Dict) -> Optional[str]:
+    errors = []
+    local_output_text = str((item or {}).get("local_output_target") or "").strip()
+    if local_output_text:
+        try:
+            local_output = Path(local_output_text).expanduser().resolve()
+            output_dir = Path(str(cfg.get("output_dir") or DEFAULT_CONFIG["output_dir"])).expanduser().resolve()
+            if not path_in_root(local_output, output_dir):
+                errors.append("本机输出 ISO 不在配置的输出目录内")
+            elif local_output.exists():
+                local_output.unlink()
+                log(f"CD2 云端上传完成，删除本机输出 ISO: {local_output}")
+        except Exception as exc:
+            errors.append(f"删除本机输出 ISO 失败: {exc}")
+    source_error = delete_source_if_configured(source, cfg)
+    if source_error:
+        errors.append(f"删除源目录失败: {source_error}")
+    if not errors:
+        return None
+    return "；".join(errors)
+
+
 def finish_process_item_success(
     source: Path,
     final_target: Path,
@@ -5044,6 +5394,7 @@ def finish_process_item_success(
     transfer_finished_at,
     delete_source_error: Optional[str],
     cd2_upload_already_done: bool = False,
+    local_output_target: Optional[Path] = None,
 ) -> None:
     with lock:
         item = state["items"].setdefault(str(source), {})
@@ -5063,6 +5414,8 @@ def finish_process_item_success(
             "transfer_finished_at": transfer_finished_at,
             "size": source_size,
         }
+        if local_output_target:
+            update["local_output_target"] = str(local_output_target)
         if status == "waiting_cd2_upload":
             update["cd2_upload_wait_started_at"] = finished_at
             item.pop("cd2_upload_seen_at", None)
@@ -5071,10 +5424,13 @@ def finish_process_item_success(
             update["error"] = "监控 CloudDrive 上传队列"
             item.pop("done_at", None)
             item.pop("finished_at", None)
+            if cfg.get("cd2_wait_upload_complete"):
+                update["delete_source_pending"] = True
         else:
             update["done_at"] = finished_at
             update["finished_at"] = finished_at
             item.pop("error", None)
+            item.pop("delete_source_pending", None)
         item.update(update)
         clear_failure(item)
         if delete_source_error:
@@ -5182,7 +5538,11 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
                     partial.unlink()
                 except FileNotFoundError:
                     pass
-                record_pack_failure(source, error)
+                record_pack_failure(
+                    source,
+                    error,
+                    "pack_cancelled" if getattr(result, "cancelled", False) else "pack_failed",
+                )
                 return
 
             update_active_progress("finalize", target, {
@@ -5221,9 +5581,13 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
                     existing_upload = find_upload_for_path(upload_map, existing_target, cfg)
                     cd2_upload_already_done = bool(existing_upload and cd2_upload_done(existing_upload))
                     try:
-                        if target.resolve() != existing_target.resolve():
+                        if target.resolve() != existing_target.resolve() and (
+                            not cfg.get("cd2_wait_upload_complete", True) or cd2_upload_already_done
+                        ):
                             target.unlink()
                             log(f"CD2 目标目录已有同名且校验通过的 ISO，删除本机重复文件: {target}")
+                        elif target.resolve() != existing_target.resolve():
+                            log(f"CD2 目标目录已有同名且校验通过的 ISO，保留本机副本等待云端完成: {target}")
                     except Exception as exc:
                         log(f"CD2 目标目录已有同名且校验通过的 ISO，本机重复文件删除失败: {target} ({exc})")
                     log(f"CD2 目标目录已有同名且校验通过的 ISO，跳过重复转存: {existing_target}")
@@ -5248,7 +5612,13 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
             transfer_started_at = None
             transfer_finished_at = None
 
-        delete_source_error = delete_source_if_configured(source, cfg)
+        defer_source_delete = bool(
+            cfg.get("cd2_transfer_enabled")
+            and cfg.get("cd2_wait_upload_complete")
+            and not cd2_upload_already_done
+            and cfg.get("delete_source_after_success")
+        )
+        delete_source_error = None if defer_source_delete else delete_source_if_configured(source, cfg)
         finish_process_item_success(
             source,
             final_target,
@@ -5258,6 +5628,7 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
             transfer_finished_at,
             delete_source_error,
             cd2_upload_already_done=cd2_upload_already_done,
+            local_output_target=target,
         )
         cleanup_replaced_iso_candidates(source, final_target, replacement_candidates)
     except Exception as exc:
@@ -5287,6 +5658,7 @@ def scan_once(cfg: Dict) -> None:
 
     upload_map, cd2_status = fetch_cd2_uploads(cfg)
     check_waiting_cd2_uploads(cfg, upload_map, cd2_status)
+    reconcile_cd2_auto_pull_claims(cfg, cd2_status)
     maybe_auto_pull_cd2_candidate(cfg, cd2_status)
     for candidate in get_candidates(watch_dir, output_dir):
         key = str(candidate.resolve())
@@ -6784,7 +7156,12 @@ def finish_recovered_iso(source: Optional[Path], target: Path, cfg: Dict, active
     if not transfer.ok:
         return True
 
-    delete_source_error = delete_source_if_configured(source, cfg) if source.exists() else None
+    defer_source_delete = bool(
+        cfg.get("cd2_transfer_enabled")
+        and cfg.get("cd2_wait_upload_complete")
+        and cfg.get("delete_source_after_success")
+    )
+    delete_source_error = None if defer_source_delete else delete_source_if_configured(source, cfg)
     finish_process_item_success(
         source,
         transfer.target,
@@ -6793,6 +7170,14 @@ def finish_recovered_iso(source: Optional[Path], target: Path, cfg: Dict, active
         transfer.started_at,
         transfer.finished_at,
         delete_source_error,
+        local_output_target=(
+            target
+            if path_in_root(
+                target,
+                Path(str(cfg.get("output_dir") or DEFAULT_CONFIG["output_dir"])).expanduser().resolve(),
+            )
+            else None
+        ),
     )
     cleanup_recovered_output_copy(active, source, target, transfer.target, cfg)
     cleanup_replaced_iso_candidates(source, transfer.target, replacement_candidates)
@@ -7324,6 +7709,9 @@ def api_task_action():
     action = str((payload or {}).get("action") or "").strip().lower()
     if not source_text:
         return jsonify({"ok": False, "message": "缺少源路径"}), 400
+    if action == "cancel_pack":
+        result, status_code = cancel_active_pack(source_text)
+        return jsonify(result), status_code
     if action == "recheck":
         result, status_code, mode = reset_task_for_recheck(source_text, cfg)
         if result.get("ok"):
@@ -7645,13 +8033,18 @@ def api_file_actions():
             custom_path = normalize_path_text(payload.get("destination_path") or "")
             if not custom_path:
                 return jsonify({"ok": False, "message": "请填写目标目录"}), 400
-            destination = Path(custom_path).expanduser()
+            try:
+                destination = resolve_file_operation_destination(cfg, custom_path)
+            except ValueError as exc:
+                return jsonify({"ok": False, "message": str(exc)}), 403
         else:
             return jsonify({"ok": False, "message": "请选择目标目录"}), 400
         try:
             destination = destination.resolve()
         except Exception as exc:
             return jsonify({"ok": False, "message": f"目标目录无效: {exc}"}), 400
+        if not path_in_any_root(destination, file_operation_destination_roots(cfg)):
+            return jsonify({"ok": False, "message": "文件操作目标必须位于监控、输出或 CD2 挂载目录内"}), 403
         for source in sources:
             if source.resolve() == destination or path_in_root(destination, source.resolve()):
                 return jsonify({"ok": False, "message": "目标目录不能位于源目录内部"}), 400

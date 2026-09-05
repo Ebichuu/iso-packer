@@ -282,6 +282,14 @@
     setText("pipeline-stage-log", view.detail);
     setText("pipeline-progress-meta", view.meta);
     setText("pipeline-next-step", view.next);
+    const cancelButton = document.getElementById("pipeline-cancel-pack");
+    const phase = String((job && (job.phase || job.status)) || "").toLowerCase();
+    const canCancelPack = Boolean(job && job.source_path && ["packing", "running", "ready"].includes(phase));
+    if (cancelButton) {
+      cancelButton.classList.toggle("hidden", !canCancelPack);
+      cancelButton.dataset.taskSource = canCancelPack ? job.source_path : "";
+      cancelButton.disabled = false;
+    }
 
     const liveCard = document.getElementById("pipeline-live-card");
     if (liveCard) liveCard.className = toneClass(view.tone, "card");
@@ -963,7 +971,8 @@
   async function taskAction(sourcePath, action, button) {
     if (!sourcePath || !action) return;
     if (action === "confirm_upload" && !window.confirm("确认 CD2 目标 ISO 已完整上传？系统会重新校验文件，不会删除文件。")) return;
-    if (action.startsWith("cancel_") && !window.confirm("确认取消当前 CD2 任务？取消后需要重新提交。")) return;
+    if (action === "cancel_pack" && !window.confirm("确认取消当前 ISO 封装？源目录会保留，之后可重新封装。")) return;
+    if (action.startsWith("cancel_") && action !== "cancel_pack" && !window.confirm("确认取消当前 CD2 任务？取消后需要重新提交。")) return;
     const originalText = button ? button.textContent : "";
     if (button) {
       button.disabled = true;
@@ -1066,6 +1075,13 @@
     const diagnosticsButton = document.querySelector("[data-cd2-diagnostics-refresh]");
     if (diagnosticsButton) diagnosticsButton.addEventListener("click", loadCd2Diagnostics);
     if (document.querySelector("[data-cd2-diagnostics-output]")) loadCd2Diagnostics();
+
+    const cancelPackButton = document.getElementById("pipeline-cancel-pack");
+    if (cancelPackButton) {
+      cancelPackButton.addEventListener("click", () => {
+        taskAction(cancelPackButton.dataset.taskSource || "", "cancel_pack", cancelPackButton);
+      });
+    }
 
     document.querySelectorAll("[data-task-recovery-action]").forEach((button) => {
       button.addEventListener("click", () => taskAction(

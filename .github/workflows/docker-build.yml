@@ -4,7 +4,33 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: python -m pip install -r v2.0/requirements.txt
+
+      - name: Run backend tests and smoke test
+        working-directory: v2.0/iso-packer
+        run: |
+          python -m unittest -v test_app
+          python -B scripts/smoke_v2.py
+          python -B -m py_compile app.py core.py release_calendar_fetcher.py scripts/smoke_v2.py scripts/update_release_calendar.py
+
+      - name: Check frontend JavaScript syntax
+        working-directory: v2.0/iso-packer
+        run: for file in static/js/*.js; do node --check "$file"; done
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
