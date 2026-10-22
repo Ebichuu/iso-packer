@@ -8,6 +8,7 @@ import re
 import shutil
 import secrets
 import signal
+import stat as stat_module
 import subprocess
 import threading
 import time
@@ -87,9 +88,11 @@ _process_config = None
 _process_worker = None
 _worker_process_child = os.getenv("ISO_PACKER_WORKER_CHILD") == "1"
 _worker_ipc_ready = False
+_worker_snapshot_revision = 0
 _worker_subprocess_lock = threading.Lock()
 _worker_subprocesses = set()
 upload_control_lock = threading.Lock()
+upload_control_rpc_lock = threading.RLock()
 upload_control_started = False
 upload_transfer_context = threading.local()
 deferred_upload_lock = threading.Lock()
@@ -101,8 +104,10 @@ lock = threading.RLock()
 cd2_lock = threading.RLock()
 worker_lock = threading.Lock()
 file_operation_lock = threading.RLock()
+file_operation_execution_lock = threading.Lock()
 file_operation_tasks = {}
 pack_cancel_event = threading.Event()
+process_dispatch_lock = threading.Lock()
 cd2_candidate_scan_lock = threading.RLock()
 cd2_candidate_scan_state = {
     "thread": None,
@@ -172,6 +177,8 @@ FAILURE_LABELS = {
     "output_exists": "输出ISO已存在",
     "pack_failed": "封装失败",
     "pack_cancelled": "封装已取消",
+    "source_changed": "源目录已变化",
+    "recovery_unverified": "中断任务需要核对",
     "verify_failed": "校验失败",
     "transfer_failed": "CD2 转移失败",
     "target_exists": "上传目录已有同名ISO",
@@ -193,6 +200,8 @@ FAILURE_SUGGESTIONS = {
     "output_exists": "输出目录已经有同名 ISO，但无法确认它是可复用的完整文件；请手动删除、移动或改名后再重新封装。",
     "pack_failed": "查看系统日志里的 genisoimage 错误，确认原盘结构完整且路径可读。",
     "pack_cancelled": "封装已取消，源目录和未完成的 .partial 文件会保留/清理，可在确认源目录稳定后重新封装。",
+    "source_changed": "已保留源目录和 ISO；等待源目录稳定后，人工核对并移走旧 ISO，再重新封装。",
+    "recovery_unverified": "已保留源目录和 ISO；旧任务缺少有效生成记录，请人工核对后移走同名 ISO，再重新封装。",
     "verify_failed": "保留源目录和 ISO，优先检查 xorriso 是否可用以及输出文件是否完整。",
     "transfer_failed": "检查 CD2 挂载目录、目标路径权限和磁盘空间后重新封装。",
     "target_exists": "上传目录已经有同名 ISO，但无法确认它是同一份完整文件；请手动删除、移动或改名后再重新封装。",
@@ -454,6 +463,57 @@ def resolve_file_browser_path(cfg: Dict, root_name: str, raw_path: str) -> tuple
     return path, root
 
 
+def reject_file_operation_links(path: Path) -> None:
+    """Mutations must refer to the selected entry, never a link's target."""
+    current = Path(os.path.abspath(str(path.expanduser())))
+    for part in (current, *current.parents):
+        if part.is_symlink() or (hasattr(part, "is_junction") and part.is_junction()):
+            raise ValueError("文件操作不支持符号链接或包含符号链接的路径")
+
+
+def file_operation_identity(path: Path, content: bool = False) -> Dict:
+    value = path.lstat()
+    result = {name: int(getattr(value, name)) for name in ("st_dev", "st_ino", "st_mode")}
+    if content and (stat_module.S_ISREG(value.st_mode) or stat_module.S_ISDIR(value.st_mode)):
+        result.update(st_size=value.st_size, st_mtime_ns=value.st_mtime_ns, st_ctime_ns=value.st_ctime_ns)
+    return result
+
+
+def file_operation_path_guard(path: Path, root: Path, source: bool = False) -> Dict:
+    reject_file_operation_links(path)
+    root = root.resolve()
+    if not path_in_root(path, root):
+        raise ValueError("文件操作路径已越过授权根目录")
+    parents = []
+    current = path.parent if source else path
+    while True:
+        if current.exists():
+            if not current.is_dir():
+                raise ValueError("文件操作目标父路径不是目录")
+            parents.append({"path": str(current), "identity": file_operation_identity(current)})
+        if current == root:
+            break
+        if current.parent == current or not path_in_root(current, root):
+            raise ValueError("文件操作路径已越过授权根目录")
+        current = current.parent
+    return {"path": str(path), "root": str(root), "parents": parents,
+            "identity": file_operation_identity(path, content=True) if source else None}
+
+
+def verify_file_operation_guard(guard: Dict, cfg: Dict, source: bool = False) -> Path:
+    path, root = Path(guard["path"]), Path(guard["root"])
+    reject_file_operation_links(path)
+    allowed_roots = file_browser_roots_from_config(cfg).values() if source else file_operation_destination_roots(cfg)
+    if not any(root == candidate.resolve() for candidate in allowed_roots) or not path_in_root(path, root):
+        raise ValueError("文件操作授权根目录已改变，请重新选择")
+    for parent in guard["parents"]:
+        if file_operation_identity(Path(parent["path"])) != parent["identity"]:
+            raise ValueError("文件操作父目录已改变，请重新选择")
+    if source and file_operation_identity(path, content=True) != guard["identity"]:
+        raise ValueError("源文件或目录已改变，请重新选择")
+    return path
+
+
 def file_operation_snapshot(task_id: str) -> Dict:
     with file_operation_lock:
         return dict(file_operation_tasks.get(task_id) or {})
@@ -508,10 +568,48 @@ def copy_file_operation_source(source: Path, target: Path) -> None:
     if source.is_dir():
         if path_in_root(target.parent, source):
             raise ValueError("目标目录不能位于源目录内部")
-        shutil.copytree(source, target, symlinks=True, copy_function=guarded_file_copy)
+        shutil.copytree(source, target, symlinks=True, copy_function=exclusive_file_operation_copy)
         return
     target.parent.mkdir(parents=True, exist_ok=True)
-    guarded_file_copy(source, target)
+    exclusive_file_operation_copy(source, target)
+
+
+def exclusive_file_operation_copy(source, target):
+    """Reserve each output exclusively, including targets created by another task."""
+    cfg = _process_config or DEFAULT_CONFIG
+    source, target = Path(source), Path(target)
+    reject_file_operation_links(source)
+    reject_file_operation_links(target)
+    mount = Path(str(cfg.get("cd2_mount_root") or DEFAULT_CONFIG["cd2_mount_root"]))
+    touches_mount = path_in_root(source, mount) or path_in_root(target, mount)
+    created_identity = None
+    try:
+        if touches_mount:
+            require_upload_allowed(current_upload_control_config(cfg))
+        with source.open("rb") as src, target.open("xb") as dst:
+            created_identity = file_operation_identity(target)
+            while True:
+                if touches_mount:
+                    require_upload_allowed(current_upload_control_config(cfg))
+                block = src.read(16 * 1024 * 1024)
+                if not block:
+                    break
+                if touches_mount:
+                    require_upload_allowed(current_upload_control_config(cfg))
+                dst.write(block)
+        shutil.copystat(source, target)
+        if touches_mount:
+            require_upload_allowed(current_upload_control_config(cfg))
+    except Exception:
+        if created_identity is not None:
+            try:
+                current_identity = file_operation_identity(target)
+                if all(current_identity[key] == created_identity[key] for key in ("st_dev", "st_ino")):
+                    target.unlink()
+            except OSError:
+                pass
+        raise
+    return str(target)
 
 
 def guarded_file_copy(source, target):
@@ -616,7 +714,14 @@ def file_property_payload(path: Path, root_name: str, root: Path, cfg: Optional[
     return payload
 
 
-def run_file_operation_task(task_id: str, action: str, sources: list[Path], destination: Optional[Path]) -> None:
+def run_file_operation_task(task_id: str, action: str, sources: list[Path], destination: Optional[Path], guards: Dict) -> None:
+    # Serialise this service's mutations so two tasks cannot pass a target
+    # existence check together and then overwrite one another.
+    with file_operation_execution_lock:
+        _run_file_operation_task(task_id, action, sources, destination, guards)
+
+
+def _run_file_operation_task(task_id: str, action: str, sources: list[Path], destination: Optional[Path], guards: Dict) -> None:
     update_file_operation_task(task_id, status="running", message="正在处理", done=0)
     results = []
     try:
@@ -625,32 +730,39 @@ def run_file_operation_task(task_id: str, action: str, sources: list[Path], dest
         if (destination and path_in_root(destination, mount)) or any(path_in_root(source, mount) for source in sources):
             require_upload_allowed(cfg)
         if destination and action in {"copy", "move"}:
+            verify_file_operation_guard(guards["destination"], cfg)
             destination.mkdir(parents=True, exist_ok=True)
         for index, source in enumerate(sources, start=1):
             item = {"source": str(source), "ok": False}
             try:
+                verify_file_operation_guard(guards["sources"][index - 1], cfg, source=True)
+                if destination:
+                    verify_file_operation_guard(guards["destination"], cfg)
                 if (destination and path_in_root(destination, mount)) or path_in_root(source, mount):
                     require_upload_allowed(current_upload_control_config(cfg))
                 if not source.exists():
                     raise FileNotFoundError("源路径不存在")
                 if action == "copy":
-                    target = (destination / source.name).resolve()
-                    if target.exists():
+                    target = destination / source.name
+                    reject_file_operation_links(target)
+                    if os.path.lexists(target):
                         raise FileExistsError(f"目标已存在: {target}")
                     copy_file_operation_source(source, target)
                     item.update({"ok": True, "target": str(target)})
                 elif action == "move":
-                    target = (destination / source.name).resolve()
-                    if target.exists():
+                    target = destination / source.name
+                    reject_file_operation_links(target)
+                    if os.path.lexists(target):
                         raise FileExistsError(f"目标已存在: {target}")
                     if source.is_dir() and path_in_root(target.parent, source):
                         raise ValueError("目标目录不能位于源目录内部")
-                    shutil.move(str(source), str(target), copy_function=guarded_file_copy)
+                    shutil.move(str(source), str(target), copy_function=exclusive_file_operation_copy)
                     item.update({"ok": True, "target": str(target)})
                 elif action == "rename":
                     if len(sources) != 1 or destination is None:
                         raise ValueError("重命名只能处理单个条目")
-                    if destination.exists():
+                    reject_file_operation_links(destination)
+                    if os.path.lexists(destination):
                         raise FileExistsError(f"目标已存在: {destination}")
                     source.rename(destination)
                     item.update({"ok": True, "target": str(destination)})
@@ -2495,13 +2607,18 @@ def reconcile_cd2_auto_pull_claims(cfg: Dict, cd2_status: Optional[Dict]) -> Dic
         mode = claim.get("mode") or "auto"
         source_path = normalize_path_text(claim.get("source_path"))
         dest_dir = normalize_path_text(claim.get("dest_dir"))
-        task = next(
-            (
-                task for task in cd2_status.get("copy_tasks", []) or []
-                if cd2_copy_task_matches_claim(task, source_path, dest_dir)
-            ),
-            None,
-        )
+        related_tasks = [
+            task for task in cd2_status.get("copy_tasks", []) or []
+            if cd2_copy_task_matches_claim(task, source_path, dest_dir,
+                                           result_paths=claim.get("result_paths"), allow_descendants=True)
+        ]
+        # A child task can block or fail the copy, but only the exact source
+        # and its actual (possibly renamed) result may prove completion.
+        failed_tasks = [task for task in related_tasks if is_task_failed(task) or int(task.get("failed_files") or 0) > 0]
+        active_tasks = [task for task in related_tasks if not is_copy_task_done(task)]
+        completed_tasks = [task for task in related_tasks if is_copy_task_done(task)
+                           and cd2_copy_task_matches_claim(task, source_path, dest_dir, result_paths=claim.get("result_paths"))]
+        task = next(iter(failed_tasks or active_tasks or completed_tasks), None)
         if task:
             update_cd2_auto_pull_claim(source_path, dest_dir, "submitted", seen_task=True, last_task=task)
             if is_task_failed(task) or int(task.get("failed_files") or 0) > 0:
@@ -2848,7 +2965,7 @@ def cd2_remote_task_matches_pull(source_path: str, dest_dir: str, cd2_status: Op
     for task in cd2_status.get("copy_tasks", []) or []:
         if is_copy_task_done(task):
             continue
-        if cd2_copy_task_matches_claim(task, source_path, dest_dir):
+        if cd2_copy_task_matches_claim(task, source_path, dest_dir, allow_descendants=True):
             return True
     for task in cd2_status.get("downloads", []) or []:
         if is_download_done(task):
@@ -2859,15 +2976,31 @@ def cd2_remote_task_matches_pull(source_path: str, dest_dir: str, cd2_status: Op
     return False
 
 
-def cd2_copy_task_matches_claim(task: Dict, source_path: str, dest_dir: str) -> bool:
-    """Match a copy task by both API-reported source and destination."""
-    if not cd2_task_source_matches_path(task.get("source") or "", source_path):
+def cd2_copy_task_matches_claim(
+    task: Dict, source_path: str, dest_dir: str, *, result_paths: Optional[list[str]] = None,
+    allow_descendants: bool = False,
+) -> bool:
+    """Require the claimed source and destination; descendants only block."""
+    task_source = normalize_path_text(task.get("source") or "")
+    source_path = normalize_path_text(source_path)
+    if not source_path or not task_source or (
+        task_source != source_path
+        and (not allow_descendants or not cd2_task_source_matches_path(task_source, source_path))
+    ):
         return False
     task_dest = normalize_path_text(task.get("target") or "")
     dest_dir = normalize_path_text(dest_dir)
     if not task_dest or not dest_dir:
         return False
-    return task_dest == dest_dir or task_dest.startswith(dest_dir.rstrip("/") + "/")
+    # CD2 may report either the destination directory or the full result.
+    # CopyFile's returned result paths take precedence over the source name
+    # because conflictPolicy=Rename can change the destination filename.
+    result_targets = [normalize_path_text(path) for path in (result_paths or []) if normalize_path_text(path)]
+    if not result_targets:
+        result_targets = [dest_dir.rstrip("/") + "/" + source_path.rsplit("/", 1)[-1]]
+    if task_dest == dest_dir or task_dest in result_targets:
+        return True
+    return bool(allow_descendants and any(task_dest.startswith(path.rstrip("/") + "/") for path in result_targets))
 
 
 def cd2_task_source_matches_path(task_source: str, source_path: str) -> bool:
@@ -3139,7 +3272,9 @@ def cd2_recorded_pull_pending(item: Dict, cd2_status: Optional[Dict], finish_mis
     for task in cd2_status.get("copy_tasks", []) or []:
         if is_copy_task_done(task):
             continue
-        if cd2_copy_task_matches_claim(task, source_path, dest_dir):
+        if cd2_copy_task_matches_claim(task, source_path, dest_dir,
+                                      result_paths=item.get("cd2_pull_result_paths") or (claim or {}).get("result_paths"),
+                                      allow_descendants=True):
             item["cd2_pull_seen_task"] = True
             return task
     if not finish_missing:
@@ -3914,11 +4049,62 @@ def cd2_upload_claim_path_matches(path: str, target: str, cfg: Dict) -> bool:
                 {value.casefold() for value in upload_lookup_keys(target, cfg)})
 
 
+def windows_file_change_time_ns(path: Path) -> Optional[int]:
+    """Read NTFS change time without opening or reading the file contents."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FileBasicInfo(ctypes.Structure):
+            _fields_ = [
+                ("CreationTime", ctypes.c_longlong),
+                ("LastAccessTime", ctypes.c_longlong),
+                ("LastWriteTime", ctypes.c_longlong),
+                ("ChangeTime", ctypes.c_longlong),
+                ("FileAttributes", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                               wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        create_file.restype = wintypes.HANDLE
+        get_info = kernel32.GetFileInformationByHandleEx
+        get_info.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+        get_info.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        # FILE_READ_ATTRIBUTES, all sharing modes, OPEN_EXISTING and
+        # FILE_FLAG_BACKUP_SEMANTICS also support source directories.
+        handle = create_file(str(path), 0x80, 0x7, None, 3, 0x02000000, None)
+        if handle in (None, ctypes.c_void_p(-1).value):
+            return None
+        try:
+            info = FileBasicInfo()
+            if not get_info(handle, 0, ctypes.byref(info), ctypes.sizeof(info)):
+                return None
+            # FILE_BASIC_INFO.ChangeTime uses 100ns ticks since 1601.
+            return (info.ChangeTime - 116444736000000000) * 100 if info.ChangeTime > 116444736000000000 else None
+        finally:
+            close_handle(handle)
+    except (AttributeError, ImportError, OSError, ValueError):
+        return None
+
+
 def cleanup_file_identity(path: Path) -> Optional[Dict]:
     try:
         value = path.stat()
-        return {name: int(getattr(value, name)) for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns")}
-    except OSError:
+        # Windows st_ctime is creation time, so use FILE_BASIC_INFO.ChangeTime
+        # to detect same-size overwrites that preserve the modification time.
+        change_time = windows_file_change_time_ns(path) if os.name == "nt" else value.st_ctime_ns
+        if change_time is None or int(change_time) <= 0:
+            return None
+        return {**{name: int(getattr(value, name)) for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns")},
+                "st_ctime_ns": int(change_time)}
+    except (AttributeError, OSError, TypeError, ValueError):
         return None
 
 
@@ -3937,6 +4123,10 @@ def begin_cd2_upload_claim(source: Path, target: Path, cfg: Dict, expected_size:
         source_tree = None
     with lock:
         item = state.setdefault("items", {}).setdefault(source_text, {})
+        pack_guard = item.get("pack_source_guard")
+        if pack_guard:
+            source_identity = pack_guard.get("source_identity")
+            source_tree = pack_guard.get("source_tree")
         history = state.setdefault("cd2", {}).setdefault("upload_claim_history", {})
         previous = history.get(history_key) or {}
         old_claim = item.get("cd2_upload_claim") or {}
@@ -4085,7 +4275,7 @@ def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[
                 continue
             if evidence and cd2_upload_done(evidence):
                 finish_cd2_upload_item(item, evidence, now_value)
-                if item.get("delete_source_pending"):
+                if item.get("delete_source_pending") or item.get("replacement_cleanup_pending"):
                     deferred_cleanup.append((key, dict(item)))
                 log_messages.append(f"CD2 上传完成（PushMessage 明确 Finish）: {item.get('target') or key}")
                 continue
@@ -4108,7 +4298,7 @@ def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[
             if upload and cd2_upload_done(upload):
                 upload = dict(upload, evidence_source="queue")
                 finish_cd2_upload_item(item, upload, now_value)
-                if item.get("delete_source_pending"):
+                if item.get("delete_source_pending") or item.get("replacement_cleanup_pending"):
                     deferred_cleanup.append((key, dict(item)))
                 log_messages.append(f"CD2 上传完成: {item.get('target') or key}")
                 continue
@@ -4136,11 +4326,12 @@ def check_waiting_cd2_uploads(cfg: Dict, upload_map: Dict, cd2_status: Optional[
                 continue
             # Application reruns share this lock, so no new source generation
             # can take ownership between validation and deferred deletion.
-            cleanup_error = complete_deferred_transfer_cleanup(Path(key).expanduser(), item_snapshot, cfg)
+            cleanup_error = complete_deferred_transfer_cleanup(Path(key).expanduser(), item_snapshot, cfg) if item_snapshot.get("delete_source_pending") else None
             if cleanup_error:
                 set_warning(current, "deferred_cleanup_failed", cleanup_error)
             else:
                 current.pop("delete_source_pending", None)
+            cleanup_replaced_iso_candidates(Path(key), Path(current["target"]))
             save_state_locked()
     for message in log_messages:
         log(message)
@@ -4225,6 +4416,12 @@ def reset_task_for_recheck(source_text: str, cfg: Dict):
         item.pop("cd2_upload", None)
         item.pop("cd2_upload_seen_at", None)
         item.pop("cd2_upload_done_at", None)
+        claim = item.get("cd2_upload_claim") or {}
+        if cd2_upload_failed(claim.get("terminal") or {}):
+            # Recheck starts a fresh observation of this same upload. Keep
+            # its key/generation and cleanup guards, but discard the prior
+            # failure so a fresh API Transfer/Finish can supersede it.
+            claim.pop("terminal", None)
         clear_failure(item)
         clear_cd2_upload_monitor(item)
         save_state_locked()
@@ -4319,7 +4516,7 @@ def fetch_upload_control_queue(client):
 def call_upload_control_keys(client, action: str, keys: list[str]) -> None:
     if not keys:
         return
-    rpc_name = "PauseUploadFiles" if action == "pause" else "ResumeUploadFiles"
+    rpc_name = {"pause": "PauseUploadFiles", "resume": "ResumeUploadFiles", "cancel": "CancelUploadFiles"}[action]
     stub = getattr(client, "stub", None)
     method = getattr(stub, rpc_name, None) if stub is not None else None
     if callable(method):
@@ -4330,7 +4527,7 @@ def call_upload_control_keys(client, action: str, keys: list[str]) -> None:
             kwargs["metadata"] = metadata
         method(cd2_pb2.MultpleUploadFileKeyRequest(keys=keys), **kwargs)
         return
-    wrapper = getattr(client, "pause_upload_files" if action == "pause" else "resume_upload_files", None)
+    wrapper = getattr(client, {"pause": "pause_upload_files", "resume": "resume_upload_files", "cancel": "cancel_upload_files"}[action], None)
     if not callable(wrapper):
         raise RuntimeError("当前 CD2 API 不支持按任务暂停/恢复上传；已拒绝全局恢复")
     wrapper(keys)
@@ -4365,21 +4562,39 @@ def reconcile_upload_control(cfg: Dict) -> Dict:
             if desired["effective_paused"]:
                 targets = {key: info for key, info in active.items() if not upload_is_paused(info)}
                 if targets:
-                    call_upload_control_keys(client, "pause", list(targets))
-                    for key, info in targets.items():
-                        owned[key] = {"path": normalize_path_text(info.get("path") or ""), "paused_at": beijing_now().isoformat(timespec="seconds")}
-                    with lock:
-                        state["cd2"]["upload_control_owned"][binding] = owned
-                        save_state_locked()
+                    with upload_control_rpc_lock:
+                        rpc_cfg = current_upload_control_config(cfg)
+                        if upload_control_binding(rpc_cfg) != binding:
+                            raise RuntimeError("等待上传控制期间 CD2 连接配置已变化，未提交旧暂停请求")
+                        if not upload_control_status(rpc_cfg)["effective_paused"]:
+                            save_upload_control_runtime(binding=binding, remote_pause_confirmed=False, last_error=None)
+                            return upload_control_payload(rpc_cfg)
+                        call_upload_control_keys(client, "pause", list(targets))
+                        with lock:
+                            current_owned = state["cd2"]["upload_control_owned"].setdefault(binding, {})
+                            user_pauses = state["cd2"].get("upload_control_user_pauses", {}).get(binding, {})
+                            for key, info in targets.items():
+                                path = normalize_path_text(info.get("path") or "")
+                                if (user_pauses.get(key) or {}).get("path") == path:
+                                    current_owned.pop(key, None)
+                                    continue
+                                current_owned[key] = {"path": path, "paused_at": beijing_now().isoformat(timespec="seconds"), "token": secrets.token_hex(16)}
+                            owned = copy.deepcopy(current_owned)
+                            save_state_locked()
                     uploads = fetch_upload_control_queue(client)
                     active = {key: info for key, info in uploads.items() if not cd2_upload_control_is_terminal(info)}
                 pending = sum(not upload_is_paused(info) for info in active.values())
                 confirmed = pending == 0
             else:
-                resumable = [key for key, record in owned.items() if key in uploads and normalize_path_text(uploads[key].get("path") or "") == record.get("path") and upload_is_paused(uploads[key])]
+                with upload_control_rpc_lock:
+                    with lock:
+                        owned = copy.deepcopy(state["cd2"]["upload_control_owned"].get(binding) or {})
+                        user_pauses = copy.deepcopy(state["cd2"].get("upload_control_user_pauses", {}).get(binding) or {})
+                    resumable = [key for key, record in owned.items() if key in uploads and normalize_path_text(uploads[key].get("path") or "") == record.get("path") and upload_is_paused(uploads[key]) and (user_pauses.get(key) or {}).get("path") != record.get("path")]
+                    if resumable:
+                        require_upload_allowed(current_upload_control_config(cfg))
+                        call_upload_control_keys(client, "resume", resumable)
                 if resumable:
-                    require_upload_allowed(current_upload_control_config(cfg))
-                    call_upload_control_keys(client, "resume", resumable)
                     uploads = fetch_upload_control_queue(client)
                 # Missing entries stay in the ledger. Their disappearance is
                 # never evidence that a pause/resume completed successfully.
@@ -4388,11 +4603,15 @@ def reconcile_upload_control(cfg: Dict) -> Dict:
                     if upload is None:
                         continue
                     if normalize_path_text(upload.get("path") or "") != record.get("path") or cd2_upload_control_is_terminal(upload) or not upload_is_paused(upload):
-                        owned.pop(key, None)
-                pending = len(owned)
+                        with lock:
+                            current_owned = state["cd2"]["upload_control_owned"].get(binding) or {}
+                            if current_owned.get(key) == record:
+                                current_owned.pop(key, None)
                 confirmed = False
             with lock:
-                state["cd2"]["upload_control_owned"][binding] = owned
+                owned = copy.deepcopy(state["cd2"]["upload_control_owned"].get(binding) or {})
+                if not desired["effective_paused"]:
+                    pending = len(owned)
                 save_state_locked()
             save_upload_control_runtime(
                 binding=binding,
@@ -4446,11 +4665,15 @@ def resume_deferred_uploads(cfg: Dict) -> None:
     if not deferred_upload_lock.acquire(blocking=False):
         return
     try:
+        cfg = current_upload_control_config(cfg)
+        if not worker_started or not cfg.get("enabled") or env_flag_enabled("ISO_PACKER_DISABLE_WORKER") or upload_control_status(cfg)["effective_paused"]:
+            return
         with lock:
             if state.get("active"):
                 return
             sources = [source for source, item in state.get("items", {}).items() if item.get("status") == "waiting_upload_window"]
-        if sources and not upload_control_status(cfg)["effective_paused"]:
+        cfg = current_upload_control_config(cfg)
+        if sources and cfg.get("enabled") and not env_flag_enabled("ISO_PACKER_DISABLE_WORKER") and not upload_control_status(cfg)["effective_paused"]:
             process_item(Path(sources[0]), cfg)
     finally:
         deferred_upload_lock.release()
@@ -4499,7 +4722,7 @@ def cd2_control_task_with_api(client, kind: str, action: str, task: Dict) -> Non
     }.get(action)
     if not rpc_name:
         raise ValueError("不支持的 CD2 上传操作")
-    cd2_call_rpc(client, rpc_name, request)
+    call_upload_control_keys(client, action.removesuffix("_upload"), [key])
 
 
 def control_cd2_task(source_text: str, action: str, cfg: Dict):
@@ -4536,7 +4759,7 @@ def control_cd2_task(source_text: str, action: str, cfg: Dict):
             (
                 candidate for candidate in cd2_status.get("copy_tasks", []) or []
                 if not is_copy_task_done(candidate)
-                and cd2_copy_task_matches_claim(candidate, remote_source, remote_dest)
+                and cd2_copy_task_matches_claim(candidate, remote_source, remote_dest, result_paths=item.get("cd2_pull_result_paths") or [])
             ),
             None,
         )
@@ -4551,8 +4774,30 @@ def control_cd2_task(source_text: str, action: str, cfg: Dict):
     client = get_cd2_client(cfg)
     if client is None:
         return {"ok": False, "message": cd2_client_cache.get("last_error") or "CD2 API 未连接"}, 409
+    if kind == "upload":
+        with lock:
+            binding = upload_control_binding(cfg)
+            state.setdefault("cd2", {}).setdefault("upload_control_owned", {}).get(binding, {}).pop(str(task.get("key") or ""), None)
+            if action == "pause_upload":
+                user_pauses = state["cd2"].setdefault("upload_control_user_pauses", {}).setdefault(binding, {})
+                user_pauses[str(task.get("key") or "")] = {"path": normalize_path_text(task.get("path") or ""), "requested_at": now()}
+                while len(user_pauses) > CD2_UPLOAD_EVIDENCE_LIMIT:
+                    del user_pauses[next(iter(user_pauses))]
+            save_state_locked()
     try:
-        cd2_control_task_with_api(client, kind, action, task)
+        if kind == "upload":
+            if not upload_control_rpc_lock.acquire(timeout=8):
+                raise RuntimeError("上传控制请求仍在执行，手动暂停归属已保存，请稍后确认 CD2 状态")
+            try:
+                cd2_control_task_with_api(client, kind, action, task)
+                if action in {"resume_upload", "cancel_upload"}:
+                    with lock:
+                        state["cd2"].get("upload_control_user_pauses", {}).get(binding, {}).pop(str(task.get("key") or ""), None)
+                        save_state_locked()
+            finally:
+                upload_control_rpc_lock.release()
+        else:
+            cd2_control_task_with_api(client, kind, action, task)
     except Exception as exc:
         return {"ok": False, "message": f"{CD2_TASK_CONTROL_LABELS[action]}失败：{cd2_error_message(exc)}"}, 400
 
@@ -4604,7 +4849,7 @@ def confirm_cd2_upload_task(source_text: str, cfg: Dict):
         return {"ok": False, "message": "任务不存在或已被清理"}, 404
     with lock:
         item = state.get("items", {}).get(key)
-        snapshot = dict(item or {})
+        snapshot = copy.deepcopy(item or {})
     status = snapshot.get("status")
     failure_code = snapshot.get("failure_code")
     if status == "transfer_done":
@@ -4634,6 +4879,7 @@ def confirm_cd2_upload_task(source_text: str, cfg: Dict):
     except (TypeError, ValueError):
         expected_size = 0
     actual_size = target.stat().st_size
+    target_identity = cleanup_file_identity(target)
     if expected_size > 0 and actual_size != expected_size:
         return {"ok": False, "message": f"CD2 目标 ISO 大小不一致: {actual_size} != {expected_size}"}, 409
     try:
@@ -4648,6 +4894,12 @@ def confirm_cd2_upload_task(source_text: str, cfg: Dict):
         current = state.get("items", {}).get(key)
         if not current:
             return {"ok": False, "message": "任务不存在或已被清理"}, 404
+        if (current.get("task_generation") != snapshot.get("task_generation")
+                or (current.get("cd2_upload_claim") or {}).get("generation") != (snapshot.get("cd2_upload_claim") or {}).get("generation")
+                or (current.get("status") not in {"waiting_cd2_upload", "transfer_done"}
+                    and current.get("failure_code") not in CD2_UPLOAD_RECHECK_FAILURES)
+                or not target_identity or target_identity != cleanup_file_identity(target)):
+            return {"ok": False, "message": "任务或 ISO 已变化，请重新检测后再确认"}, 409
         if current.get("status") == "transfer_done":
             return {"ok": True, "message": "该任务已经标记为已上传", "source": key}, 200
         if current.get("target") != snapshot.get("target"):
@@ -4660,16 +4912,14 @@ def confirm_cd2_upload_task(source_text: str, cfg: Dict):
         deferred_cleanup = bool(current.get("delete_source_pending"))
         cleanup_snapshot = dict(current)
         save_state_locked()
-    if deferred_cleanup:
-        cleanup_error = complete_deferred_transfer_cleanup(source, cleanup_snapshot, cfg)
-        with lock:
-            current = state.get("items", {}).get(key)
-            if current is not None:
-                if cleanup_error:
-                    set_warning(current, "deferred_cleanup_failed", cleanup_error)
-                else:
-                    current.pop("delete_source_pending", None)
-                save_state_locked()
+        if deferred_cleanup:
+            cleanup_error = complete_deferred_transfer_cleanup(source, cleanup_snapshot, cfg)
+            if cleanup_error:
+                set_warning(current, "deferred_cleanup_failed", cleanup_error)
+            else:
+                current.pop("delete_source_pending", None)
+        cleanup_replaced_iso_candidates(source, target)
+        save_state_locked()
     log(f"人工确认 CD2 上传完成: {target}")
     return {"ok": True, "message": "已确认 CD2 上传完成", "source": key, "target": str(target)}, 200
 
@@ -4690,30 +4940,77 @@ def size_of(path: Path) -> int:
 
 
 def tree_signature(path: Path) -> Optional[Dict]:
-    if path.is_file():
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
-            return None
-        return {"file_count": 1, "dir_count": 0, "latest_mtime": stat.st_mtime_ns}
     file_count = 0
     dir_count = 0
     latest_mtime = 0
-    for root, dirs, files in os.walk(path):
-        dirs[:] = [d for d in dirs if d not in {"@eaDir", ".Trash", ".DS_Store"}]
-        dir_count += len(dirs)
-        try:
-            latest_mtime = max(latest_mtime, Path(root).stat().st_mtime_ns)
-        except FileNotFoundError:
+    digest = hashlib.sha256()
+
+    def observe(entry: Path, relative: str) -> None:
+        nonlocal latest_mtime
+        value = entry.stat()
+        latest_mtime = max(latest_mtime, value.st_mtime_ns)
+        change_time = windows_file_change_time_ns(entry) if os.name == "nt" else value.st_ctime_ns
+        if change_time is None or change_time <= 0:
+            raise OSError("文件变更时间暂不可读")
+        # The maximum mtime alone misses edits beneath a future-dated file.
+        # Exclude atime: reading the source while packing must not change it.
+        metadata = [relative, value.st_mode, value.st_dev, value.st_ino,
+                    value.st_size, value.st_mtime_ns, change_time]
+        digest.update(json.dumps(metadata, ensure_ascii=True).encode("utf-8"))
+        digest.update(b"\n")
+
+    try:
+        if not path.exists():
             return None
-        for filename in files:
-            fp = Path(root) / filename
-            try:
-                latest_mtime = max(latest_mtime, fp.stat().st_mtime_ns)
-            except FileNotFoundError:
-                return None
-            file_count += 1
-    return {"file_count": file_count, "dir_count": dir_count, "latest_mtime": latest_mtime}
+        if path.is_file():
+            observe(path, ".")
+            file_count = 1
+        else:
+            def walk_error(error):
+                raise error
+            for root, dirs, files in os.walk(path, onerror=walk_error):
+                dirs[:] = sorted(d for d in dirs if d not in {"@eaDir", ".Trash", ".DS_Store"})
+                dir_count += len(dirs)
+                observe(Path(root), str(Path(root).relative_to(path)))
+                for filename in sorted(files):
+                    entry = Path(root) / filename
+                    observe(entry, str(entry.relative_to(path)))
+                    file_count += 1
+    except OSError:
+        return None
+    return {"file_count": file_count, "dir_count": dir_count,
+            "latest_mtime": latest_mtime, "entries_digest": digest.hexdigest()}
+
+
+def capture_source_guard(source: Path) -> Dict:
+    return {"source_identity": cleanup_file_identity(source), "source_tree": tree_signature(source)}
+
+
+def source_guard_matches(source: Path, guard: Optional[Dict]) -> bool:
+    return bool(guard and guard.get("source_identity") and guard.get("source_tree")
+                and guard == capture_source_guard(source))
+
+
+def record_output_provenance(source: Path, target: Path, guard: Optional[Dict] = None) -> None:
+    guard = guard or capture_source_guard(source)
+    with lock:
+        item = state.setdefault("items", {}).setdefault(str(source), {})
+        item["pack_source_guard"] = copy.deepcopy(guard)
+        item["output_provenance"] = {
+            "source": str(source), "source_guard": copy.deepcopy(guard),
+            "target": str(target), "target_identity": cleanup_file_identity(target),
+        }
+        save_state_locked()
+
+
+def output_provenance_matches(source: Path, target: Path) -> bool:
+    with lock:
+        provenance = copy.deepcopy((state.get("items", {}).get(str(source)) or {}).get("output_provenance") or {})
+    return bool(provenance.get("source") == str(source)
+                and provenance.get("target") == str(target)
+                and provenance.get("target_identity")
+                and provenance["target_identity"] == cleanup_file_identity(target)
+                and source_guard_matches(source, provenance.get("source_guard")))
 
 
 def has_partial_files(path: Path) -> bool:
@@ -4951,18 +5248,49 @@ def find_replacement_iso_candidates(source: Path, target: Path, cfg: Dict) -> li
     return candidates
 
 
-def cleanup_replaced_iso_candidates(source: Path, new_target: Path, candidates: list[Path]) -> None:
-    if not candidates:
-        return
+def capture_replacement_candidates(candidates: list[Path]) -> list[Dict]:
+    return [{"path": str(path), "identity": cleanup_file_identity(path)} for path in candidates]
+
+
+def bind_replacement_cleanup(source: Path, target: Path) -> None:
+    with lock:
+        item = state.get("items", {}).get(str(source)) or {}
+        pending = item.get("replacement_cleanup_pending")
+        if pending and pending.get("generation") == item.get("task_generation"):
+            pending.update(target=str(target), target_identity=cleanup_file_identity(target))
+            save_state_locked()
+
+
+def cleanup_replaced_iso_candidates(source: Path, new_target: Path, candidates=None) -> None:
+    with lock:
+        _cleanup_replaced_iso_candidates(source, new_target)
+
+
+def _cleanup_replaced_iso_candidates(source: Path, new_target: Path) -> None:
+    with lock:
+        item = state.get("items", {}).get(str(source)) or {}
+        pending = copy.deepcopy(item.get("replacement_cleanup_pending") or {})
+        if (item.get("status") not in {"done", "transfer_done"}
+                or pending.get("generation") != item.get("task_generation")
+                or pending.get("target") != str(new_target) or not pending.get("candidates")):
+            return
+        if not pending.get("target_identity") or pending["target_identity"] != cleanup_file_identity(new_target):
+            set_warning(item, "replaced_iso_cleanup_failed", "新版本 ISO 在完成前发生变化，已保留旧版本")
+            save_state_locked()
+            return
     removed = []
     failed = []
     new_target_key = str(new_target.resolve()).casefold()
-    for candidate in candidates:
+    for record in pending["candidates"]:
+        candidate = Path(record["path"])
         try:
             candidate_key = str(candidate.resolve()).casefold()
         except OSError:
             candidate_key = str(candidate).casefold()
         if candidate_key == new_target_key or not candidate.exists():
+            continue
+        if not record.get("identity") or record["identity"] != cleanup_file_identity(candidate):
+            failed.append(f"{candidate} (旧版本文件已变化，保留等待人工核对)")
             continue
         try:
             candidate.unlink()
@@ -4981,6 +5309,7 @@ def cleanup_replaced_iso_candidates(source: Path, new_target: Path, candidates: 
             item["replaced_iso_count"] = len(removed)
         if failed:
             set_warning(item, "replaced_iso_cleanup_failed", message)
+        item.pop("replacement_cleanup_pending", None)
         item["last_changed"] = now()
         save_state_locked()
 
@@ -5123,20 +5452,28 @@ def run_iso(source: Path, target: Path, source_size: int) -> subprocess.Complete
         errfh.flush()
         errfh.seek(0)
         stderr = errfh.read()
+    current = target.stat().st_size if target.exists() else 0
+    # Share the cancellation endpoint's lock: once cancellation was accepted,
+    # even a process that just exited successfully must not promote its ISO.
+    # After this transition the endpoint rejects cancellation as too late.
+    with lock:
+        if pack_cancel_event.is_set():
+            cancelled = True
+            timed_out_reason = timed_out_reason or "已请求取消当前 ISO 封装，保留源文件"
+        returncode = proc.returncode if proc.returncode else (1 if cancelled else 0)
+        update_active_progress("finalize" if returncode == 0 else "packing", target, {
+            "percent": 100.0 if returncode == 0 else min(current * 100 / max(source_size, 1), 99.9),
+            "current": current,
+            "total": source_size,
+            "stage_text": "ISO 生成完成，等待校验" if returncode == 0 else "ISO 封装已停止",
+        })
     if timed_out_reason:
         stderr = f"{stderr.rstrip()}\n{timed_out_reason}".strip()
     try:
         stderr_path.unlink()
     except FileNotFoundError:
         pass
-    current = target.stat().st_size if target.exists() else 0
-    update_active_progress("packing", target, {
-        "percent": 100.0 if proc.returncode == 0 else min(current * 100 / max(source_size, 1), 99.9),
-        "current": current,
-        "total": source_size,
-        "stage_text": "ISO 生成完成，等待校验",
-    })
-    completed = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    completed = subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
     completed.cancelled = cancelled
     return completed
 
@@ -5479,7 +5816,7 @@ def record_output_conflict(source: Path, target: Path, message: Optional[str] = 
         save_state_locked()
 
 
-def start_process_item_task(source: Path, target: Path, source_size: int, task_started_at: str) -> Optional[str]:
+def start_process_item_task(source: Path, target: Path, source_size: int, task_started_at: str, source_guard: Optional[Dict] = None) -> Optional[str]:
     with lock:
         active_task = state.get("active")
         if active_task is not None:
@@ -5490,6 +5827,9 @@ def start_process_item_task(source: Path, target: Path, source_size: int, task_s
 
         pack_cancel_event.clear()
         item = state["items"].setdefault(str(source), {})
+        item["task_generation"] = secrets.token_hex(16)
+        item["pack_source_guard"] = source_guard or capture_source_guard(source)
+        item.pop("replacement_cleanup_pending", None)
         previous_claim = item.pop("cd2_upload_claim", None) or {}
         if previous_claim.get("upload_key"):
             item["cd2_upload_previous_keys"] = list(dict.fromkeys(list(item.get("cd2_upload_previous_keys") or []) + [previous_claim["upload_key"]]))[-32:]
@@ -5511,6 +5851,7 @@ def start_process_item_task(source: Path, target: Path, source_size: int, task_s
             "source": str(source),
             "target": str(target),
             "output_target": str(target),
+            "pack_source_guard": copy.deepcopy(item["pack_source_guard"]),
             "started_at": task_started_at,
             "task_started_at": task_started_at,
             "pack_started_at": task_started_at,
@@ -5563,6 +5904,7 @@ def mark_transfer_started(source: Path, target: Path, task_started_at: str) -> s
             "source": str(source),
             "target": str(target),
             "output_target": str(target),
+            "pack_source_guard": copy.deepcopy(item.get("pack_source_guard")),
             "started_at": task_started_at,
             "task_started_at": task_started_at,
             "pack_started_at": task_started_at,
@@ -5607,12 +5949,14 @@ def record_transfer_failure(
         save_state_locked()
 
 
-def delete_source_if_configured(source: Path, cfg: Dict) -> Optional[str]:
+def delete_source_if_configured(source: Path, cfg: Dict, source_guard: Optional[Dict] = None) -> Optional[str]:
     if not cfg.get("delete_source_after_success"):
         return None
     try:
         if not source.exists():
             return None
+        if source_guard is not None and not source_guard_matches(source, source_guard):
+            return "源目录在封装后发生变化，已保留源目录"
         if source.is_dir():
             shutil.rmtree(source)
         else:
@@ -5765,6 +6109,19 @@ def record_upload_window_wait(source: Path, target: Path, source_size: int, mess
 
 
 def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> None:
+    if not process_dispatch_lock.acquire(blocking=False):
+        log(f"已有任务在处理，跳过重复启动: {source}")
+        return
+    try:
+        with lock:
+            if state.get("active") is not None:
+                return
+        _process_item(source, cfg, ignore_cd2_tasks=ignore_cd2_tasks)
+    finally:
+        process_dispatch_lock.release()
+
+
+def _process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> None:
     output_dir = Path(cfg["output_dir"]).expanduser().resolve()
     source_size = size_of(source)
     upload_map, cd2_status = fetch_cd2_uploads(cfg)
@@ -5783,8 +6140,12 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
         return
 
     target = iso_path_for(source, output_dir)
+    source_guard = capture_source_guard(source)
     reuse_existing_iso = False
     if target.exists():
+        if not output_provenance_matches(source, target):
+            record_output_conflict(source, target, f"同名 ISO 缺少与当前源目录一致的生成记录，已保留源目录和 ISO，请人工核对: {target}")
+            return
         existing_status, existing_reason = classify_existing_output_iso(target, source_size)
         if existing_status == "complete":
             reuse_existing_iso = True
@@ -5808,15 +6169,26 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
         record_insufficient_space(source)
         return
 
-    replacement_candidates = find_replacement_iso_candidates(source, target, cfg)
+    replacement_candidates = capture_replacement_candidates(find_replacement_iso_candidates(source, target, cfg))
     partial = target.with_suffix(target.suffix + ".partial")
     task_started_at = now()
-    skip_message = start_process_item_task(source, target, source_size, task_started_at)
+    skip_message = start_process_item_task(source, target, source_size, task_started_at, source_guard)
     if skip_message:
         log(skip_message)
         return
+    with lock:
+        item = state["items"][str(source)]
+        item["replacement_cleanup_pending"] = {
+            "generation": item["task_generation"], "candidates": replacement_candidates,
+        }
+        save_state_locked()
     if reuse_existing_iso:
         with lock:
+            if pack_cancel_event.is_set():
+                record_pack_failure(source, "已取消复用 ISO，保留源目录和 ISO", "pack_cancelled")
+                return
+            # Share the same cancellation boundary as run_iso's finalization.
+            state["active"]["progress"]["phase"] = "verify"
             item = state["items"].setdefault(str(source), {})
             item["iso_reused"] = True
             item["iso_reused_at"] = now()
@@ -5865,6 +6237,11 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
                 log(f"ISO 验证失败，保留源文件: {target}")
                 record_verify_failure(source)
                 return
+
+        if not source_guard_matches(source, source_guard):
+            record_pack_failure(source, "源目录在封装期间发生变化，已保留源目录和 ISO，请稳定后人工核对", "source_changed")
+            return
+        record_output_provenance(source, target, source_guard)
 
         update_active_progress("finalize", target, {
             "percent": 100.0,
@@ -5920,13 +6297,17 @@ def process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> Non
 
         if cfg.get("cd2_transfer_enabled"):
             require_upload_allowed(cfg)
+        if not source_guard_matches(source, source_guard):
+            record_pack_failure(source, "源目录在转存期间发生变化，已保留源目录和本机 ISO，请人工核对", "source_changed")
+            return
         defer_source_delete = bool(
             cfg.get("cd2_transfer_enabled")
             and cfg.get("cd2_wait_upload_complete")
             and not cd2_upload_already_done
             and cfg.get("delete_source_after_success")
         )
-        delete_source_error = None if defer_source_delete else delete_source_if_configured(source, cfg)
+        delete_source_error = None if defer_source_delete else delete_source_if_configured(source, cfg, source_guard)
+        bind_replacement_cleanup(source, final_target)
         finish_process_item_success(
             source,
             final_target,
@@ -7522,23 +7903,35 @@ def recover_iso_transfer(
 
 
 def finish_recovered_iso(source: Optional[Path], target: Path, cfg: Dict, active: Dict) -> bool:
-    if not recovered_iso_is_usable(target):
+    if not target.exists():
         return False
     if not source:
         log(f"检测到上次中断留下的完整ISO，但缺少源任务记录，保留文件等待人工处理: {target}")
         return False
 
-    replacement_candidates = find_replacement_iso_candidates(source, target, cfg)
+    with lock:
+        item = state.get("items", {}).get(str(source)) or {}
+        provenance = copy.deepcopy(item.get("output_provenance") or {})
+        source_guard = copy.deepcopy(item.get("pack_source_guard") or active.get("pack_source_guard"))
+    owned_output = Path(provenance["target"]) if provenance.get("target") else None
+    if (not owned_output or not output_provenance_matches(source, owned_output)
+            or not source_guard_matches(source, source_guard)):
+        record_transfer_failure(source, target, size_of(source), now(), "recovery_unverified",
+                                "中断任务缺少与当前源目录一致的 ISO 生成记录，已保留源目录和 ISO，请人工核对")
+        return True
+    if target.resolve() != owned_output.resolve():
+        if not cd2_transfer_target_is_complete(owned_output, target):
+            record_transfer_failure(source, owned_output, size_of(source), now(), "target_exists",
+                                    f"恢复目标与已登记本机 ISO 不一致或无法确认，已保留全部文件，请人工核对: {target}")
+            return True
+    if not recovered_iso_is_usable(target):
+        return False
+
     source_size = recovered_source_size(source, target)
-    local_output = interrupted_output_target(active, source, target, cfg)
+    local_output = owned_output
     output_root = Path(str(cfg.get("output_dir") or DEFAULT_CONFIG["output_dir"])).expanduser()
     if local_output and (local_output.suffix.lower() != ".iso" or not path_in_root(local_output, output_root)):
         local_output = None
-    if cfg.get("cd2_transfer_enabled") and local_output and local_output.exists() and local_output.resolve() != target.resolve():
-        if not cd2_transfer_target_is_complete(local_output, target):
-            message = f"恢复时发现 CD2 同名 ISO 与本机副本内容不一致或无法确认，保留源目录和本机 ISO，等待手动处理: {target}"
-            record_transfer_failure(source, local_output, source_size, now(), "target_exists", message)
-            return True
     transfer = recover_iso_transfer(source, target, cfg, active, source_size)
     if not transfer.ok:
         return True
@@ -7549,12 +7942,17 @@ def finish_recovered_iso(source: Optional[Path], target: Path, cfg: Dict, active
             record_upload_window_wait(source, target, source_size, str(exc))
             return True
 
+    if not source_guard_matches(source, source_guard):
+        record_pack_failure(source, "源目录在恢复转存期间发生变化，已保留源目录和 ISO", "source_changed")
+        return True
+
     defer_source_delete = bool(
         cfg.get("cd2_transfer_enabled")
         and cfg.get("cd2_wait_upload_complete")
         and cfg.get("delete_source_after_success")
     )
-    delete_source_error = None if defer_source_delete else delete_source_if_configured(source, cfg)
+    delete_source_error = None if defer_source_delete else delete_source_if_configured(source, cfg, source_guard)
+    bind_replacement_cleanup(source, transfer.target)
     finish_process_item_success(
         source,
         transfer.target,
@@ -7565,8 +7963,8 @@ def finish_recovered_iso(source: Optional[Path], target: Path, cfg: Dict, active
         delete_source_error,
         local_output_target=local_output,
     )
-    cleanup_recovered_output_copy(active, source, target, transfer.target, cfg)
-    cleanup_replaced_iso_candidates(source, transfer.target, replacement_candidates)
+    cleanup_recovered_output_copy({**active, "output_target": str(owned_output)}, source, target, transfer.target, cfg)
+    cleanup_replaced_iso_candidates(source, transfer.target)
     log(f"检测到上次中断时ISO已生成，已从中断点恢复: {transfer.target}")
     return True
 
@@ -7693,6 +8091,12 @@ def cleanup_recovered_output_copy(
     output_dir = Path(cfg["output_dir"]).expanduser()
     if output_target.suffix.lower() != ".iso" or not path_in_root(output_target, output_dir):
         return
+    with lock:
+        provenance = copy.deepcopy((state.get("items", {}).get(str(source)) or {}).get("output_provenance") or {})
+    if (provenance.get("target") != str(output_target) or not provenance.get("target_identity")
+            or provenance["target_identity"] != cleanup_file_identity(output_target)):
+        log(f"恢复副本缺少一致的生成记录，已保留: {output_target}")
+        return
     try:
         output_target.unlink()
         log(f"清理恢复后残留的输出目录ISO: {output_target}")
@@ -7723,6 +8127,7 @@ def recover_interrupted_task(cfg: Optional[Dict] = None) -> None:
 
 def process_worker_snapshot() -> Optional[Dict]:
     """Copy worker-owned memory, skipping a frame if any writer is blocked."""
+    global _worker_snapshot_revision
     held = []
     try:
         for mutex in (config_lock, lock, cd2_lock, file_operation_lock):
@@ -7732,7 +8137,9 @@ def process_worker_snapshot() -> Optional[Dict]:
         cfg = copy.deepcopy(_process_config)
         if cfg is None:
             return None
+        _worker_snapshot_revision += 1
         return {
+            "revision": _worker_snapshot_revision,
             "ready": _worker_ipc_ready or worker_started,
             "startup_complete": worker_started,
             "config": cfg,
@@ -8555,14 +8962,17 @@ def api_file_actions():
         return jsonify({"ok": False, "message": "一次最多处理 50 项"}), 400
 
     sources = []
+    source_guards = []
     try:
         for raw_path in raw_paths:
+            reject_file_operation_links(Path(str(raw_path or "")))
             source, _root = resolve_file_browser_path(cfg, root_name, str(raw_path or ""))
             if not source.exists():
                 return jsonify({"ok": False, "message": f"路径不存在: {source}"}), 404
             if source.resolve() == _root.resolve():
                 return jsonify({"ok": False, "message": "不能直接操作根目录"}), 400
             sources.append(source)
+            source_guards.append(file_operation_path_guard(source, _root, source=True))
     except ValueError as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
     except Exception as exc:
@@ -8582,7 +8992,11 @@ def api_file_actions():
             return jsonify({"ok": False, "message": "请填写新名称"}), 400
         if new_name in {".", ".."} or Path(new_name).name != new_name or any(sep in new_name for sep in ("/", "\\")):
             return jsonify({"ok": False, "message": "新名称不能包含路径分隔符"}), 400
-        destination = (sources[0].parent / new_name).resolve()
+        destination = sources[0].parent / new_name
+        try:
+            reject_file_operation_links(destination)
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
         _, source_root = resolve_file_browser_path(cfg, root_name, str(sources[0]))
         if not path_in_root(destination, source_root.resolve()):
             return jsonify({"ok": False, "message": "重命名目标不能越过当前根目录"}), 400
@@ -8597,12 +9011,14 @@ def api_file_actions():
             if not custom_path:
                 return jsonify({"ok": False, "message": "请填写目标目录"}), 400
             try:
+                reject_file_operation_links(Path(custom_path))
                 destination = resolve_file_operation_destination(cfg, custom_path)
             except ValueError as exc:
                 return jsonify({"ok": False, "message": str(exc)}), 403
         else:
             return jsonify({"ok": False, "message": "请选择目标目录"}), 400
         try:
+            reject_file_operation_links(destination)
             destination = destination.resolve()
         except Exception as exc:
             return jsonify({"ok": False, "message": f"目标目录无效: {exc}"}), 400
@@ -8620,6 +9036,18 @@ def api_file_actions():
         confirm = str(payload.get("confirm") or "").strip()
         if confirm != "MOVE":
             return jsonify({"ok": False, "message": "移动操作需要确认"}), 400
+
+    guards = {"sources": source_guards, "destination": None}
+    if destination is not None:
+        try:
+            if action == "rename":
+                destination_root = Path(source_guards[0]["root"])
+            else:
+                eligible_roots = [root.resolve() for root in file_operation_destination_roots(cfg) if path_in_root(destination, root)]
+                destination_root = max(eligible_roots, key=lambda root: len(root.parts))
+            guards["destination"] = file_operation_path_guard(destination, destination_root)
+        except (OSError, ValueError) as exc:
+            return jsonify({"ok": False, "message": f"目标目录无效: {exc}"}), 400
 
     task_id = secrets.token_hex(8)
     with file_operation_lock:
@@ -8640,7 +9068,7 @@ def api_file_actions():
         }
     threading.Thread(
         target=run_file_operation_task,
-        args=(task_id, action, sources, destination),
+        args=(task_id, action, sources, destination, guards),
         daemon=True,
     ).start()
     return jsonify({"ok": True, "task_id": task_id, "task": file_operation_snapshot(task_id)})

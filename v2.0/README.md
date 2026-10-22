@@ -47,8 +47,8 @@ ISO_PACKER_IMAGE=ebichu/iso-packer:sha-0123456789ab bash deploy.sh
 - `/output`：本机输出目录，是 ISO 生成后的临时落点。
 - 本机封装时允许在 `/output` 使用 `.iso.partial`，完成并校验后才改名为 `.iso`。
 - 开启 CD2 转存并等待云端完成时，本机 `/output` 里的 ISO 会保留到 CD2 API 明确报告上传完成；API 明确报告失败时保留副本供重试，API 暂时不可用或任务暂时不在列表中时继续等待。
-- 如果 `/output` 中已有同名且校验通过的 ISO，会复用该文件并继续 CD2 转存，不会重复封装；CD2 上传完成只以 API 的明确完成状态为准，不用目标文件本地大小或校验结果推断。
-- 如果开启成功后删除源目录，`/watch` 里的源 BDMV 也会被清理。
+- `/output` 中已有同名 ISO 时，只有持久化的生成归属记录（provenance）与当前源树、ISO 文件身份均一致，且 ISO 校验通过，才会复用并继续转存。旧任务或重启后缺少生成归属的同名 ISO 不会自动复用或据此删除源目录，须人工核对。
+- 如果开启成功后删除源目录，只有完成条件成立且源树仍与本次封装记录一致，才会清理 `/watch` 中对应的 BDMV。文件变更时间无法可靠读取时保守保留，不跳过身份检查。
 - 因此“本机监控 / 本机输出”不是归档浏览入口，最终成品应到 CD2 挂载输出目录查看。
 
 ### CD2 与文件浏览
@@ -77,7 +77,7 @@ ISO_PACKER_IMAGE=ebichu/iso-packer:sha-0123456789ab bash deploy.sh
 
 ### 版本感知封装
 
-- 同一站点、同一影片且明确标注 `V1`、`V2`、`V3` 的版本，较高版本在新 ISO 校验并成功转存后会清理较低版本。
+- 同一站点、同一影片且明确标注 `V1`、`V2`、`V3` 的版本，较高版本完成后才会清理较低版本；开启等待云端完成时，必须等新上传明确 `Finish`。清理还会复核本次 generation、新 ISO 与旧候选文件身份，后来被替换的旧文件会保留。
 - 不同站点的发布结果始终共存；没有明确版本标记的文件也始终共存，不参与自动替换。
 - 同一 CD2 远程源路径和目标目录会持久化自动/手动拉取认领，避免扫描周期重复创建相同任务；只有 API 明确失败才记录失败，API 暂时不返回任务时保持等待。
 - CD2 复制或下载任务列表读取失败、不完整或客户端不支持对应查询接口时，封装流程会保持等待，不会把空队列当成没有任务。
@@ -86,6 +86,7 @@ ISO_PACKER_IMAGE=ebichu/iso-packer:sha-0123456789ab bash deploy.sh
 - 所有 CD2 网盘内复制都使用 `Rename` 冲突策略并递归处理重名，保存 API 返回的实际目标路径；不能设置安全冲突策略的客户端会被拒绝，绝不回退到覆盖模式。
 - 不同远程源即使 basename 相同也会使用独立的本地拉取路径和状态记录，避免不同站点的同名作品互相覆盖。
 - 文件浏览的自定义复制/移动目标只能位于本机监控、本机输出或 CD2 挂载根目录内；CD2 成品目录也必须位于配置的挂载根目录内。
+- 文件操作拒绝选中的符号链接及包含链接的父路径；排队后源文件、父目录或授权根发生变化时会拒绝执行。复制采用排他创建，不覆盖已有文件；本服务的文件任务串行执行。
 - `genisoimage`、`xorriso` 和 ISO 转存分别有总时长与无进展保护，异常时保留源目录并清理未完成目标，不会无限占用当前任务。
 - 封装中心在本机 ISO 正在生成时提供“取消当前封装”；取消只终止 `genisoimage`、保留源目录并按异常恢复路径处理，不会删除已存在的完整 ISO。
 
@@ -206,7 +207,7 @@ node --check static\js\files.js
 node --check static\js\settings.js
 node --check static\js\logs.js
 node --check static\js\compare.js
-node --test scripts\test_frontend_races.cjs scripts\test_upload_controls.cjs
+node --test scripts/test_*.cjs
 
 cd D:\Projects\makeiso\v2.0
 docker compose config --quiet
@@ -241,12 +242,12 @@ docker run --rm --pull never --network none \
 
 参数：`--size-mib` 为 1–4096 MiB，默认 256；`--timeout` 为 10–1800 秒，默认 180。合成样本只用于结构和进程通信验证，不是可播放的蓝光内容。
 
-2026-10-22 在 VPS 的独立、无网络验收容器运行上述 1 GiB 样本，生产服务保持运行，结果如下：
+2026-10-22 上一轮收尾在 VPS 的独立、无网络验收容器运行上述 1 GiB 样本，生产服务保持运行，结果如下（本轮逻辑复审重跑见下文）：
 
 | 项目 | 结果 |
 | --- | --- |
 | 生成 ISO | 1,074,630,656 字节，`genisoimage` 成功、`xorriso` 结构检查通过 |
-| 最终重跑耗时 | 1.50 秒 |
+| 上一轮离线重跑耗时 | 1.50 秒 |
 | 请求数量 | Flask 测试客户端共 36 次端点请求 |
 | 最长响应 | `/healthz` 0.58 ms；`/api/status` 4.95 ms；`/workspace` 14.92 ms |
 | 验证范围 | 真实 ISO 工具、独立 worker、源文件保留、临时文件收尾、上述端点响应 |
@@ -255,13 +256,39 @@ docker run --rm --pull never --network none \
 
 脚本可显式增加 `--cloud-config /run/acceptance-config.json` 做 CD2 验收。操作者需另行提供可用网络、CD2 挂载以及只读配置文件；不要在离线命令上直接追加该参数。云端模式复制配置到独立临时目录，并仅在配置的 CD2 输出目录下创建唯一 `.iso-packer-acceptance-<随机值>` 子目录，关闭自动拉取、自动扫描及源删除。只有 API 明确确认上传完成才报告成功并清理本次云端样本；超时或失败保留样本，不加载或改写生产状态。
 
-2026-10-22 修复 PushMessage 终态证据后，新的 32 MiB 随机合成 BDMV 完成真实 CD2 验收：生成 34,443,264 字节 ISO，PushMessage 依次收到同一上传 key 的 `0 (Wait)` 与 `5 (Finish)`，精确绑定路径别名、大小与任务 generation，最终进入 `transfer_done`，`cloud_api_confirmed=true`。全程 48.72 秒、993 次容器内端点请求；最长响应为 `/healthz` 2.08 ms、`/api/status` 19.72 ms、`/workspace` 19.81 ms。`xorriso` 结构检查、源目录保留和无 `.partial` 遗留均通过，仅在明确 Finish 后清理本次唯一云端目录与隔离数据。
+2026-10-22 上一轮修复 PushMessage 终态证据后，新的 32 MiB 随机合成 BDMV 完成真实 CD2 验收：生成 34,443,264 字节 ISO，PushMessage 依次收到同一上传 key 的 `0 (Wait)` 与 `5 (Finish)`，精确绑定路径别名、大小与任务 generation，最终进入 `transfer_done`，`cloud_api_confirmed=true`。全程 48.72 秒、993 次容器内端点请求；最长响应为 `/healthz` 2.08 ms、`/api/status` 19.72 ms、`/workspace` 19.81 ms。`xorriso` 结构检查、源目录保留和无 `.partial` 遗留均通过，仅在明确 Finish 后清理本次唯一云端目录与隔离数据。
 
 额外真实 RPC 验收仅作用于另一个独立 32 MiB 合成样本的上传 key：34,443,264 字节 ISO 的上传经 `PauseUploadFiles` 后，队列明确为 `Pause=4` 且持续 1 秒；`ResumeUploadFiles` 后收到同 key 的明确 `Finish=5`，测试目录清理完成，全程 45.08 秒。范围为 `one_synthetic_upload_key`，未全局暂停生产上传，也未改生产配置或状态。
 
 修复前的两个样本虽在云端可见，却未获得明确 API 完成终态，仍按待确认处理，不追认为成功。两个唯一云端测试目录已按撤销验收删除，记录 `completion_inferred=false`；对应已退出的自有验收容器已移除，本地预览进程树已停止，生产 `iso-packer` 服务保持运行且健康。
 
-本轮代码快照回归：Linux 后端 134 项全部通过（9.314 秒），Windows 后端 133 项通过、1 项 POSIX 专属测试跳过（7.902 秒）；发布/部署 scripts 在 Windows 9 项全部通过（0.723 秒），Linux 验收镜像中 8 项通过、1 项因缺 Git 跳过；两端 smoke 通过，Node 前端 16 项通过，Edge 本地隔离集成 8 项通过。
+上一轮代码快照回归：Linux 后端 134 项全部通过（9.314 秒），Windows 后端 133 项通过、1 项 POSIX 专属测试跳过（7.902 秒）；发布/部署 scripts 在 Windows 9 项全部通过（0.723 秒），Linux 验收镜像中 8 项通过、1 项因缺 Git 跳过；两端 smoke 通过，Node 前端 16 项通过，Edge 本地隔离集成 8 项通过。该轮真实 CD2 结果对应源码包 SHA-256 `4e8a50d921ee8596ecace3621cba39f23b6454fe0b5be520af29f4c1706a1412`。
+
+## 本轮逻辑复审（2026-10-22）
+
+以本地提交 `e70d59f` 为基线，多 agent 复审并修复了以下流程：
+
+- 旧版本清理延后到新任务满足完成条件；云端等待模式要求明确 Finish，并绑定 generation 与新旧文件身份。
+- 源树逐项计算 metadata digest，ISO 保存生成归属记录；Windows 使用真实 `ChangeTime`，避免把创建时间当成变更时间。读不到可靠变更时间时保守保留；旧任务或重启后未知归属的 ISO 不自动复用、也不据此删源，交由人工核对。
+- 手动确认上传完成时重新核对任务 generation；并发启动只允许一个当前封装，取消与最终收尾使用明确边界，避免接受取消后仍完成或删源。
+- CD2 拉取区分完整原盘任务与子任务，按 Rename 返回的实际路径匹配，失败优先；“重新检测”清除旧失败终态后仍等待新的明确完成证据。
+- 手动暂停接管上传任务时保留正确 ownership，自动恢复不会抢回用户暂停；控制前复核最新配置，RPC 串行化，Web 快照按单调 revision 接收，防止旧响应回滚配置。
+- Web 父进程意外退出时清理 worker、工具子进程并释放数据目录租约。
+- 文件操作拦截链接越界、排队期间路径替换和目标覆盖；设置页目录选择器丢弃过时请求，加载期间禁止确认。
+
+最终回归与当前源码的隔离运行结果：
+
+| 检查 | Windows | Linux |
+| --- | --- | --- |
+| 后端/进程/逻辑回归 178 项 | 177 通过，1 项 POSIX 专测跳过；8.769 秒 | 175 通过，3 项 Windows 专测跳过；10.708 秒 |
+| scripts 9 项 | 9 项通过；0.739 秒 | 8 项通过，1 项因镜像缺 Git 跳过；0.053 秒 |
+| smoke | 通过 | 通过 |
+
+Node 前端 19 项全部通过；Compose 配置与 `git diff --check` 通过。两份 Actions 均用 `scripts/test_*.cjs` 自动覆盖全部前端回归。
+
+当前 50 文件验收源码包 SHA-256 为 `5b7055f9f0a974bab29cc28c59f5377efa2fdd112a6bceaf11712561ad632c7e`。Linux 再次复用已有镜像、只读挂载该源码，在无网络且不挂生产数据的独立容器中完成真实工具的 1 GiB 合成 BDMV 封装：ISO 1,074,630,656 字节，`genisoimage` / `xorriso` 通过，耗时 1.57 秒，36 次容器内端点请求；最长 `/healthz` 1.35 ms、`/api/status` 5.13 ms、`/workspace` 16.01 ms。
+
+**本轮没有重做真实 CD2 写入，也没有部署生产或发布镜像。** 生产容器仅通过只读 `docker inspect` 核对，仍为 `running` / `healthy`。上一轮的真实 CD2 上传和单 key 暂停/恢复结果仅代表上面注明的旧源码快照。本轮新增逻辑通过离线回归验证，合成 ISO 不代表媒体播放验收。
 
 ## 关键接口
 

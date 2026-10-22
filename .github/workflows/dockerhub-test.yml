@@ -46,7 +46,7 @@ jobs:
         working-directory: v2.0/iso-packer
         run: |
           for file in static/js/*.js; do node --check "$file"; done
-          node --test scripts/test_frontend_races.cjs scripts/test_upload_controls.cjs
+          node --test scripts/test_*.cjs
 
       - name: Validate deployment configuration
         run: |

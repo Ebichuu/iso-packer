@@ -75,6 +75,28 @@ def _latest_put(channel, value):
             pass
 
 
+def _watch_parent_exit(application, stop):
+    """The child must also notice a killed Web process, without working IPC."""
+    parent = multiprocessing.parent_process()
+    if parent is None:
+        return
+    parent.join()
+    stop.set()
+    try:
+        application.stop_worker_subprocesses()
+    finally:
+        if os.name != "nt":
+            # worker_main created this isolated group before starting threads.
+            # Kill every tool too, including one not yet entered in the set.
+            try:
+                os.killpg(os.getpid(), KILL_SIGNAL)
+            except ProcessLookupError:
+                pass
+        # Do not run daemon command threads or multiprocessing finalizers once
+        # their owner has died. The OS releases the sole-writer lease here.
+        os._exit(1)
+
+
 def worker_main(commands, responses, snapshots, data_dir, initializer=None):
     # Set before importing app; spawning app.py also imports __mp_main__, which
     # has no disk-writing import side effects.
@@ -91,6 +113,7 @@ def worker_main(commands, responses, snapshots, data_dir, initializer=None):
     global _worker_lease
     _worker_lease = WorkerLease(application.APP_DIR / "worker.lock")
     application._worker_process_child = True
+    threading.Thread(target=_watch_parent_exit, args=(application, stop), daemon=True, name="worker-parent-monitor").start()
     if initializer is not None:
         initializer(application)
     cfg = application.load_config()
@@ -190,6 +213,7 @@ class ProcessWorker:
         self._snapshots = self._context.Queue(maxsize=1)
         self._pending = {}
         self._pending_lock = threading.Lock()
+        self._snapshot_lock = threading.Lock()
         self._snapshot = None
         self._closed = False
         self._slots = threading.BoundedSemaphore(MAX_COMMANDS)
@@ -219,8 +243,14 @@ class ProcessWorker:
 
     def _accept_snapshot(self, snapshot):
         if snapshot and snapshot.get("protocol") == PROTOCOL_VERSION:
-            if not self._snapshot or snapshot.get("at", 0) >= self._snapshot.get("at", 0):
-                self._snapshot = snapshot
+            with self._snapshot_lock:
+                current = self._snapshot
+                if snapshot.get("revision") is not None:
+                    newer = not current or current.get("revision") is None or snapshot["revision"] >= current["revision"]
+                else:
+                    newer = not current or (current.get("revision") is None and snapshot.get("at", 0) >= current.get("at", 0))
+                if newer:
+                    self._snapshot = snapshot
 
     def _receive(self):
         while not self._closed:

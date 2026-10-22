@@ -460,6 +460,7 @@ class RevisionRecoveryTests(unittest.TestCase):
             output_dir.mkdir()
             target = output_dir / f"{source.name}.iso"
             target.write_bytes(b"valid-iso")
+            app.record_output_provenance(source, target)
             cfg = dict(app.DEFAULT_CONFIG)
             cfg.update({
                 "output_dir": str(output_dir),
@@ -497,6 +498,7 @@ class RevisionRecoveryTests(unittest.TestCase):
             output_dir.mkdir()
             target = output_dir / f"{source.name}.iso"
             target.write_bytes(b"valid-iso")
+            app.record_output_provenance(source, target)
             cfg = dict(app.DEFAULT_CONFIG)
             cfg.update({
                 "output_dir": str(output_dir),
@@ -528,6 +530,7 @@ class RevisionRecoveryTests(unittest.TestCase):
             existing_target = cd2_dir / target.name
             target.write_bytes(b"valid-iso")
             existing_target.write_bytes(target.read_bytes())
+            app.record_output_provenance(source, target)
             cfg = dict(app.DEFAULT_CONFIG)
             cfg.update({
                 "output_dir": str(output_dir),
@@ -570,6 +573,7 @@ class RevisionRecoveryTests(unittest.TestCase):
             existing_target = cd2_dir / target.name
             target.write_bytes(b"valid-iso")
             existing_target.write_bytes(b"not-the-same")
+            app.record_output_provenance(source, target)
             cfg = dict(app.DEFAULT_CONFIG)
             cfg.update({
                 "output_dir": str(output_dir),
@@ -643,6 +647,7 @@ class RevisionRecoveryTests(unittest.TestCase):
             existing_target = cd2_dir / target.name
             target.write_bytes(b"new iso content")
             existing_target.write_bytes(b"old iso content")
+            app.record_output_provenance(source, target)
             cfg = dict(app.DEFAULT_CONFIG)
             cfg.update({
                 "output_dir": str(output_dir), "cd2_transfer_enabled": True,
@@ -1133,8 +1138,8 @@ class RevisionRecoveryTests(unittest.TestCase):
         requests = []
 
         class Stub:
-            def PauseUploadFiles(self, request, metadata=None):
-                requests.append((request, metadata))
+            def PauseUploadFiles(self, request, metadata=None, timeout=None):
+                requests.append((request, metadata, timeout))
                 return SimpleNamespace()
 
         class Client:
@@ -1173,6 +1178,7 @@ class RevisionRecoveryTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(status_code, 200)
         self.assertEqual(list(requests[0][0].keys), ["upload-key-1"])
+        self.assertEqual(requests[0][2], 8)
 
     def test_cd2_push_event_and_diagnostics_are_observable(self) -> None:
         event = app.record_cd2_push_event(SimpleNamespace(

@@ -128,6 +128,7 @@ class UploadPauseBoundaryAuditTests(unittest.TestCase):
         output.write_bytes(b"identical-iso-placeholder")
         cloud = Path(self.cfg["cd2_target_dir"]) / output.name
         cloud.write_bytes(output.read_bytes())
+        app.record_output_provenance(source, output)
         return source, output, cloud
 
     def pause_after_comparison(self, *_args):

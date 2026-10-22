@@ -125,6 +125,8 @@
       path: DIRECTORY_ROOT,
       parent: null,
       lastFocus: null,
+      requestId: 0,
+      loading: false,
     };
 
     function renderPickerMessage(text) {
@@ -179,28 +181,45 @@
     }
 
     async function loadDirectory(path, fallbackToRoots) {
+      const requestId = ++pickerState.requestId;
+      const provider = pickerState.provider;
+      const scope = pickerState.scope;
+      pickerState.loading = true;
+      if (pickerUse) pickerUse.disabled = true;
+      if (pickerUp) pickerUp.disabled = true;
       renderPickerMessage("正在读取目录。");
       try {
-        const targetPath = path || (pickerState.provider === "cd2" ? "/" : DIRECTORY_ROOT);
-        const payload = pickerState.provider === "cd2"
+        const targetPath = path || (provider === "cd2" ? "/" : DIRECTORY_ROOT);
+        const payload = provider === "cd2"
           ? await helper().fetchJson(`/api/cd2/directories?path=${encodeURIComponent(targetPath)}`, {
               method: "POST",
               body: new FormData(form),
             })
-          : await helper().fetchJson(`/api/directories?scope=${encodeURIComponent(pickerState.scope)}&path=${encodeURIComponent(targetPath)}`);
+          : await helper().fetchJson(`/api/directories?scope=${encodeURIComponent(scope)}&path=${encodeURIComponent(targetPath)}`);
+        if (requestId !== pickerState.requestId) return;
+        pickerState.loading = false;
         renderDirectoryEntries(payload);
       } catch (error) {
-        const rootPath = pickerState.provider === "cd2" ? "/" : DIRECTORY_ROOT;
+        if (requestId !== pickerState.requestId) return;
+        const rootPath = provider === "cd2" ? "/" : DIRECTORY_ROOT;
         if (fallbackToRoots && path !== rootPath) {
-          await loadDirectory(rootPath, false);
-          helper().notify(error.message || "当前目录不可读取，已回到可选目录。", true);
+          const fallback = loadDirectory(rootPath, false);
+          const fallbackRequestId = pickerState.requestId;
+          await fallback;
+          if (fallbackRequestId === pickerState.requestId) {
+            helper().notify(error.message || "当前目录不可读取，已回到可选目录。", true);
+          }
           return;
         }
+        pickerState.loading = false;
         renderPickerMessage(error.message || "目录读取失败。");
       }
     }
 
     function closePicker() {
+      pickerState.requestId += 1;
+      pickerState.loading = false;
+      if (pickerUse) pickerUse.disabled = true;
       picker.classList.add("hidden");
       document.body.classList.remove("has-modal");
       if (pickerState.lastFocus) pickerState.lastFocus.focus();
@@ -248,7 +267,7 @@
     });
 
     pickerUse?.addEventListener("click", () => {
-      if (!pickerState.target || pickerState.path === DIRECTORY_ROOT || pickerState.path === "/") return;
+      if (pickerState.loading || pickerUse.disabled || !pickerState.target || pickerState.path === DIRECTORY_ROOT || pickerState.path === "/") return;
       const value = pickerValueForTarget();
       if (pickerState.append && pickerState.target.tagName === "TEXTAREA") {
         const lines = pickerState.target.value
