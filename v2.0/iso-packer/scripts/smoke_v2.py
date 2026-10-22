@@ -449,6 +449,18 @@ def build_data_dir() -> Path:
     return path
 
 
+def isolated_runtime_paths(data_dir: Path) -> dict[str, str]:
+    """Keep startup and default-config fixtures inside this smoke run."""
+    return {
+        "watch_dir": str(data_dir / "watch"),
+        "output_dir": str(data_dir / "output"),
+        "cd2_local_pull_dir": str(data_dir / "watch"),
+        "cd2_mount_root": str(data_dir / "cloud-root"),
+        "cd2_target_dir": str(data_dir / "cd2-target"),
+        "cd2_remote_pull_dest_dir": str(data_dir / "watch"),
+    }
+
+
 def cleanup_data_dir(path: Path) -> None:
     for _ in range(20):
         gc.collect()
@@ -476,6 +488,7 @@ def unload_project_modules() -> None:
 
 def import_app(data_dir: Path):
     os.environ["DATA_DIR"] = str(data_dir)
+    (data_dir / "config.json").write_text(json.dumps(isolated_runtime_paths(data_dir)), encoding="utf-8")
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     return importlib.import_module("app")
@@ -520,7 +533,7 @@ def verify_tmdb_enrichment_contract() -> None:
             os.environ["TMDB_API_KEY"] = previous_key
 
 
-def verify_local_media_poster_contract(appmod) -> None:
+def verify_local_media_poster_contract(appmod, data_dir: Path) -> None:
     original_search = appmod.tmdb_search_movie
     original_env_key = os.environ.get("TMDB_API_KEY")
 
@@ -539,6 +552,7 @@ def verify_local_media_poster_contract(appmod) -> None:
         with appmod.lock:
             appmod.state["local_media_posters"] = {}
         cfg = appmod.DEFAULT_CONFIG.copy()
+        cfg.update(isolated_runtime_paths(data_dir))
         cfg.update({
             "tmdb_api_enabled": True,
             "tmdb_api_token": "smoke-test",
@@ -558,6 +572,7 @@ def verify_local_media_poster_contract(appmod) -> None:
         with appmod.lock:
             appmod.state["local_media_posters"] = {}
         cfg_without_saved_token = appmod.DEFAULT_CONFIG.copy()
+        cfg_without_saved_token.update(isolated_runtime_paths(data_dir))
         cfg_without_saved_token.update({
             "tmdb_api_enabled": False,
             "tmdb_api_token": "",
@@ -620,14 +635,15 @@ def patch_cd2(appmod) -> None:
 
 def verify_legacy_config_migration(appmod, data_dir: Path) -> None:
     legacy_config = {
-        "watch_dir": str(data_dir / "watch"),
-        "output_dir": str(data_dir / "output"),
+        **isolated_runtime_paths(data_dir),
         "enabled": True,
         "cd2_transfer_enabled": False,
         "cd2_wait_upload_complete": False,
     }
     (data_dir / "config.json").write_text(json.dumps(legacy_config, ensure_ascii=False, indent=2), encoding="utf-8")
     migrated = appmod.load_config()
+    for key, expected in isolated_runtime_paths(data_dir).items():
+        require(migrated.get(key) == expected, f"migration escaped the isolated {key}: {migrated.get(key)}")
     require(migrated.get("config_schema_version") == appmod.DEFAULT_CONFIG["config_schema_version"], "legacy config version was not migrated")
     require(migrated.get("cd2_transfer_enabled") is True, "legacy cd2_transfer_enabled should migrate to true")
     require(migrated.get("cd2_wait_upload_complete") is True, "legacy cd2_wait_upload_complete should migrate to true")
@@ -649,6 +665,7 @@ def save_test_settings(client, data_dir: Path) -> None:
         data={
             "watch_dir": str(watch_dir),
             "output_dir": str(output_dir),
+            "cd2_local_pull_dir": str(watch_dir),
             "web_password": "",
             "web_password_confirm": "",
             "cd2_api_enabled": "on",
@@ -890,7 +907,7 @@ def run_smoke(keep: bool = False) -> Path:
         )
         verify_legacy_config_migration(appmod, data_dir)
         patch_cd2(appmod)
-        verify_local_media_poster_contract(appmod)
+        verify_local_media_poster_contract(appmod, data_dir)
         client = appmod.app.test_client()
 
         previous_disable_auth = os.environ.get("ISO_PACKER_DISABLE_AUTH")

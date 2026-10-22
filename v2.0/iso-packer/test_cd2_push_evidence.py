@@ -40,6 +40,7 @@ class CD2PushIntegrationTests(unittest.TestCase):
         self.cfg = copy.deepcopy(app.DEFAULT_CONFIG)
         self.cfg.update({
             "enabled": True, "watch_dir": str(self.source.parent), "output_dir": str(self.local.parent),
+            "cd2_local_pull_dir": str(self.source.parent),
             "cd2_mount_root": str(self.cloud), "cd2_target_dir": str(self.cloud),
             "cd2_require_mount": False, "cd2_transfer_enabled": True, "cd2_api_enabled": True,
             "cd2_wait_upload_complete": True, "delete_source_after_success": True,

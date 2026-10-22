@@ -23,6 +23,7 @@ class UploadPauseBoundaryAuditTests(unittest.TestCase):
             "enabled": True,
             "watch_dir": str(self.root / "watch"),
             "output_dir": str(self.root / "output"),
+            "cd2_local_pull_dir": str(self.root / "watch"),
             "cd2_mount_root": str(self.root / "cloud"),
             "cd2_target_dir": str(self.root / "cloud" / "finished"),
             "cd2_api_enabled": True,

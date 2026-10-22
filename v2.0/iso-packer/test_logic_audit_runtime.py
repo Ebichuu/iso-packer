@@ -100,12 +100,23 @@ class ParentDeathAuditTests(unittest.TestCase):
                 helper.kill()
                 helper.wait(timeout=3)
                 deadline = time.monotonic() + 5
-                while any(fixture_process_alive(info[field]) for field in ("worker_pid", "tool_pid")) and time.monotonic() < deadline:
+                lease = None
+                while time.monotonic() < deadline:
+                    if not any(fixture_process_alive(info[field]) for field in ("worker_pid", "tool_pid")):
+                        try:
+                            lease = WorkerLease(root / "worker.lock")
+                        except WorkerUnavailable:
+                            # On Linux the thread-group leader can be a zombie
+                            # before its last killed thread closes shared FDs.
+                            # Process state alone does not prove lease release.
+                            pass
+                        else:
+                            lease.close()
+                            break
                     time.sleep(0.03)
                 self.assertFalse(fixture_process_alive(info["worker_pid"]), "orphan worker remained alive after its Web parent was killed")
                 self.assertFalse(fixture_process_alive(info["tool_pid"]), "orphan packaging tool remained alive after its Web parent was killed")
-                lease = WorkerLease(root / "worker.lock")
-                lease.close()
+                self.assertIsNotNone(lease, "data lease remained held after the parent, worker and tool exited")
             finally:
                 if helper.poll() is None:
                     helper.kill()
