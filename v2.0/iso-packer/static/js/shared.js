@@ -80,8 +80,29 @@ const IsoPacker = (() => {
     return null;
   }
 
+  function serviceHealth(worker, connectionError = false) {
+    if (connectionError) {
+      return { state: "disconnected", label: "数据更新中断", detail: "暂时无法更新状态，页面保留上次数据并将自动重试。", tone: "amber" };
+    }
+    if (!worker) return { state: "healthy" };
+    if (worker.alive === false) {
+      return { state: "offline", label: "后台服务离线", detail: "当前显示上次保存的数据，任务运行状态暂不可确认。请重启服务后查看。", tone: "red" };
+    }
+    if (worker.startup_complete === false) {
+      return { state: "recovering", label: "后台服务恢复中", detail: "正在恢复上次任务，暂时保留历史数据。恢复完成后会自动更新。", tone: "amber" };
+    }
+    if (worker.snapshot_stale === true) {
+      const age = Number(worker.snapshot_age_seconds);
+      const elapsed = Number.isFinite(age) && age >= 0 ? `，距上次更新 ${Math.floor(age)} 秒` : "";
+      return { state: "stale", label: "数据更新延迟", detail: `当前显示上次数据${elapsed}，任务运行状态待更新确认。`, tone: "amber" };
+    }
+    return { state: "healthy" };
+  }
+
   function normalizeStatusPayload(payload) {
     const status = payload || {};
+    const health = serviceHealth(status.worker, status.connection_error === true);
+    const currentStatusAvailable = health.state === "healthy";
     const state = status.state || {};
     const active = state.active || status.active || null;
     const progress = progressPercent(active);
@@ -102,12 +123,61 @@ const IsoPacker = (() => {
     return {
       ...status,
       state,
-      active,
-      current_job: status.current_job || currentJob,
+      active: currentStatusAvailable ? active : null,
+      current_job: currentStatusAvailable ? (status.current_job || currentJob) : null,
+      service_health: health,
       cd2_status: status.cd2_status || state.cd2_status || {},
       file_operations: fileOperations,
-      has_active_file_operation: Number(fileOperations.active_count || 0) > 0
+      has_active_file_operation: currentStatusAvailable && Number(fileOperations.active_count || 0) > 0
     };
+  }
+
+  function presentServiceHealth(health) {
+    const issue = health && health.state !== "healthy";
+    let notice = qs("#service-health-notice");
+    if (!notice && issue) {
+      const content = qs("main > div");
+      if (content) {
+        notice = document.createElement("div");
+        notice.id = "service-health-notice";
+        notice.setAttribute("role", "status");
+        notice.setAttribute("aria-live", "polite");
+        content.prepend(notice);
+      }
+    }
+    if (notice) {
+      notice.hidden = !issue;
+      if (issue) {
+        notice.className = `rounded-xl border px-4 py-3 text-xs font-semibold leading-6 ${health.tone === "red" ? "border-red-200 bg-red-50 text-red-800" : "border-amber-200 bg-amber-50 text-amber-800"}`;
+        notice.textContent = `${health.label}：${health.detail}`;
+      }
+    }
+    if (!issue) return;
+    const badge = qs("#global-worker-badge");
+    if (badge) {
+      badge.innerText = health.label;
+      badge.title = health.detail;
+      badge.className = `ml-auto border text-[9px] font-bold px-2 py-0.5 rounded-full ${health.tone === "red" ? "border-red-200 bg-red-50 text-red-700" : "border-amber-200 bg-amber-50 text-amber-700"}`;
+    }
+    for (const id of ["workspace-worker-state", "pipeline-primary-status", "pipeline-progress-meta"]) {
+      setText(qs(`#${id}`), health.label);
+    }
+    for (const id of ["workspace-worker-detail", "pipeline-current-action", "pipeline-stage-log", "index-worker-note"]) {
+      setText(qs(`#${id}`), health.detail);
+    }
+    setText(qs("#pipeline-status-kicker"), "服务状态");
+    setText(qs("#pipeline-progress-text"), "--");
+    setText(qs("#index-active-count"), "--");
+    setText(qs("#pipeline-next-step"), health.state === "offline" ? "重启服务后查看任务状态" : "等待状态自动更新");
+    const dot = qs("#workspace-worker-dot");
+    if (dot) dot.className = `h-2.5 w-2.5 rounded-full ${health.tone === "red" ? "bg-red-500" : "bg-amber-500"}`;
+    const stateLabel = qs("#workspace-worker-state");
+    if (stateLabel) stateLabel.className = `font-mono text-sm ${health.tone === "red" ? "text-red-700" : "text-amber-700"}`;
+    const cancel = qs("#pipeline-cancel-pack");
+    if (cancel) {
+      cancel.disabled = true;
+      cancel.classList.add("hidden");
+    }
   }
 
   function formatBytes(bytes) {
@@ -124,7 +194,7 @@ const IsoPacker = (() => {
     return `${size.toFixed(digits)} ${units[unitIndex]}`;
   }
 
-  return { qs, qsa, clearNode, setText, fetchJson, notify, normalizeStatusPayload, formatBytes };
+  return { qs, qsa, clearNode, setText, fetchJson, notify, normalizeStatusPayload, presentServiceHealth, formatBytes };
 })();
 
 window.IsoPacker = IsoPacker;
@@ -138,8 +208,10 @@ function startSerializedSystemLoop() {
   if (isLoopRunning) return;
   isLoopRunning = true;
   let nextPollDelay = STATUS_POLL_IDLE_MS;
+  let lastStatus = {};
 
   async function executePollStep() {
+    let reportedWorker = null;
     try {
       const response = await fetch("/api/status", { signal: AbortSignal.timeout(15000) });
       if (response.status === 401) {
@@ -147,11 +219,18 @@ function startSerializedSystemLoop() {
         return;
       }
 
-      const statusData = IsoPacker.normalizeStatusPayload(await response.json());
-      const hasActiveFileOperation = Number(statusData.file_operations?.active_count || 0) > 0;
+      const payload = await response.json();
+      if (!response.ok || payload.ok === false) {
+        reportedWorker = payload.worker || null;
+        throw new Error(payload.message || `请求失败: ${response.status}`);
+      }
+      lastStatus = payload;
+      const statusData = IsoPacker.normalizeStatusPayload(payload);
+      const hasActiveFileOperation = statusData.has_active_file_operation;
       nextPollDelay = (statusData.current_job || hasActiveFileOperation) ? STATUS_POLL_ACTIVE_MS : STATUS_POLL_IDLE_MS;
       const globalBadge = document.getElementById("global-worker-badge");
       if (globalBadge) {
+        globalBadge.removeAttribute("title");
         if (statusData.current_job) {
           const phase = String(statusData.current_job.phase || statusData.current_job.status || "").toLowerCase();
           const isWaiting = phase.startsWith("waiting") || phase === "receiving";
@@ -179,8 +258,13 @@ function startSerializedSystemLoop() {
       }
 
       window.dispatchEvent(new CustomEvent("coreStatusUpdated", { detail: statusData }));
+      IsoPacker.presentServiceHealth(statusData.service_health);
     } catch (error) {
       nextPollDelay = STATUS_POLL_ERROR_MS;
+      const reportedIssue = reportedWorker && (reportedWorker.alive === false || reportedWorker.startup_complete === false || reportedWorker.snapshot_stale === true);
+      const statusData = IsoPacker.normalizeStatusPayload({ ...lastStatus, worker: reportedWorker || lastStatus.worker, connection_error: !reportedIssue });
+      window.dispatchEvent(new CustomEvent("coreStatusUpdated", { detail: statusData }));
+      IsoPacker.presentServiceHealth(statusData.service_health);
       console.error("状态同步失败，稍后自动重试", error);
     } finally {
       setTimeout(executePollStep, nextPollDelay);

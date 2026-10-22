@@ -172,6 +172,9 @@
                 </ol>
             </section>
 
+            {% include '_upload_controls.html' %}
+            <p class="px-1 text-[11px] leading-5 text-zinc-500">每日暂停窗口可在<a href="{{ url_for('settings') }}" class="font-bold text-zinc-800 underline underline-offset-2">系统设置 · 上传暂停与每日窗口</a>中自定义。</p>
+
             <section class="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm" aria-labelledby="cd2-diagnostics-title">
                 <div class="flex items-center justify-between gap-3">
                     <div>
@@ -185,8 +188,10 @@
         </aside>
     </div>
 </section>
+<form id="cd2-upload-manual-form"></form>
 {% endblock %}
 
 {% block script %}
 <script src="{{ url_for('static', filename='js/workspace.js') }}"></script>
+<script src="{{ url_for('static', filename='js/upload-controls.js') }}"></script>
 {% endblock %}

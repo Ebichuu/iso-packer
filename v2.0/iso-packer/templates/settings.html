@@ -277,6 +277,37 @@
         </div>
     </details>
 
+    <details class="settings-card space-y-4" open>
+        <summary class="settings-card-summary">
+            <div>
+                <h3>上传暂停与每日窗口</h3>
+                <p class="mt-2 text-[11px] font-medium text-zinc-500">为本地上传预留时间，避免两地同时向 115 上传。所有时间按北京时间执行。</p>
+            </div>
+            <span class="settings-toggle"><span class="when-closed">展开</span><span class="when-open">收起</span></span>
+        </summary>
+        <div class="settings-card-body space-y-4">
+            {% include '_upload_controls.html' %}
+            <div data-upload-schedule class="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/50 p-4">
+                <label class="flex cursor-pointer items-start gap-3">
+                    <input type="checkbox" name="cd2_upload_schedule_enabled" {% if config.cd2_upload_schedule_enabled %}checked{% endif %} class="mt-0.5 h-4 w-4 rounded border-zinc-200 accent-zinc-900">
+                    <span><span class="block text-xs font-bold text-zinc-800">启用每日暂停窗口</span><span class="mt-1 block text-[11px] leading-5 text-zinc-500">默认关闭。窗口内暂停 CD2 全部上传，窗口外仅恢复本服务暂停的任务；手动暂停优先。</span></span>
+                </label>
+                <p class="text-[11px] leading-5 text-zinc-500">可添加多个自定义窗口，例如跨午夜的 23:30–次日 00:20。开始时间包含，结束时间不包含；请自行填写，不预设固定时刻。</p>
+                <div data-upload-window-rows class="space-y-2"></div>
+                <div class="flex flex-wrap items-center gap-3">
+                    <button type="button" data-upload-window-add class="min-h-10 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-bold text-zinc-700 hover:bg-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:ring-offset-2">添加暂停窗口</button>
+                    <span class="text-[10px] text-zinc-500">北京时间 · Asia/Shanghai</span>
+                </div>
+                <label class="block text-[11px] font-semibold text-zinc-600" data-upload-windows-fallback>
+                    每日暂停窗口（每行 HH:MM-HH:MM）
+                    <textarea name="cd2_upload_pause_windows_text" rows="3" class="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs">{% for window in config.cd2_upload_pause_windows or [] %}{{ window.start }}-{{ window.end }}{{ '\n' if not loop.last else '' }}{% endfor %}</textarea>
+                </label>
+                <p data-upload-window-error role="alert" class="hidden text-[11px] font-bold text-red-700"></p>
+                <p class="text-[11px] font-semibold text-zinc-500">每日窗口的修改需要点击页面底部“安全保存配置”后生效。</p>
+            </div>
+        </div>
+    </details>
+
     <!-- CD2 高级同步参数 -->
     <details class="settings-card space-y-4">
         <summary class="settings-card-summary">
@@ -521,6 +552,7 @@
         </button>
     </div>
 </form>
+<form id="cd2-upload-manual-form"></form>
 
 <div id="directory-picker" class="hidden fixed inset-0 z-50 bg-zinc-950/35 backdrop-blur-sm p-4">
     <div class="mx-auto mt-10 max-w-3xl rounded-2xl border border-zinc-200 bg-[#fbfbfa] shadow-2xl">
@@ -547,4 +579,5 @@
 
 {% block script %}
 <script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+<script src="{{ url_for('static', filename='js/upload-controls.js') }}"></script>
 {% endblock %}

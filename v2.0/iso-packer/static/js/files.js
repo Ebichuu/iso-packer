@@ -34,6 +34,8 @@
     sortDir: "asc",
     page: 1,
     pageSize: 50,
+    directoryRequest: 0,
+    destinationRequest: 0,
   };
 
   function helper() {
@@ -411,7 +413,11 @@
   }
 
   async function loadDirectory(path) {
+    const requestId = ++state.directoryRequest;
+    const requestedRoot = state.root;
     const targetPath = path || state.path || "/";
+    state.selected.clear();
+    renderOperationBar();
     const list = helper().qs("#file-browser-list");
     if (list) {
       list.replaceChildren(Object.assign(document.createElement("div"), {
@@ -420,11 +426,13 @@
       }));
     }
     try {
-      const payload = await helper().fetchJson(`/api/browse?root=${encodeURIComponent(state.root)}&path=${encodeURIComponent(targetPath)}`);
+      const payload = await helper().fetchJson(`/api/browse?root=${encodeURIComponent(requestedRoot)}&path=${encodeURIComponent(targetPath)}`);
+      if (requestId !== state.directoryRequest || requestedRoot !== state.root) return;
       renderEntries(payload);
     } catch (error) {
+      if (requestId !== state.directoryRequest || requestedRoot !== state.root) return;
       if (targetPath !== "/") {
-        clearSavedPath(state.root);
+        clearSavedPath(requestedRoot);
         loadDirectory("/");
         return;
       }
@@ -693,12 +701,17 @@
   }
 
   async function loadDestinationDirectory(path) {
+    const requestId = ++state.destinationRequest;
+    const use = helper().qs("#file-destination-use");
+    if (use) use.disabled = true;
     renderDestinationMessage("正在读取目录。");
     try {
       const targetPath = path || DIRECTORY_ROOT;
       const payload = await helper().fetchJson(`/api/directories?scope=file_destination&path=${encodeURIComponent(targetPath)}`);
+      if (requestId !== state.destinationRequest) return;
       renderDestinationEntries(payload);
     } catch (error) {
+      if (requestId !== state.destinationRequest) return;
       renderDestinationMessage(error.message || "目录读取失败。");
     }
   }

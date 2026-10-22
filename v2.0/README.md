@@ -1,6 +1,6 @@
-# ISO Packer v2.1.0
+# ISO Packer v2.x
 
-蓝光原盘自动封装与归档工具。v2.x 是基于 `D:\Projects\makeiso` 旧版 v1.19 的重构版本；v1.19 只作为只读验收基线，实际改动只落在 `D:\Projects\makeiso\v2.0`。
+蓝光原盘自动封装与归档工具。应用版本由 [`iso-packer/VERSION`](iso-packer/VERSION) 统一定义，页面、本地启动脚本和 Actions 镜像标签读取同一份版本；`v2.0/` 是沿用的项目目录名。v1.19 只作为历史功能参考。
 
 ## 当前状态
 
@@ -17,6 +17,27 @@
 - 媒体检测页面向已经封装好的电影文件：默认扫描 CD2 成品目录，按名称、年份、分辨率、来源、发布组、大小和修改时间聚合同片不同组/不同版本，不做 BDMV 指纹。
 - 设置页按“本地目录 / CD2 设置 / 系统设置”三类组织。
 - Docker Hub 测试镜像使用 `ebichu/iso-packer:test`；`latest` 只在正式发布时更新。
+- Web 与封装/转存 worker 使用独立进程；磁盘和 CD2 操作交由 worker，Web 请求通过有超时的进程通信读取状态和发起操作。VPS 隔离容器已通过 1 GiB 合成原盘封装及 Web 响应检查；真实 CD2 上传、媒体播放和完整异常恢复分别验收。
+
+## 镜像部署与版本
+
+仓库 Compose 默认拉取 `ebichu/iso-packer:test`，映射 `15866:15865`，数据目录和测试输入/输出目录均位于当前目录。部署前按实际场景配置持久化目录及 CloudDrive2 挂载。
+
+```bash
+cd v2.0
+bash deploy.sh
+```
+
+脚本先拉取已发布镜像，再仅更新 `iso-packer-v2` 服务，保留其他 Compose 服务。只有目标容器通过 Docker 健康检查才报告成功；它不会在服务器上构建镜像。
+
+验收或回滚时可固定 Actions 产出的提交镜像：
+
+```bash
+# 将示例提交号替换为 Actions 实际构建的 12 位提交号
+ISO_PACKER_IMAGE=ebichu/iso-packer:sha-0123456789ab bash deploy.sh
+```
+
+`test`、`latest` 和 Git 标签不等于当前源码版本。2026-10-22 检查时，远端主线 `e4d1f48` 比最新标签 `v2.0.2` 多 26 个提交，`latest` 仍落后主线 17 个提交；本轮修复不会自动更新正式镜像。
 
 ## 关键语义
 
@@ -47,6 +68,8 @@
 - 如果已有 CD2 同名文件已经在上传队列中明确显示完成，会直接标记为已交付；没有明确完成记录时仍先等待队列确认。
 - 如果条目已经是已交付完成态，UI 不再显示旧的上传百分比，避免出现“已交付但仍 0%/93%”的矛盾状态。
 - 上传进度和任务状态直接展示 CD2 API 返回的数据；进度长时间不变或任务暂时不在 API 列表中不会被 ISO Packer 判定为卡住或失败，只有 API 明确失败才会进入失败状态。
+- 即使上传完成后轮询队列迅速清空，也会保留 `PushMessage` 的明确终态证据；证据必须与上传 key、路径别名、大小和当前任务 generation 精确绑定，不能跨任务重放。
+- 完成后的源目录与本机 ISO 自动清理会复核转存时记录的文件归属，避免删除后来替换的文件。旧任务缺少清理归属记录时，明确 API 完成仍可更新状态，但保留源目录和本机 ISO，并显示人工核对清理警告。
 - 上传异常可以点击“重新检测”重新读取队列，也可以点击“确认已上传”。后者必须确认目标位于 CD2 成品目录、文件非空、大小符合已知目标大小且 ISO 结构校验通过。
 - 源目录接收、等待下载/稳定、CD2 拉取和 CD2 确认等等待状态只计入“等待”，不计入“当前执行”；真正封装、转存和目录刷新才计入执行。
 - CD2 远程候选扫描使用独立客户端和单任务 15 秒超时保护；超时不会叠加扫描线程，前端请求也会在 20 秒后结束，可稍后重新刷新。
@@ -72,6 +95,21 @@
 - API Token 需要 `allow_push_message` 权限才能启用实时推送；缺少该权限不会阻断封装和轮询。
 - 封装中心可对当前精确匹配的单个复制任务执行暂停、继续、重启、取消，对单个上传任务执行暂停、继续、取消；不提供批量取消。
 - 封装中心的“运行诊断”读取 CD2 版本、CPU/内存、缓存/临时文件计数、任务计数和打开文件句柄。单项 RPC 不可用时只显示该项错误。
+
+### CD2 上传暂停与本地上传错峰
+
+系统设置的“上传暂停与每日窗口”和封装中心均提供手动控制。这里的范围是**当前 CD2 实例的全部上传任务**，包含其他程序创建的上传，不只限于 ISO Packer。
+
+- “暂停 CD2 全部上传”会持续手动暂停，直到主动解除；也可选择任意未来北京时间，点击“暂停到此时间”。
+- “解除手动暂停”取消手动规则。如果当前仍在每日暂停窗口内，暂停继续生效。
+- “启用每日暂停窗口”默认关闭，窗口列表默认空。可按本地上传时间自定义最多 48 段 `HH:MM-HH:MM`，例如 `23:30-00:20` 表示到次日结束；不预填 00/06/12/18 等固定时刻。
+- 窗口开始时间包含，结束时间不包含；重叠窗口按并集生效，开始与结束不能相同。启用计划时至少需要一个窗口。
+- 所有时间均按北京时间 `Asia/Shanghai` 解释，与浏览器或 VPS 所在时区无关。每日窗口编辑后须点击“安全保存配置”；手动暂停按钮立即使用已经保存的 CD2 连接配置。
+- 暂停策略也会阻止本项目开始转存。API 失联或队列不完整时，页面显示“已阻止本项目转存，CD2 暂停待确认”，不会把本机门禁等同于远端上传已暂停。
+- 本项目的转存门禁立即遵守策略；其他程序新增的 CD2 上传由后台持续检查，存在短暂轮询间隔，不能视为对外部写入的即时阻断。
+- 恢复时只处理本服务之前按上传 key 与路径认领的暂停任务，不调用批量恢复接口，不恢复原本已经暂停的任务。
+
+此功能用于协调两地上传时间；是否已暂停以页面的 CD2 确认状态为准。2026-10-22 已在禁用真实 CD2 调用的本地隔离预览中通过 Edge 集成验收，覆盖自定义/跨午夜窗口保存、暂停状态刷新持久化、解除手动暂停保留计划、北京时间截止值、封装中心控制及 390 px 窄屏布局，页面 JavaScript 错误为 0。另以独立 32 MiB 合成样本的单个上传 key 验证真实 CD2 暂停/恢复 RPC，队列明确进入 `Pause=4` 并保持 1 秒，恢复后收到同 key 的 `Finish=5`；整套调度、任务认领及不误恢复其他任务由本地回归覆盖，未进行全局生产队列暂停验收。
 
 ## TMDB 配置
 
@@ -129,6 +167,8 @@ cd D:\Projects\makeiso\v2.0
 ISO_PACKER_DISABLE_AUTH=1
 ISO_PACKER_DISABLE_CD2_PULL=1
 ISO_PACKER_DISABLE_CD2_STATUS_POLL=1
+ISO_PACKER_DISABLE_WORKER=1
+ISO_PACKER_BIND_HOST=127.0.0.1
 ```
 
 含义：
@@ -136,8 +176,10 @@ ISO_PACKER_DISABLE_CD2_STATUS_POLL=1
 - `ISO_PACKER_DISABLE_AUTH=1`：本地预览免登录。
 - `ISO_PACKER_DISABLE_CD2_PULL=1`：禁止创建真实 CD2 拉取任务。
 - `ISO_PACKER_DISABLE_CD2_STATUS_POLL=1`：状态页不持续读取 CD2 队列。
+- `ISO_PACKER_DISABLE_WORKER=1`：禁用自动封装扫描和启动恢复；手动文件与配置操作仍由独立 worker 执行。
+- `ISO_PACKER_BIND_HOST=127.0.0.1`：免登录预览只监听本机回环地址。容器部署默认仍监听 `0.0.0.0`。
 
-正式部署或真实拉取验收时，再按需移除对应保护开关。
+预览使用独立测试目录；手动文件操作仍会修改所选文件。正式部署或真实拉取验收时，再按需移除对应保护开关。
 
 ## 本地验收
 
@@ -153,7 +195,10 @@ python -B scripts\smoke_v2.py
 ```powershell
 cd D:\Projects\makeiso\v2.0\iso-packer
 python -B scripts\smoke_v2.py
-python -B -m py_compile app.py core.py release_calendar_fetcher.py scripts\smoke_v2.py scripts\update_release_calendar.py
+python -B -m unittest discover -p "test_*.py" -v
+python -B -m unittest discover -s scripts -p "test_*.py" -v
+python -B scripts\check_release.py
+python -B -m py_compile app.py core.py worker_runtime.py upload_control.py release_calendar_fetcher.py scripts\smoke_v2.py scripts\update_release_calendar.py scripts\check_release.py scripts\acceptance_runtime.py
 node --check static\js\shared.js
 node --check static\js\index.js
 node --check static\js\workspace.js
@@ -161,12 +206,62 @@ node --check static\js\files.js
 node --check static\js\settings.js
 node --check static\js\logs.js
 node --check static\js\compare.js
+node --test scripts\test_frontend_races.cjs scripts\test_upload_controls.cjs
 
 cd D:\Projects\makeiso\v2.0
-docker-compose config --quiet
+docker compose config --quiet
 ```
 
-GitHub Actions 在构建 Docker 镜像前会执行同一组后端单元测试、smoke、Python 编译检查和前端 JavaScript 语法检查；镜像仍只由 Actions 构建和推送。
+GitHub Actions 在构建镜像前执行后端/进程隔离测试、发布校验回归测试、smoke、Python 编译、前端 JavaScript 语法和部署配置检查。`test` 与 `sha-<12位提交号>` 同时推送；镜像版本和完整提交号写入 OCI 标签。镜像只由 Actions 构建和推送。
+
+正式发布顺序：
+
+1. 将修复合入主线，通过测试镜像完成下面的 VPS 实机验收。
+2. 确认 `VERSION` 后，为验收通过的同一提交创建 `v<版本号>` Git 标签。
+3. 手动运行 `Build and Push Docker Image`，选择该标签。
+4. 流程校验标签名等于 `VERSION`，且标签精确指向构建提交；通过后才更新版本镜像及 `latest`。
+
+从 `main` 或旧版本标签发起正式流程会直接失败，不再用 `git describe` 把新代码发布到旧版本名下。
+
+## Linux 隔离验收
+
+[`scripts/acceptance_runtime.py`](iso-packer/scripts/acceptance_runtime.py) 使用临时数据目录生成合成 BDMV，经过独立 worker 运行真实 `genisoimage`，再用 `xorriso -toc` 检查 ISO 结构。执行过程中反复请求 `/healthz`、`/api/status` 和 `/workspace`；任何端点失败或单次响应超过 1 秒均判定失败。脚本还检查源目录保留及完成后没有 `.partial` 遗留。
+
+在已有测试镜像的 Linux 主机，从 `v2.0/` 目录运行离线验收：
+
+```bash
+docker run --rm --pull never --network none \
+  --mount "type=bind,src=$PWD/iso-packer,dst=/app,readonly" \
+  --workdir /app --entrypoint python \
+  ebichu/iso-packer:test -B scripts/acceptance_runtime.py \
+  --size-mib 1024 --timeout 180
+```
+
+该命令复用主机已有镜像并只读挂载当前源码，不构建镜像，不挂生产数据、CloudDrive2 目录或宿主机端口。合成文件写入验收容器临时目录；成功时输出 JSON 报告并清理，失败时报告 `retained_data_dir`，需要保留失败现场时去掉 `--rm`。
+
+参数：`--size-mib` 为 1–4096 MiB，默认 256；`--timeout` 为 10–1800 秒，默认 180。合成样本只用于结构和进程通信验证，不是可播放的蓝光内容。
+
+2026-10-22 在 VPS 的独立、无网络验收容器运行上述 1 GiB 样本，生产服务保持运行，结果如下：
+
+| 项目 | 结果 |
+| --- | --- |
+| 生成 ISO | 1,074,630,656 字节，`genisoimage` 成功、`xorriso` 结构检查通过 |
+| 最终重跑耗时 | 1.50 秒 |
+| 请求数量 | Flask 测试客户端共 36 次端点请求 |
+| 最长响应 | `/healthz` 0.58 ms；`/api/status` 4.95 ms；`/workspace` 14.92 ms |
+| 验证范围 | 真实 ISO 工具、独立 worker、源文件保留、临时文件收尾、上述端点响应 |
+
+这些响应时间来自容器内测试客户端，不能替代公网访问和长期负载测试。此轮离线结果不包含 CD2 上传或媒体播放验收。
+
+脚本可显式增加 `--cloud-config /run/acceptance-config.json` 做 CD2 验收。操作者需另行提供可用网络、CD2 挂载以及只读配置文件；不要在离线命令上直接追加该参数。云端模式复制配置到独立临时目录，并仅在配置的 CD2 输出目录下创建唯一 `.iso-packer-acceptance-<随机值>` 子目录，关闭自动拉取、自动扫描及源删除。只有 API 明确确认上传完成才报告成功并清理本次云端样本；超时或失败保留样本，不加载或改写生产状态。
+
+2026-10-22 修复 PushMessage 终态证据后，新的 32 MiB 随机合成 BDMV 完成真实 CD2 验收：生成 34,443,264 字节 ISO，PushMessage 依次收到同一上传 key 的 `0 (Wait)` 与 `5 (Finish)`，精确绑定路径别名、大小与任务 generation，最终进入 `transfer_done`，`cloud_api_confirmed=true`。全程 48.72 秒、993 次容器内端点请求；最长响应为 `/healthz` 2.08 ms、`/api/status` 19.72 ms、`/workspace` 19.81 ms。`xorriso` 结构检查、源目录保留和无 `.partial` 遗留均通过，仅在明确 Finish 后清理本次唯一云端目录与隔离数据。
+
+额外真实 RPC 验收仅作用于另一个独立 32 MiB 合成样本的上传 key：34,443,264 字节 ISO 的上传经 `PauseUploadFiles` 后，队列明确为 `Pause=4` 且持续 1 秒；`ResumeUploadFiles` 后收到同 key 的明确 `Finish=5`，测试目录清理完成，全程 45.08 秒。范围为 `one_synthetic_upload_key`，未全局暂停生产上传，也未改生产配置或状态。
+
+修复前的两个样本虽在云端可见，却未获得明确 API 完成终态，仍按待确认处理，不追认为成功。两个唯一云端测试目录已按撤销验收删除，记录 `completion_inferred=false`；对应已退出的自有验收容器已移除，本地预览进程树已停止，生产 `iso-packer` 服务保持运行且健康。
+
+本轮代码快照回归：Linux 后端 134 项全部通过（9.314 秒），Windows 后端 133 项通过、1 项 POSIX 专属测试跳过（7.902 秒）；发布/部署 scripts 在 Windows 9 项全部通过（0.723 秒），Linux 验收镜像中 8 项通过、1 项因缺 Git 跳过；两端 smoke 通过，Node 前端 16 项通过，Edge 本地隔离集成 8 项通过。
 
 ## 关键接口
 
@@ -179,6 +274,8 @@ POST /api/cd2/directories
 POST /api/cd2/test
 POST /api/cd2/pull
 GET  /api/cd2/diagnostics
+GET  /api/cd2/upload-control
+POST /api/cd2/upload-control
 POST /api/tasks/action
 POST /api/release-calendar/refresh
 POST /api/tmdb/test
@@ -196,27 +293,29 @@ POST /api/file-actions
 - `/api/tasks/action` 用于等待任务重新检测、CD2 上传完成确认，以及单任务复制/上传控制；服务端会重新读取当前队列并精确匹配任务，不接受前端直接指定成品路径。
 - `/api/tasks/action` 的 `cancel_pack` 只允许取消当前正在生成 ISO 的任务，校验/转存阶段不接受该操作。
 - `/api/cd2/diagnostics` 只读返回 CD2 运行信息，可用 `path` 查询参数筛选打开句柄并读取该路径的详情统计。
+- `/api/cd2/upload-control` 读取已保存的全部上传暂停策略及 CD2 确认状态；POST JSON 使用 `action: pause` 或 `action: resume`，可给 `pause` 增加带时区的未来 `until`，例如 `2026-10-23T12:30:00+08:00`。
 - `/api/file-actions` 承载文件浏览里的复制、移动、删除和重命名。
 - 文件浏览“复制到监控目录”由 `/api/file-actions` 发起 CD2 网盘内复制任务。
 
-## VPS 实机观察
+## VPS 历史观察与待验收项
 
-- VPS 测试入口：`http://your-vps-host/`
 - 部署镜像：`ebichu/iso-packer:test`
 - 端口 `15865` 报错通常是容器重建时端口释放/绑定时序问题，不代表镜像拉取失败。
 - 容器曾因大文件转存到 CloudDrive2 挂载目录而进入 `unhealthy`。
-- 根因是封装/转存 I/O 堵住了 Web 服务线程，导致 `/healthz` 和页面无响应。
+- 历史排查怀疑封装/转存与 Web 同进程导致大文件 I/O 影响页面和 `/healthz`。本轮改用进程隔离后，仍需用同类实机负载复核。
 - `/output` 中的 `.iso.partial` 持续增长时不要强停；它是本机封装临时文件。CD2 挂载目标目录不会再创建 `.partial` 文件。
 
 ## 正式版前计划
 
-1. 拉取并运行最新 `ebichu/iso-packer:test`，完成一轮 VPS 实机验收。
+1. 用新构建的 `sha-<12位提交号>` 镜像完成 VPS 实机验收，并记录实际镜像 digest、提交号和时间。
 2. 在线保存 TMDB Token，确认首页已交付资产海报能自动补全并缓存。
 3. 验证文件浏览“复制到监控目录”确实进入 CD2 网盘内复制任务。
 4. 验证封装中心能正确显示：生成 ISO、校验、转存、CD2 上传云端、已交付。
-5. 修复封装/转存 worker 与 Web 服务耦合问题，避免 CloudDrive2 大文件 I/O 堵住页面和 `/healthz`。
-6. 实机验证 v2.1.0 的日志中心与媒体检测页，确认大目录下的扫描范围和页面响应符合预期。
+5. 大文件生成、校验、写入 CloudDrive2 时持续检查页面和 `/healthz` 响应；强制 worker 异常退出后验证状态提示、重启恢复和源文件保留。
+6. 实机验证日志中心与媒体检测页，确认大目录下的扫描范围和页面响应符合预期。
 7. 正式发布前再更新 Docker Hub `latest`；测试阶段继续只更新 `test`。
+
+本地测试、模拟卡顿或接口 smoke 只证明对应验证范围，不能替代真实 CloudDrive2 上传完成和 VPS 大文件验收。本轮不创建正式 Git 标签，也不触发 `latest` 发布。
 
 ## 不应提交
 

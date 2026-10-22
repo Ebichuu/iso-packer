@@ -1,10 +1,8 @@
 services:
   iso-packer-v2:
-    build:
-      context: ..
-      dockerfile: v2.0/Dockerfile
-
-    image: iso-packer:v2.1.0-test
+    # 镜像只由 GitHub Actions 构建；验收阶段默认 test。
+    # 可设置 ISO_PACKER_IMAGE=ebichu/iso-packer:sha-<commit> 固定验收版本。
+    image: ${ISO_PACKER_IMAGE:-ebichu/iso-packer:test}
     container_name: iso-packer-v2
     restart: unless-stopped
 

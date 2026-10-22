@@ -196,6 +196,101 @@ class RevisionRecoveryTests(unittest.TestCase):
         self.assertTrue(app.is_copy_task_done(completed_copy))
         self.assertFalse(app.is_copy_task_done(active_copy_at_full_progress))
 
+    def test_download_progress_requires_explicit_api_completion(self) -> None:
+        for status in ("Downloading", "Transfer", "unknown", ""):
+            with self.subTest(status=status):
+                self.assertFalse(app.is_download_done({
+                    "status": status, "current": 100, "total": 100,
+                }))
+        for status in ("Completed", "Finish"):
+            with self.subTest(status=status):
+                self.assertTrue(app.is_download_done({
+                    "status": status, "current": 0, "total": 100,
+                }))
+
+    def test_copy_claim_requires_api_destination(self) -> None:
+        source = "/115/Movie"
+        for task_target, claim_target in (("", "/watch/new"), ("/watch/old", "/watch/new"), ("/watch/new", "")):
+            with self.subTest(task_target=task_target, claim_target=claim_target):
+                self.assertFalse(app.cd2_copy_task_matches_claim({
+                    "source": source, "target": task_target, "status": "Completed",
+                }, source, claim_target))
+        self.assertTrue(app.cd2_copy_task_matches_claim({
+            "source": source, "target": "/watch/new/Movie", "status": "Completed",
+        }, source, "/watch/new"))
+
+    def test_copy_without_destination_cannot_complete_pull_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watch_dir = Path(temp_dir) / "watch"
+            watch_dir.mkdir()
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "watch_dir": str(watch_dir),
+                "cd2_local_pull_dir": str(watch_dir),
+                "cd2_remote_pull_dest_dir": "/watch/new",
+            })
+            source = "/115/Movie"
+            claim_key = self._seed_cd2_pull_claim(cfg, watch_dir, source)
+            summary = app.reconcile_cd2_auto_pull_claims(cfg, {
+                "connected": True, "copy_tasks_complete": True,
+                "copy_tasks": [{"source": source, "target": "", "status": "Completed"}],
+            })
+            self.assertEqual(summary["completed"], 0)
+            self.assertEqual(summary["waiting"], 1)
+            self.assertEqual(app.state["cd2"]["auto_pull_claims"][claim_key]["status"], "submitted")
+
+    def test_failed_upload_enum_overrides_completed_text(self) -> None:
+        upload = {"status": "Completed", "status_enum": "6", "percent": 100}
+        self.assertTrue(app.cd2_upload_failed(upload))
+        self.assertFalse(app.cd2_upload_done(upload))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            source = base / "Movie"
+            source.mkdir()
+            local_output = base / "Movie.iso"
+            local_output.write_bytes(b"keep local ISO")
+            target = base / "cloud" / "Movie.iso"
+            app.state["items"][str(source)] = {
+                "status": "waiting_cd2_upload", "target": str(target),
+                "local_output_target": str(local_output), "delete_source_pending": True,
+                "pack_iso": True,
+            }
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({"cd2_wait_upload_complete": True, "delete_source_after_success": True})
+            app.check_waiting_cd2_uploads(cfg, {str(target): upload}, {"connected": True})
+            self.assertEqual(app.state["items"][str(source)]["status"], "transfer_failed")
+            self.assertTrue(source.exists())
+            self.assertTrue(local_output.exists())
+
+    def test_remote_source_path_rejects_dot_traversal(self) -> None:
+        for path in ("/115/source/../private", "/115/source/./Movie", "/115/source/Movies/../../private", "/115/source\\..\\private"):
+            with self.subTest(path=path):
+                self.assertFalse(app.remote_path_under(path, "/115/source"))
+        self.assertTrue(app.remote_path_under("/115/source/Movie", "/115/source"))
+
+    def test_upload_nonterminal_enum_cannot_delete_completed_text_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            source = base / "Movie"
+            source.mkdir()
+            local_output = base / "Movie.iso"
+            local_output.write_bytes(b"keep until API Finish")
+            target = base / "cloud" / "Movie.iso"
+            cfg = dict(app.DEFAULT_CONFIG, cd2_wait_upload_complete=True, delete_source_after_success=True)
+            for enum in ("0", "1", "3", "4", "7", "unknown-future-enum"):
+                with self.subTest(enum=enum):
+                    app.state["items"][str(source)] = {
+                        "status": "waiting_cd2_upload", "target": str(target),
+                        "local_output_target": str(local_output), "delete_source_pending": True,
+                        "pack_iso": True,
+                    }
+                    upload = {"status": "Finish", "status_enum": enum, "percent": 100}
+                    self.assertFalse(app.cd2_upload_done(upload))
+                    app.check_waiting_cd2_uploads(cfg, {str(target): upload}, {"connected": True})
+                    self.assertEqual(app.state["items"][str(source)]["status"], "waiting_cd2_upload")
+                    self.assertTrue(source.exists())
+                    self.assertTrue(local_output.exists())
+
     def test_manual_pull_disappearing_from_queue_stays_pending(self) -> None:
         item = {
             "cd2_pull_source": "/remote/Movie",
@@ -521,6 +616,72 @@ class RevisionRecoveryTests(unittest.TestCase):
             self.assertTrue(target.exists())
             self.assertTrue(existing_target.exists())
 
+    def test_same_size_different_iso_is_not_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            source = base / "local.iso"
+            target = base / "remote.iso"
+            source.write_bytes(b"A" * 8192)
+            target.write_bytes(b"B" * 8192)
+            app.validate_iso = lambda _path: True
+            self.assertFalse(app.cd2_transfer_target_is_complete(source, target))
+            self.assertTrue(source.exists())
+            self.assertEqual(target.read_bytes(), b"B" * 8192)
+            target.write_bytes(source.read_bytes())
+            self.assertTrue(app.cd2_transfer_target_is_complete(source, target))
+
+    def test_same_name_different_iso_preserves_source_and_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            source = base / "Movie.2026"
+            (source / "BDMV").mkdir(parents=True)
+            output_dir = base / "output"
+            cd2_dir = base / "cd2"
+            output_dir.mkdir()
+            cd2_dir.mkdir()
+            target = output_dir / f"{source.name}.iso"
+            existing_target = cd2_dir / target.name
+            target.write_bytes(b"new iso content")
+            existing_target.write_bytes(b"old iso content")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({
+                "output_dir": str(output_dir), "cd2_transfer_enabled": True,
+                "cd2_wait_upload_complete": True, "cd2_require_mount": False,
+                "cd2_target_dir": str(cd2_dir), "delete_source_after_success": True,
+            })
+            app.fetch_cd2_uploads = lambda _cfg: ({str(existing_target): {
+                "path": str(existing_target), "status": "Completed",
+            }}, {"connected": True})
+            app.source_readiness_blocker = lambda *_args, **_kwargs: (None, None, None)
+            app.validate_iso = lambda _path: True
+            app.run_iso = lambda *_args: (_ for _ in ()).throw(AssertionError("不应重复封装"))
+            app.process_item(source, cfg)
+            self.assertEqual(app.state["items"][str(source)]["failure_code"], "target_exists")
+            self.assertTrue(source.exists())
+            self.assertEqual(target.read_bytes(), b"new iso content")
+            self.assertEqual(existing_target.read_bytes(), b"old iso content")
+
+    def test_media_compare_does_not_follow_directory_link_outside_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            root = base / "watch"
+            external = base / "private"
+            root.mkdir()
+            external.mkdir()
+            (external / "Private.Movie.2025.1080p.BluRay-GroupA.mkv").write_bytes(b"private")
+            link = root / "linked"
+            try:
+                link.symlink_to(external, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"当前系统不允许创建目录符号链接: {exc}")
+            cfg = dict(app.DEFAULT_CONFIG)
+            cfg.update({"watch_dir": str(root)})
+            with app.app.test_request_context("/api/compare?root=watch&depth=2"), patch.object(app, "load_config", return_value=cfg):
+                payload, status_code = app.scan_media_compare_payload()
+            self.assertEqual(status_code, 200)
+            self.assertEqual(payload["summary"]["scanned_candidate_count"], 0)
+            self.assertEqual(payload["summary"]["scanned_dirs"], 1)
+
     def test_transfer_writes_only_final_iso_name_to_cd2_mount(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
@@ -639,7 +800,7 @@ class RevisionRecoveryTests(unittest.TestCase):
             self.assertEqual(result.returncode, -15)
             self.assertIn("超过", result.stderr)
 
-    def test_deferred_cleanup_runs_after_cd2_upload_completion(self) -> None:
+    def test_legacy_upload_completion_retains_files_without_cleanup_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
             watch_dir = base / "watch"
@@ -678,9 +839,10 @@ class RevisionRecoveryTests(unittest.TestCase):
 
             item = app.state["items"][str(source)]
             self.assertEqual(item["status"], "transfer_done")
-            self.assertFalse(local_iso.exists())
-            self.assertFalse(source.exists())
-            self.assertNotIn("delete_source_pending", item)
+            self.assertTrue(local_iso.exists())
+            self.assertTrue(source.exists())
+            self.assertTrue(item.get("delete_source_pending"))
+            self.assertEqual(item.get("warning_code"), "deferred_cleanup_failed")
 
     def test_transfer_rejects_non_iso_source_without_touching_mount(self) -> None:
         for filename in ("Movie.2026.iso.partial", "Movie.2026.iso..partial", "Movie.2026.mkv"):

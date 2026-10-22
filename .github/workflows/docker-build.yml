@@ -3,17 +3,29 @@ name: Build and Push Docker Image
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: iso-packer-formal-release
+  cancel-in-progress: false
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout exact release tag
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Validate exact release tag against VERSION
+        run: python v2.0/iso-packer/scripts/check_release.py --release
 
       - name: Install test dependencies
         run: python -m pip install -r v2.0/requirements.txt
@@ -21,22 +33,34 @@ jobs:
       - name: Run backend tests and smoke test
         working-directory: v2.0/iso-packer
         run: |
-          python -m unittest -v test_app
+          python -m unittest discover -p 'test_*.py' -v
+          python -m unittest discover -s scripts -p 'test_*.py' -v
           python -B scripts/smoke_v2.py
-          python -B -m py_compile app.py core.py release_calendar_fetcher.py scripts/smoke_v2.py scripts/update_release_calendar.py
+          python -B -m py_compile app.py core.py worker_runtime.py upload_control.py release_calendar_fetcher.py scripts/smoke_v2.py scripts/update_release_calendar.py scripts/check_release.py scripts/acceptance_runtime.py
 
       - name: Check frontend JavaScript syntax
         working-directory: v2.0/iso-packer
-        run: for file in static/js/*.js; do node --check "$file"; done
+        run: |
+          for file in static/js/*.js; do node --check "$file"; done
+          node --test scripts/test_frontend_races.cjs scripts/test_upload_controls.cjs
+
+      - name: Validate deployment configuration
+        run: |
+          docker compose -f v2.0/docker-compose.yml config --quiet
+          bash -n v2.0/deploy.sh
 
   build:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout exact release tag
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Read validated release metadata
+        id: version
+        run: python v2.0/iso-packer/scripts/check_release.py --release --github-output "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -47,26 +71,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract version
-        id: version
-        run: |
-          IMAGE_VERSION="$(git describe --tags --abbrev=0 --match 'v*' | sed 's/^v//')"
-          test -n "$IMAGE_VERSION"
-          BUILD_VERSION="$(date +'%Y%m%d-%H%M%S')"
-          echo "IMAGE_VERSION=$IMAGE_VERSION" >> "$GITHUB_OUTPUT"
-          echo "BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Docker image tags: latest, v$IMAGE_VERSION, $IMAGE_VERSION, $BUILD_VERSION"
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: v2.0/Dockerfile
           push: true
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.IMAGE_VERSION }}
+            VCS_REF=${{ steps.version.outputs.REVISION }}
           tags: |
             ebichu/iso-packer:latest
             ebichu/iso-packer:v${{ steps.version.outputs.IMAGE_VERSION }}
             ebichu/iso-packer:${{ steps.version.outputs.IMAGE_VERSION }}
-            ebichu/iso-packer:${{ steps.version.outputs.BUILD_VERSION }}
+            ebichu/iso-packer:sha-${{ steps.version.outputs.SHORT_SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

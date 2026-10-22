@@ -14,6 +14,10 @@ DEFAULT_CONFIG = {
     "enabled": True,
     "cd2_transfer_enabled": True,
     "cd2_wait_upload_complete": True,
+    "cd2_upload_manual_paused": False,
+    "cd2_upload_manual_until": "",
+    "cd2_upload_schedule_enabled": False,
+    "cd2_upload_pause_windows": [],
     "cd2_mount_root": "/CloudNAS/CloudDrive",
     "cd2_target_dir": "/CloudNAS/CloudDrive/00-未整理/00-mkiso",
     "cd2_require_mount": True,
@@ -128,7 +132,12 @@ def sanitize_config(cfg: Dict) -> Dict:
 
 def safe_next_path(value: Optional[str]) -> str:
     path = str(value or "").strip()
-    if not path.startswith("/") or path.startswith("//"):
+    if (
+        not path.startswith("/")
+        or path.startswith("//")
+        or "\\" in path
+        or any(ord(char) < 32 or ord(char) == 127 for char in path)
+    ):
         return "/"
     return path
 
@@ -164,10 +173,10 @@ def parse_cd2_path_alias_lines(value: str) -> List[Dict[str, str]]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if "=" in line:
-            local, remote = line.split("=", 1)
-        elif "=>" in line:
+        if "=>" in line:
             local, remote = line.split("=>", 1)
+        elif "=" in line:
+            local, remote = line.split("=", 1)
         elif "," in line:
             local, remote = line.split(",", 1)
         else:
@@ -294,6 +303,7 @@ def status_label(status: str) -> str:
         "transferring": "正在移动到 CD2",
         "refreshing_cd2_dir": "正在刷新 CD2 目录",
         "waiting_cd2_upload": "监控 CloudDrive 上传队列",
+        "waiting_upload_window": "上传暂停，ISO 保留本机",
         "transfer_done": "已交给 CD2",
         "transfer_failed": "转移失败",
         "removed": "源已移除",
@@ -306,7 +316,7 @@ def badge_class(status: str) -> str:
         return "badge-green"
     if status in {"failed", "verify_failed", "transfer_failed"}:
         return "badge-red"
-    if status in {"running", "transferring", "refreshing_cd2_dir", "waiting_cd2_upload", "waiting_cd2_confirm", "waiting_cd2_pull"}:
+    if status in {"running", "transferring", "refreshing_cd2_dir", "waiting_cd2_upload", "waiting_upload_window", "waiting_cd2_confirm", "waiting_cd2_pull"}:
         return "badge-yellow"
     if status in {"skipped", "removed"}:
         return "badge-gray"

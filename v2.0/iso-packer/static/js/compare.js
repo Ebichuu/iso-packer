@@ -7,11 +7,14 @@
     depth: 1,
     query: "",
     loading: false,
+    scanVersion: 0,
+    scanQueued: false,
     resultFilter: "all",
     groups: [],
     summary: {},
     pickerPath: DIRECTORY_ROOT,
     pickerParent: null,
+    pickerRequest: 0,
   };
 
   function helper() {
@@ -240,7 +243,11 @@
   }
 
   async function scan() {
-    if (state.loading) return;
+    const requestVersion = ++state.scanVersion;
+    if (state.loading) {
+      state.scanQueued = true;
+      return;
+    }
     state.loading = true;
     const button = helper().qs("#compare-scan");
     if (button) {
@@ -255,6 +262,7 @@
     setText("#compare-summary", "扫描中...");
     try {
       const payload = await helper().fetchJson(`/api/compare?${params.toString()}`);
+      if (requestVersion !== state.scanVersion) return;
       if (payload.path) {
         state.path = payload.path;
         updatePathInput();
@@ -264,6 +272,7 @@
       renderFilteredResults();
       setText("#compare-current-path", payload.path || state.path || "--");
     } catch (error) {
+      if (requestVersion !== state.scanVersion) return;
       state.summary = {};
       state.groups = [];
       helper().notify(error.message || "扫描失败", true);
@@ -272,7 +281,10 @@
       setText("#compare-summary", error.message || "扫描失败");
     } finally {
       state.loading = false;
-      if (button) {
+      if (state.scanQueued) {
+        state.scanQueued = false;
+        scan();
+      } else if (button) {
         button.disabled = false;
         button.classList.remove("opacity-60");
       }
@@ -329,12 +341,17 @@
   }
 
   async function loadPickerDirectory(path) {
+    const requestId = ++state.pickerRequest;
+    const use = helper().qs("#compare-directory-use");
+    if (use) use.disabled = true;
     renderPickerMessage("正在读取目录。");
     try {
       const target = path || DIRECTORY_ROOT;
       const payload = await helper().fetchJson(`/api/directories?scope=media_compare&path=${encodeURIComponent(target)}`);
+      if (requestId !== state.pickerRequest) return;
       renderPickerEntries(payload);
     } catch (error) {
+      if (requestId !== state.pickerRequest) return;
       renderPickerMessage(error.message || "目录读取失败。");
       setText("#compare-directory-status", "读取失败");
     }
