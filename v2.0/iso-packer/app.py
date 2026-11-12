@@ -4993,12 +4993,15 @@ def source_guard_matches(source: Path, guard: Optional[Dict]) -> bool:
 
 def record_output_provenance(source: Path, target: Path, guard: Optional[Dict] = None) -> None:
     guard = guard or capture_source_guard(source)
+    disc_dir = find_disc_dir(source)
+    disc_root = str(disc_dir.parent.relative_to(source)) if disc_dir else None
     with lock:
         item = state.setdefault("items", {}).setdefault(str(source), {})
         item["pack_source_guard"] = copy.deepcopy(guard)
         item["output_provenance"] = {
             "source": str(source), "source_guard": copy.deepcopy(guard),
             "target": str(target), "target_identity": cleanup_file_identity(target),
+            "disc_root": disc_root,
         }
         save_state_locked()
 
@@ -5006,10 +5009,13 @@ def record_output_provenance(source: Path, target: Path, guard: Optional[Dict] =
 def output_provenance_matches(source: Path, target: Path) -> bool:
     with lock:
         provenance = copy.deepcopy((state.get("items", {}).get(str(source)) or {}).get("output_provenance") or {})
+    disc_dir = find_disc_dir(source)
+    disc_root = str(disc_dir.parent.relative_to(source)) if disc_dir else None
     return bool(provenance.get("source") == str(source)
                 and provenance.get("target") == str(target)
                 and provenance.get("target_identity")
                 and provenance["target_identity"] == cleanup_file_identity(target)
+                and (disc_root in (None, ".") or provenance.get("disc_root") == disc_root)
                 and source_guard_matches(source, provenance.get("source_guard")))
 
 
@@ -5023,26 +5029,32 @@ def has_partial_files(path: Path) -> bool:
     return False
 
 
-def find_disc_dir(path: Path) -> Optional[Path]:
+def find_disc_dirs(path: Path) -> list[Path]:
     if not path.is_dir():
-        return None
+        return []
     try:
         children = list(path.iterdir())
     except FileNotFoundError:
-        return None
+        return []
+    disc_dirs = []
     for child in children:
         if child.is_dir() and child.name.lower() in DISC_STRUCTURE_DIRS:
-            return child
+            disc_dirs.append(child)
     for child in children:
         if not child.is_dir():
             continue
         try:
             for grandchild in child.iterdir():
                 if grandchild.is_dir() and grandchild.name.lower() in DISC_STRUCTURE_DIRS:
-                    return grandchild
+                    disc_dirs.append(grandchild)
         except FileNotFoundError:
             continue
-    return None
+    return disc_dirs
+
+
+def find_disc_dir(path: Path) -> Optional[Path]:
+    disc_dirs = find_disc_dirs(path)
+    return disc_dirs[0] if disc_dirs else None
 
 
 def has_disc_structure(path: Path) -> bool:
@@ -5050,9 +5062,12 @@ def has_disc_structure(path: Path) -> bool:
 
 
 def disc_structure_ready(path: Path) -> tuple[bool, str]:
-    disc_dir = find_disc_dir(path)
-    if not disc_dir:
+    disc_dirs = find_disc_dirs(path)
+    if not disc_dirs:
         return False, "未检测到 BDMV/VIDEO_TS 原盘结构"
+    if len(disc_dirs) > 1:
+        return False, "检测到多个原盘目录，请将每张碟分别放入监控目录的独立影片文件夹"
+    disc_dir = disc_dirs[0]
     name = disc_dir.name.lower()
     if name == "bdmv":
         missing = []
@@ -5391,6 +5406,10 @@ def stop_worker_subprocesses() -> None:
 
 
 def run_iso(source: Path, target: Path, source_size: int) -> subprocess.CompletedProcess:
+    disc_dirs = find_disc_dirs(source)
+    if len(disc_dirs) > 1:
+        raise ValueError("检测到多个原盘目录，拒绝合并封装")
+    pack_root = disc_dirs[0].parent if disc_dirs else source
     volid = safe_volume_id(source.stem if source.is_file() else source.name)[:32].upper() or "DISC"
     # genisoimage supports UDF, which is important for Blu-ray folders and files over 4 GB.
     cmd = [
@@ -5401,14 +5420,14 @@ def run_iso(source: Path, target: Path, source_size: int) -> subprocess.Complete
         "-full-iso9660-filenames",
         "-V", volid,
         "-o", str(target),
-        str(source),
+        str(pack_root),
     ]
     stderr_path = target.with_suffix(target.suffix + ".stderr")
     stdout = ""
     timed_out_reason = ""
     cancelled = False
     with stderr_path.open("w+", encoding="utf-8", errors="ignore") as errfh:
-        proc = subprocess.Popen(cmd, cwd=str(source.parent), text=True, stdout=subprocess.DEVNULL, stderr=errfh)
+        proc = subprocess.Popen(cmd, cwd=str(pack_root.parent), text=True, stdout=subprocess.DEVNULL, stderr=errfh)
         if _worker_process_child:
             with _worker_subprocess_lock:
                 _worker_subprocesses.add(proc)
@@ -6139,6 +6158,13 @@ def _process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> No
         remove_non_iso_task(source)
         return
 
+    disc_dir = find_disc_dir(source)
+    pack_root = disc_dir.parent if disc_dir else source
+    pack_size = size_of(pack_root) if pack_root != source else source_size
+    if pack_root != source and pack_size <= 0:
+        mark_source_waiting(source, "receiving", "原盘目录为空或仍在接收中", source_size)
+        return
+
     target = iso_path_for(source, output_dir)
     source_guard = capture_source_guard(source)
     reuse_existing_iso = False
@@ -6146,7 +6172,7 @@ def _process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> No
         if not output_provenance_matches(source, target):
             record_output_conflict(source, target, f"同名 ISO 缺少与当前源目录一致的生成记录，已保留源目录和 ISO，请人工核对: {target}")
             return
-        existing_status, existing_reason = classify_existing_output_iso(target, source_size)
+        existing_status, existing_reason = classify_existing_output_iso(target, pack_size)
         if existing_status == "complete":
             reuse_existing_iso = True
             log(f"复用输出目录中已校验通过的 ISO，跳过重复封装: {target}")
@@ -6205,7 +6231,7 @@ def _process_item(source: Path, cfg: Dict, ignore_cd2_tasks: bool = False) -> No
         if not reuse_existing_iso:
             if partial.exists():
                 partial.unlink()
-            result = run_iso(source, partial, source_size)
+            result = run_iso(source, partial, pack_size)
             if result.returncode != 0:
                 error = result.stderr.strip()[-1000:] or "genisoimage 返回非 0"
                 log(f"生成失败 {source}: {error}")

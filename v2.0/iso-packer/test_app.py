@@ -805,6 +805,61 @@ class RevisionRecoveryTests(unittest.TestCase):
             self.assertEqual(result.returncode, -15)
             self.assertIn("超过", result.stderr)
 
+    def test_iso_uses_disc_parent_as_image_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "Movie"
+            nested_disc = source / "DISC1" / "BDMV"
+            nested_disc.mkdir(parents=True)
+            target = Path(temp_dir) / "Movie.iso.partial"
+            commands = []
+
+            class FinishedProcess:
+                returncode = 0
+
+                def poll(self):
+                    return self.returncode
+
+                def wait(self, timeout=None):
+                    return self.returncode
+
+            def fake_popen(cmd, **kwargs):
+                commands.append((cmd, kwargs))
+                return FinishedProcess()
+
+            with patch.object(app.subprocess, "Popen", side_effect=fake_popen):
+                result = app.run_iso(source, target, 1)
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(commands[0][0][-1], str(nested_disc.parent))
+            self.assertEqual(commands[0][1]["cwd"], str(source))
+            self.assertNotIn(str(source), commands[0][0][-1:])
+
+    def test_multiple_discs_are_not_packed_together(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "Movie"
+            for name in ("DISC1", "DISC2"):
+                (source / name / "BDMV").mkdir(parents=True)
+
+            self.assertTrue(app.should_pack_iso(source)[0])
+            ready, reason = app.disc_structure_ready(source)
+            self.assertFalse(ready)
+            self.assertIn("多个原盘目录", reason)
+            with self.assertRaisesRegex(ValueError, "拒绝合并封装"):
+                app.run_iso(source, Path(temp_dir) / "Movie.iso.partial", 1)
+
+    def test_legacy_nested_iso_cannot_be_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "Movie"
+            (source / "DISC1" / "BDMV").mkdir(parents=True)
+            (source / "DISC1" / "BDMV" / "index.bdmv").write_bytes(b"disc")
+            target = Path(temp_dir) / "Movie.iso"
+            target.write_bytes(b"legacy-iso")
+
+            app.record_output_provenance(source, target)
+            self.assertTrue(app.output_provenance_matches(source, target))
+            app.state["items"][str(source)]["output_provenance"].pop("disc_root")
+            self.assertFalse(app.output_provenance_matches(source, target))
+
     def test_legacy_upload_completion_retains_files_without_cleanup_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
